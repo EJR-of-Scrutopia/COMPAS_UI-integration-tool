@@ -1,0 +1,37 @@
+# Optional extra for the six bench/demo/*.py scripts that import
+# ananke_equilibrium: 01_solve_pavilion.py, 02_diagrams.py,
+# 03_load_cases.py, 04_masonry_blocks.py, 05_robot_placing.py, and
+# 08_your_vault.py. This repo deliberately does not carry
+# ananke_equilibrium (see docs/BENCH.md, "The bench and the plugin never
+# import each other's runtime"); it lives in the plugin repo,
+# COMPAS-workflow-GH_native, which has the installable pyproject.toml.
+#
+# Demo 05 (05_robot_placing.py) is the analytical inverse-kinematics prior
+# art the owner wants kept: closed-form IK against a UR5, no ROS, no
+# simulator. Installing this file is what makes it runnable outside the
+# plugin repo's own checkout.
+#
+# Distribution name confirmed from the plugin repo's own [project] table,
+# not assumed:
+#   git -C "../COMPAS Workflow" show origin/main:pyproject.toml
+#   -> name = "ananke-equilibrium"
+#
+# The extras named below (equilibrium, masonry, fab, plot, viz) are
+# exactly what bench/demo/_bootstrap.py itself prints as the fallback
+# install command when no .venv is found ("Create it, then install the
+# project:"), minus "dev" (build/pytest tooling, not needed to run a
+# demo, not this file's concern).
+#
+# CAVEAT, confirmed by attempting a real install (see the housekeeping
+# report for the exact commands and output): the git+ URL below is the
+# PUBLIC repo's origin/main. As of 2026-08-17, origin/main's pyproject.toml
+# has neither the "plot" nor "viz" extras named here, nor the
+# ananke_equilibrium.cli subpackage every one of these six demos imports
+# (from ananke_equilibrium.cli.main import solve_study, etc.). Both exist
+# only on the local, unpushed `plugin-sync` branch of the sibling checkout
+# "COMPAS Workflow". Until the owner pushes plugin-sync (or merges it to
+# main), this line will fail to resolve at the extras step, before it even
+# reaches PyPI for numpy/compas/etc. Installing from the plugin-sync
+# branch's own tree, instead of this URL, is what the verification below
+# actually used.
+ananke-equilibrium[equilibrium,masonry,fab,plot,viz] @ git+https://github.com/EJR-of-Scrutopia/COMPAS-workflow-GH_native.git

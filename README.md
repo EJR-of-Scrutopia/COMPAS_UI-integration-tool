@@ -69,6 +69,29 @@ open to start the studio.
 `docs/BENCH.md` is the fuller reference for the export format, the three
 Python environments, and the solver internals.
 
+## Optional: solver demos
+
+`bench/demo/` also carries nine older, clickable demo scripts predating
+the studio (`bench/demo/README.md` documents each one). Six of them,
+`01_solve_pavilion.py`, `02_diagrams.py`, `03_load_cases.py`,
+`04_masonry_blocks.py`, `05_robot_placing.py`, and `08_your_vault.py`,
+import `ananke_equilibrium`, the solver package this repo does not carry
+on purpose (the bench and the plugin never import each other's runtime;
+see `docs/BENCH.md`). To run them, install the optional extra:
+
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements-demos.txt
+```
+
+This is a separate, heavier environment than the studio's own `.venv`
+(numpy, scipy, compas, compas_fab, compas_dem, compas_viewer, and more),
+not something `Launch Bench Studio.cmd` installs for you.
+
+`05_robot_placing.py` is worth calling out on its own: it is analytical
+inverse-kinematics prior art the studio does not otherwise show, a UR5
+placing the tessellated vault's blocks with closed-form IK, exact and
+instant, no ROS and no simulator anywhere.
+
 ## Data folders
 
 `bench/studio/hdri/`, `bench/demo/upload from grasshopper/`, and
