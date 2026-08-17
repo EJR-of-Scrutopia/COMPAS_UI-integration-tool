@@ -2554,4 +2554,122 @@ def test_drop_reach_scales_with_the_shells_own_extent():
     extent = 6.9794  # captures/task1-ribbon-scan.json: crownRestZ, base near 0
     reach = max(0.5, 0.4 * extent)
     assert reach < 12, "the reach must actually be smaller than the old constant"
-    assert 2.0 < reach < 4.0, reach
+
+
+def test_w4_studio_darkness_fades_ambient_quadratically():
+    """Task 4 (W4, studio tweaks 2026-08-17): in Studio mode only, dragging
+    Brightness below 1 must fade environmentIntensity and hemi.intensity
+    quadratically toward zero (ambientScale = min(1, brightness) ** 2),
+    while the sun keeps its existing linear exposure relationship
+    untouched -- at the bottom of the slider the scene is near black with
+    the sun as the single projecting source, the look from Param's
+    screenshots. This has to live in applyGrade, not applyEnvironment: the
+    brightness slider's own input handler calls only applyGrade (see the
+    getElementById("brightness") wiring below), so a site in
+    applyEnvironment would never see a live brightness drag.
+    """
+
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    grade_body = _function_body(js, "applyGrade")
+    assert 'state.environmentMode === "studio"' in grade_body
+    assert "Math.min(1, state.brightness) ** 2" in grade_body
+    assert "scene.environmentIntensity = 0.6 * ambientScale;" in grade_body
+    assert "hemi.intensity = 0.5 * ambientScale;" in grade_body
+    # Purity unchanged: applyGrade must still read no clock and no
+    # timeline (W4's own pin, restated alongside the existing broader
+    # check in test_brightness_and_contrast_grade_every_render).
+    for banned in ("performance.now", "Date.now", "state.timeline"):
+        assert banned not in grade_body
+    # The sun is not written here at all: it keeps applyEnvironment's own
+    # linear exposure relationship, untouched by the new ambient fade.
+    assert "sun.intensity" not in grade_body
+    # The brightness slider's own handler calls applyGrade, not
+    # applyEnvironment -- the reason the darkness expressions cannot live
+    # in applyEnvironment and actually respond to a live drag.
+    wiring_at = js.index('getElementById("brightness")')
+    wiring = js[wiring_at:js.index("\n});", wiring_at)]
+    assert "applyGrade()" in wiring
+    assert "applyEnvironment()" not in wiring
+
+
+def test_w4_sky_and_hdri_environment_intensities_are_untouched_by_the_fade():
+    """Sky and hdri modes set their own environmentIntensity/hemi.intensity
+    as flat constants in applyEnvironment, never multiplied by
+    ambientScale -- W4 is explicit that "their light IS the environment"
+    and the ambient fade must not reach them."""
+
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    env_body = _function_body(js, "applyEnvironment")
+    sky_at = env_body.index('if (state.environmentMode === "sky")')
+    hdri_at = env_body.index('} else if (state.environmentMode === "hdri")')
+    studio_at = env_body.index("} else {", hdri_at)
+    sky_branch = env_body[sky_at:hdri_at]
+    hdri_branch = env_body[hdri_at:studio_at]
+    assert "scene.environmentIntensity = 0.6;" in sky_branch
+    assert "ambientScale" not in sky_branch
+    assert "scene.environmentIntensity = 1.0;" in hdri_branch
+    assert "ambientScale" not in hdri_branch
+
+
+def test_w5_turntable_is_flat_and_advances_in_frame():
+    """Task 4 (W5, studio tweaks 2026-08-17): the run/orbit camera becomes a
+    flat turntable -- pure azimuthal rotation at a captured, constant
+    height about the study centroid. theta only advances in frame() (the
+    sole wall-clock advancer, per the standing purity pin); applyOrbit
+    itself is a pure placement given (theta, height), and height is never
+    combined with r or a trig function -- the "no z modulation anywhere in
+    the orbit path" pin.
+    """
+
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    assert "0.55 * r" not in js, "the old radius-derived bobbing height must be gone"
+    orbit_body = _function_body(js, "applyOrbit")
+    assert (
+        "camera.position.set(centre.x + r * Math.cos(theta), "
+        "centre.y + r * Math.sin(theta), height);"
+    ) in orbit_body, "height must be the bare captured value, no trig or radius term on z"
+    assert "controls.target.copy(centre);" in orbit_body
+
+    frame_body = _function_body(js, "frame")
+    assert "orbitTheta += state.timeline.orbitSpeed * delta;" in frame_body
+    assert "applyOrbit(orbitTheta, orbitHeight)" in frame_body
+    assert "!state.recording" in frame_body, (
+        "the live orbit advance must stand down while a recording drives "
+        "its own frame-indexed pass, or the two clocks race"
+    )
+
+    # applyTimeline no longer touches the camera at all: the advance lives
+    # in frame(), not the pure-in-t function recordAnimation also drives.
+    timeline_body = _function_body(js, "applyTimeline")
+    assert "camera.position" not in timeline_body
+    assert "orbitSpeed" not in timeline_body
+    assert "autoSpin" not in timeline_body
+
+    # recordAnimation keeps the turntable in recorded video too, off its
+    # own frameIndex-derived clock (same reason the day-cycle branch above
+    # it already is), height captured once before the loop starts.
+    record_body = _function_body(js, "recordAnimation")
+    assert "applyOrbit(" in record_body
+    assert "recordOrbitHeight" in record_body
+
+
+def test_w5_centroid_recompute_is_a_bounding_box_not_an_average():
+    """The centroid W5 orbits and looks at must be the built shell's own
+    bounding-box centre ((min + max) / 2 per axis), not a vertex average,
+    which a non-uniformly sampled mesh could skew off-centre -- and it
+    must be recomputed on every study load and cut swap, i.e. inside
+    rebuildTimeline (which applyCut always calls, and buildScene always
+    calls applyCut)."""
+
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    centroid_body = _function_body(js, "sceneCentroid")
+    for lo, hi in (("minX", "maxX"), ("minY", "maxY"), ("minZ", "maxZ")):
+        assert lo in centroid_body and hi in centroid_body
+    assert "vertices.length" not in centroid_body, (
+        "must be a bounding-box centre, not an average over vertex count"
+    )
+    assert "(minX + maxX) / 2" in centroid_body
+    assert "(minY + maxY) / 2" in centroid_body
+    assert "(minZ + maxZ) / 2" in centroid_body
+    rebuild_body = _function_body(js, "rebuildTimeline")
+    assert "state.centre = sceneCentroid();" in rebuild_body

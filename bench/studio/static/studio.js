@@ -119,6 +119,29 @@ function applyGrade() {
   renderer.toneMappingExposure = state.exposureBase * state.brightness;
   gradePass.uniforms.brightness.value = 0;
   gradePass.uniforms.contrast.value = state.contrast;
+  // W4 (studio tweaks, 2026-08-17): in Studio mode only, the Brightness
+  // slider's lower half also fades the ambient sources -- environmentIntensity
+  // and the hemisphere light -- quadratically toward zero, on top of the
+  // renderer's own linear exposure fade above (which still reaches
+  // everything, the sun included: the sun's own intensity is left
+  // completely alone here, exactly today's existing brightness
+  // relationship). At brightness 0.3 the ambient sits at 0.3**2 = 0.09x
+  // its studio baseline: near black, the sun left as the single
+  // projecting source -- the look from Param's screenshots. This lives
+  // here rather than in applyEnvironment because the brightness slider's
+  // own input handler calls only applyGrade (see its addEventListener
+  // below); applyEnvironment never runs on a
+  // brightness drag, so the fade has to sit where brightness is actually
+  // read live. 0.6 and 0.5 restate applyEnvironment's own studio-mode
+  // baselines for environmentIntensity and hemi.intensity as absolute
+  // assignments (never a *=, so repeated calls cannot compound the
+  // scale); sky and hdri modes are untouched, guarded out entirely by the
+  // mode check below, exactly as W4 asks.
+  if (state.environmentMode === "studio") {
+    const ambientScale = state.brightness < 1 ? Math.min(1, state.brightness) ** 2 : 1;
+    scene.environmentIntensity = 0.6 * ambientScale;
+    hemi.intensity = 0.5 * ambientScale;
+  }
 }
 
 function renderView() {
@@ -2964,11 +2987,12 @@ function rebuildTimeline(preserve) {
   };
   state.centre = sceneCentroid();
   if (!preserve) {
-    // applyTimeline's autoSpin camera.lookAt(state.centre) and controls'
-    // damped approach toward controls.target must aim at the same point,
-    // or live orbit, drag-release and the recorded camera each settle on
-    // a different seam. Sync once here, outside applyTimeline, so
-    // applyTimeline stays a pure function of t. A same-export reload
+    // The turntable's own controls.target.copy(centre) (frame()'s orbit
+    // block, applyOrbit) and the live drag's damped approach toward
+    // controls.target must aim at the same point, or live orbit,
+    // drag-release and the recorded camera each settle on a different
+    // seam. Sync once here too, outside applyTimeline (which no longer
+    // touches the camera at all -- see W5, frame()). A same-export reload
     // skips it: the centre is the same point, and the camera is wherever
     // the user put it.
     controls.target.copy(state.centre);
@@ -3330,10 +3354,24 @@ function rebuildAppearance() {
 }
 
 function sceneCentroid() {
+  // W5 (studio tweaks, 2026-08-17): the turntable's orbit centre and
+  // look-at target -- the built shell's own bounding-box centre, not a
+  // vertex average (a non-uniformly sampled mesh would skew an average
+  // off-centre), so the pavilion sits centred in the ring regardless of
+  // where the export's own origin happens to sit. This is the recompute
+  // site: called once, from rebuildTimeline ("state.centre =
+  // sceneCentroid();" a few lines below), which applyCut always calls and
+  // buildScene always calls applyCut from -- so every study load and
+  // every cut swap lands here.
   const vertices = state.bundle.analysis_mesh.vertices;
-  let x = 0, y = 0;
-  for (const v of vertices) { x += v[0]; y += v[1]; }
-  return new THREE.Vector3(x / vertices.length, y / vertices.length, 2);
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity,
+      minZ = Infinity, maxZ = -Infinity;
+  for (const v of vertices) {
+    if (v[0] < minX) minX = v[0]; if (v[0] > maxX) maxX = v[0];
+    if (v[1] < minY) minY = v[1]; if (v[1] > maxY) maxY = v[1];
+    if (v[2] < minZ) minZ = v[2]; if (v[2] > maxZ) maxZ = v[2];
+  }
+  return new THREE.Vector3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2);
 }
 
 // The opening move: the net rises from the flat form diagram into its
@@ -3650,13 +3688,22 @@ function applyShowMode() {
 
 function applyTimeline(t) {
   applySceneAtTime(t);
-  if (state.timeline.autoSpin && !state.userDragging) {
-    const centre = state.centre;
-    const angle = state.timeline.orbitSpeed * t;
-    const r = state.timeline.orbitDistance;
-    camera.position.set(centre.x + r * Math.cos(angle), centre.y + r * Math.sin(angle), 0.55 * r);
-    camera.lookAt(centre);
-  }
+}
+
+// W5 (studio tweaks, 2026-08-17): the turntable's own pure placement --
+// given an angle and a height, put the camera on the ring around the
+// study centroid and aim the controls at it. Pure in its two arguments
+// plus the live state.centre / state.timeline.orbitDistance it reads (r
+// tracks the orbit-distance slider live, so a drag mid-orbit widens or
+// tightens the ring without a jump in height); no clock, and no z
+// modulation at all -- height is whatever the caller already decided
+// (frame()'s captured orbit-start elevation, or the recording's own),
+// never derived from theta or r, which is the whole "flat" contract.
+function applyOrbit(theta, height) {
+  const centre = state.centre;
+  const r = state.timeline.orbitDistance;
+  camera.position.set(centre.x + r * Math.cos(theta), centre.y + r * Math.sin(theta), height);
+  controls.target.copy(centre);
 }
 
 // ---------- record mode ----------
@@ -3685,6 +3732,14 @@ async function recordAnimation() {
   camera.aspect = 1920 / 1080;
   camera.updateProjectionMatrix();
   state.recording = true;   // resize() must skip while this is set
+  // W5: the recording drives the turntable off its own frame-indexed
+  // clock, exactly like the day-cycle branch below and for the same
+  // reason (F2) -- frame()'s own orbit advance stands down for the
+  // duration via the state.recording guard, so this loop is the only
+  // writer of the camera while it runs. Height is captured once, from
+  // the live camera's own elevation the instant recording starts, the
+  // same "orbit start" contract frame() uses.
+  const recordOrbitHeight = state.timeline.autoSpin ? camera.position.z : null;
   try {
     for (let frameIndex = 0; frameIndex < total; frameIndex++) {
       if (state.dayCycle.record) {
@@ -3696,6 +3751,9 @@ async function recordAnimation() {
         if (state.environmentMode === "sky" && frameIndex % 30 === 0) regenerateEnvironment();
       }
       applyTimeline(frameIndex * speed / fps);
+      if (state.timeline.autoSpin) {
+        applyOrbit(state.timeline.orbitSpeed * (frameIndex * speed / fps), recordOrbitHeight);
+      }
       renderView();
       const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
       const response = await fetch(
@@ -3815,6 +3873,9 @@ document.getElementById("inflate-seconds").addEventListener("input", (e) => {
 let lastTime = performance.now();
 let playingFrameCount = 0;
 let dayCycleFrames = 0;
+let orbitTheta = 0;
+let orbitHeight = null;
+let orbitWasActive = false;
 function frame(now) {
   const delta = Math.min(0.1, (now - lastTime) / 1000);
   lastTime = now;
@@ -3855,6 +3916,25 @@ function frame(now) {
   if (state.timeline && document.activeElement !== scrubber) {
     scrubber.value = Math.round(1000 * state.timeline.t / timelineDuration());
   }
+  // W5 (studio tweaks, 2026-08-17): the turntable -- pure azimuthal orbit
+  // at constant height and radius about the study centroid. theta only
+  // advances here, off frame()'s wall clock, the sole advancer;
+  // recordAnimation drives its own deterministic pass instead (its own
+  // frameIndex-based theta), for the same reason the day cycle's F2
+  // comment gives above: two clocks racing the same state would make a
+  // recording non-deterministic, which is also why this stands down while
+  // state.recording is set. height is captured once, the instant the
+  // orbit (re)starts -- boot, or the frame right after a drag release --
+  // from wherever the camera already sits, so the user's own framing is
+  // what the turntable holds, never a formula in r.
+  const orbitActive = state.timeline && state.timeline.autoSpin &&
+    !state.userDragging && !state.recording;
+  if (orbitActive) {
+    if (!orbitWasActive) orbitHeight = camera.position.z;
+    orbitTheta += state.timeline.orbitSpeed * delta;
+    applyOrbit(orbitTheta, orbitHeight);
+  }
+  orbitWasActive = orbitActive;
   controls.update();
   renderView();
   requestAnimationFrame(frame);
