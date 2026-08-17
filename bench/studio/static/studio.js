@@ -3740,6 +3740,13 @@ async function recordAnimation() {
   // the live camera's own elevation the instant recording starts, the
   // same "orbit start" contract frame() uses.
   const recordOrbitHeight = state.timeline.autoSpin ? camera.position.z : null;
+  // Reconciled in the finally block below, into the live orbitTheta, once
+  // the recording ends: frame()'s own advance stood down for the whole
+  // recording (the state.recording guard), so the live orbitTheta never
+  // moved and would otherwise leave the turntable's very next live frame
+  // snapping back to a stale pre-recording azimuth instead of continuing
+  // from wherever the recording's own clock left the camera.
+  let recordOrbitTheta = 0;
   try {
     for (let frameIndex = 0; frameIndex < total; frameIndex++) {
       if (state.dayCycle.record) {
@@ -3752,7 +3759,8 @@ async function recordAnimation() {
       }
       applyTimeline(frameIndex * speed / fps);
       if (state.timeline.autoSpin) {
-        applyOrbit(state.timeline.orbitSpeed * (frameIndex * speed / fps), recordOrbitHeight);
+        recordOrbitTheta = state.timeline.orbitSpeed * (frameIndex * speed / fps);
+        applyOrbit(recordOrbitTheta, recordOrbitHeight);
       }
       renderView();
       const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
@@ -3786,6 +3794,14 @@ async function recordAnimation() {
     state.recording = false;
     state.timeline.playing = wasPlaying;
     state.dayCycle.playing = wasDayCyclePlaying;
+    // W5: hand the live turntable the recording's own final azimuth, or
+    // frame()'s next active tick resumes orbitTheta from wherever it was
+    // frozen when the recording started -- a visible snap. Height needs
+    // no equivalent write: it is recaptured fresh on the next "orbit
+    // start" transition frame() already detects (orbitWasActive), and
+    // that recapture reads camera.position.z, which the recording loop
+    // above has already left at recordOrbitHeight.
+    if (state.timeline.autoSpin) orbitTheta = recordOrbitTheta;
   }
 }
 document.getElementById("record-button").addEventListener("click", recordAnimation);

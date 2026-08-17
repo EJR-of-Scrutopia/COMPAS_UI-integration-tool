@@ -2554,6 +2554,7 @@ def test_drop_reach_scales_with_the_shells_own_extent():
     extent = 6.9794  # captures/task1-ribbon-scan.json: crownRestZ, base near 0
     reach = max(0.5, 0.4 * extent)
     assert reach < 12, "the reach must actually be smaller than the old constant"
+    assert 2.0 < reach < 4.0, reach
 
 
 def test_w4_studio_darkness_fades_ambient_quadratically():
@@ -2651,6 +2652,24 @@ def test_w5_turntable_is_flat_and_advances_in_frame():
     record_body = _function_body(js, "recordAnimation")
     assert "applyOrbit(" in record_body
     assert "recordOrbitHeight" in record_body
+
+    # A recording freezes the live orbitTheta for its whole duration (the
+    # !state.recording guard in frame() above), so it must hand its own
+    # final azimuth back once it finishes, or the live turntable's very
+    # next active tick snaps from the stale pre-recording angle to
+    # wherever the recording actually left the camera.
+    assert "recordOrbitTheta" in record_body
+    assert "if (state.timeline.autoSpin) orbitTheta = recordOrbitTheta;" in record_body, (
+        "the recording must reconcile the live orbitTheta with its own "
+        "final theta when it finishes, or the turntable snaps"
+    )
+    # The reconciliation must run even if the recording itself threw (a
+    # failed upload, a failed stitch): it belongs after state.recording is
+    # cleared, inside the finally block, not inside the try's happy path.
+    finally_at = record_body.index("} finally {")
+    recording_false_at = record_body.index("state.recording = false;", finally_at)
+    reconcile_at = record_body.index("orbitTheta = recordOrbitTheta;", finally_at)
+    assert finally_at < recording_false_at < reconcile_at
 
 
 def test_w5_centroid_recompute_is_a_bounding_box_not_an_average():
