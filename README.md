@@ -26,15 +26,39 @@ On first run it:
 2. Installs `requirements.txt` into it, with the install output visible so
    you can see it working (and see clearly if something goes wrong).
 3. Picks a free port starting at 8600.
-4. Starts the local server and opens it in your browser.
+4. Starts the local server hidden (no console window of its own) and opens
+   it in your browser. The launcher's own window prints where the log is,
+   then closes; the server keeps running.
 
-Every later run skips straight to step 3: the venv persists, and `pip
-install` is quick when nothing changed. Closing the server's console window
-stops Bench Studio; nothing else on your machine is affected.
+Every later run skips straight to step 3, or, if Bench Studio is already
+running, straight to opening the browser on it. The venv persists, and `pip
+install` is quick when nothing changed. See "Logs and stopping" below for
+how to check on it or shut it down.
+
+## Logs and stopping
+
+The server runs hidden, not in a console window, so there is nothing to
+close to stop it. Instead:
+
+- **Logs** live at `%LOCALAPPDATA%\BenchStudio\logs`, one file per run
+  (`server-YYYYMMDD-HHmmss.log` for stdout, plus a matching `.err.log` for
+  stderr). Only the newest 10 runs are kept; each launch deletes older
+  ones. `Launch Bench Studio.cmd` prints the current run's log path before
+  it closes.
+- **Stopping**: double-click **`Stop Bench Studio.cmd`**. It reads the PID
+  `Launch Bench Studio.cmd` wrote to `%LOCALAPPDATA%\BenchStudio\server.pid`,
+  checks it is still a `python` process before touching it, stops it, and
+  removes the pidfile.
+- **Day to day**, the on-screen event log inside the studio itself (not
+  the log files above) is what you actually watch while using it; the
+  files on disk are for when something goes wrong and you need to see
+  what the server printed.
 
 ## Updating
 
-Double-click **`Update.cmd`**. It downloads this repository's latest
+Double-click **`Update.cmd`**. If Bench Studio is running, it stops it
+first (same as `Stop Bench Studio.cmd`), since `launcher/` is one of the
+things about to be replaced. Then it downloads this repository's latest
 `main` as a zip and replaces the app files (`bench/`, `src/`, `launcher/`,
 `requirements*.txt`, `README.md`) with the new versions. It prints what it
 changed as it goes.

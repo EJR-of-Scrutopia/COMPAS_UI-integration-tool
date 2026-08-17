@@ -14,6 +14,20 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $zipUrl = "https://github.com/EJR-of-Scrutopia/COMPAS_UI-integration-tool/archive/refs/heads/main.zip"
 
+# launcher/ itself is one of the things this update replaces below, so a
+# server started from the version currently on disk should not still be
+# running once that happens. Run stop.ps1 as its own powershell.exe
+# process (not sourced in-process): stop.ps1 calls `exit`, which would
+# otherwise tear down this script's own session too, and -NoPause skips
+# the standalone script's "press enter" prompt, which nothing here would
+# ever answer.
+$pidFile = Join-Path (Join-Path $env:LOCALAPPDATA "BenchStudio") "server.pid"
+if (Test-Path $pidFile) {
+    Write-Host "A Bench Studio server is running; stopping it before updating..."
+    & powershell -NoProfile -ExecutionPolicy Bypass `
+        -File (Join-Path $PSScriptRoot "stop.ps1") -NoPause
+}
+
 $work = Join-Path $env:TEMP ("BenchStudioUpdate-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $work | Out-Null
 $zipPath = Join-Path $work "main.zip"
