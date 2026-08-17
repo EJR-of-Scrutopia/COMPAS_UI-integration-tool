@@ -214,12 +214,42 @@ export function creaseNormals(positions, creaseDegrees = 40) {
   return normals;
 }
 
+// W3: an IEEE 754 binary16 (half float) bit pattern decoded to a JS
+// double. Pure integer/float maths, no three.js: this exists so
+// estimateSunFromEquirect can read a HalfFloatType HDRI (RGBELoader's
+// fallback for equirects too big to decode as Float32 -- a 16K equirect
+// at Float32 RGBA is around 2 GB, past the browser's ArrayBuffer
+// ceiling; see loadHdri's retry in studio.js) without pulling three.js
+// into this module. Zero and the subnormals share the 2^-24 step (no
+// implicit leading 1 below the smallest normal exponent); Infinity and
+// NaN round-trip through their usual exponent-all-ones bit patterns.
+// RGBELoader's own half path (RGBEByteToRGBHalf) clamps every channel to
+// 65504 before encoding, so the studio never actually feeds this
+// Infinity or NaN -- decoding them correctly anyway is just what a
+// faithful IEEE 754 decoder does, not a path the studio exercises.
+export function halfToFloat(h) {
+  const sign = (h & 0x8000) ? -1 : 1;
+  const exponent = (h >> 10) & 0x1f;
+  const fraction = h & 0x3ff;
+  if (exponent === 0) return sign * fraction * Math.pow(2, -24);
+  if (exponent === 0x1f) return fraction === 0 ? sign * Infinity : NaN;
+  return sign * (1 + fraction / 1024) * Math.pow(2, exponent - 15);
+}
+
 // E3: find the sun in an equirectangular HDR so shadows agree with the
 // picture by default. Pure array maths: pixel data in, angles and an
 // intensity out, no three.js, no DOM, so node can pin it. Convention:
 // u spans azimuth 0..360, v spans elevation with row 0 at the zenith
 // (RGBELoader keeps Radiance file order, whose scanlines run top first).
+//
+// W3: data may be a Uint16Array (RGBELoader's HalfFloatType output, the
+// half-precision fallback for equirects too big to decode as Float32) as
+// well as the usual Float32Array. Detecting Uint16Array directly, rather
+// than threading a separate flag through every caller, means loadHdri
+// can hand this whichever typed array the loader actually produced
+// without knowing in advance which retry attempt succeeded.
 export function estimateSunFromEquirect(data, width, height, stride = 4) {
+  const halfFloat = data instanceof Uint16Array;
   const step = Math.max(1, Math.floor(width / 256));
   let total = 0;
   let count = 0;
@@ -229,7 +259,10 @@ export function estimateSunFromEquirect(data, width, height, stride = 4) {
   for (let y = 0; y < height; y += step) {
     for (let x = 0; x < width; x += step) {
       const i = (y * width + x) * stride;
-      const lum = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+      const r = halfFloat ? halfToFloat(data[i]) : data[i];
+      const g = halfFloat ? halfToFloat(data[i + 1]) : data[i + 1];
+      const b = halfFloat ? halfToFloat(data[i + 2]) : data[i + 2];
+      const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
       total += lum;
       count += 1;
       if (lum > best) { best = lum; bestX = x; bestY = y; }

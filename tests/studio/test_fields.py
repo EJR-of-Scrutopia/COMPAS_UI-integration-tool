@@ -193,6 +193,107 @@ def test_the_sun_estimator_reads_a_synthetic_equirect(tmp_path):
     assert "ok" in result.stdout
 
 
+HALF_CHECK = textwrap.dedent("""
+    import { halfToFloat } from %FIELDS%;
+
+    function expect(condition, message) {
+      if (!condition) { console.error("FAIL: " + message); process.exit(1); }
+    }
+    function near(a, b, tol) { return Math.abs(a - b) < (tol === undefined ? 1e-9 : tol); }
+
+    // W3's own hand values (task-3-brief.md): the two ordinary normals,
+    // the largest finite half, a subnormal and zero. Every operand here
+    // is a fraction or a power of two, so a correct decoder lands on
+    // these exactly -- no tolerance needed for the four "===" checks.
+    expect(halfToFloat(0x3C00) === 1, "0x3C00 is exactly 1");
+    expect(halfToFloat(0xC000) === -2, "0xC000 is exactly -2");
+    expect(halfToFloat(0x7BFF) === 65504, "0x7BFF is the largest finite half, 65504");
+    expect(halfToFloat(0x0000) === 0, "0x0000 is +0");
+    expect(Object.is(halfToFloat(0x8000), -0), "0x8000 is -0, distinct from +0 but still near it");
+
+    // Subnormals: exponent field 0, fraction != 0, no implicit leading 1.
+    // Math.pow(2, k) for an integer k is exact in a double, so these are
+    // independent checks of the decoder's subnormal branch, not a
+    // restatement of its own formula.
+    expect(near(halfToFloat(0x0001), Math.pow(2, -24), 1e-30), "smallest positive subnormal, 2^-24");
+    expect(near(halfToFloat(0x0200), 512 * Math.pow(2, -24), 1e-30), "a mid-range subnormal");
+    expect(near(halfToFloat(0x8001), -Math.pow(2, -24), 1e-30), "subnormals carry their sign bit too");
+
+    // Infinity and NaN: exponent field all-ones (0x1f). RGBELoader itself
+    // never emits either (RGBEByteToRGBHalf clamps every channel to
+    // 65504), but a pure IEEE 754 decoder should still round-trip them
+    // rather than silently produce a finite garbage value.
+    expect(halfToFloat(0x7C00) === Infinity, "0x7C00 is +Infinity");
+    expect(halfToFloat(0xFC00) === -Infinity, "0xFC00 is -Infinity");
+    expect(Number.isNaN(halfToFloat(0x7E00)), "0x7E00 (exponent all-ones, fraction set) is NaN");
+    expect(Number.isNaN(halfToFloat(0xFE00)), "the negative-signed NaN pattern is still NaN");
+
+    console.log("ok");
+""")
+
+
+@needs_node
+def test_half_to_float_matches_ieee_754_hand_values(tmp_path):
+    script = tmp_path / "half_check.mjs"
+    script.write_text(HALF_CHECK.replace("%FIELDS%", json.dumps(FIELDS.as_uri())), encoding="utf-8")
+    result = subprocess.run(["node", str(script)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "ok" in result.stdout
+
+
+HALF_SUN_CHECK = textwrap.dedent("""
+    import { estimateSunFromEquirect } from %FIELDS%;
+
+    function expect(condition, message) {
+      if (!condition) { console.error("FAIL: " + message); process.exit(1); }
+    }
+    function near(a, b, tol) { return Math.abs(a - b) < tol; }
+
+    // The same 64 x 32 map as the float32 estimator test, but the fill
+    // and hot-texel values are ones IEEE 754 half precision stores
+    // exactly (0.5 = 2^-1, 50 is an integer well inside the 11-bit exact
+    // range), so a correct half-float path lands on the identical
+    // estimate, not just a close one. estimateSunFromEquirect is expected
+    // to detect a Uint16Array input and decode it through halfToFloat
+    // (RGBELoader's HalfFloatType output is a Uint16Array), the same
+    // detection loadHdri's retry relies on.
+    const width = 64, height = 32;
+    const HALF_DIM = 0x3800; // 0.5
+    const HALF_HOT = 0x5240; // 50
+    const hot = (8 * width + 16) * 4;
+
+    const floatData = new Float32Array(width * height * 4).fill(0.5);
+    floatData[hot] = floatData[hot + 1] = floatData[hot + 2] = 50;
+
+    const halfData = new Uint16Array(width * height * 4).fill(HALF_DIM);
+    halfData[hot] = halfData[hot + 1] = halfData[hot + 2] = HALF_HOT;
+
+    const fromFloat = estimateSunFromEquirect(floatData, width, height);
+    const fromHalf = estimateSunFromEquirect(halfData, width, height);
+    expect(near(fromHalf.azimuthDeg, fromFloat.azimuthDeg, 1e-9), "half decode finds the same azimuth as float32");
+    expect(near(fromHalf.elevationDeg, fromFloat.elevationDeg, 1e-9), "half decode finds the same elevation as float32");
+    expect(near(fromHalf.intensity, fromFloat.intensity, 1e-9), "half decode reads the same intensity as float32");
+
+    // A uniform half-float map floors to the same soft-light intensity as
+    // its float32 twin: the fill magnitude cancels out of the
+    // peak-to-mean ratio, so this holds for any positive fill value.
+    const flatHalf = new Uint16Array(width * height * 4).fill(HALF_DIM);
+    const overcastHalf = estimateSunFromEquirect(flatHalf, width, height);
+    expect(near(overcastHalf.intensity, 0.6, 1e-9), "a uniform half-float map floors the same as float32");
+
+    console.log("ok");
+""")
+
+
+@needs_node
+def test_the_sun_estimator_reads_half_float_pixels_the_same_as_float32(tmp_path):
+    script = tmp_path / "half_sun_check.mjs"
+    script.write_text(HALF_SUN_CHECK.replace("%FIELDS%", json.dumps(FIELDS.as_uri())), encoding="utf-8")
+    result = subprocess.run(["node", str(script)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "ok" in result.stdout
+
+
 def test_fields_module_exists_and_is_pure():
     js = FIELDS.read_text(encoding="utf-8")
     assert 'from "three"' not in js and "THREE." not in js, "fields.js must not depend on three.js"
@@ -200,5 +301,5 @@ def test_fields_module_exists_and_is_pure():
     for name in ("segmentUVOffset", "boxUVs", "stressValueOf",
                  "smoothStressField", "interpolateScalarField",
                  "sampleScalar", "sampleVector", "creaseNormals",
-                 "estimateSunFromEquirect"):
+                 "estimateSunFromEquirect", "halfToFloat"):
         assert "export function {}(".format(name) in js, "fields.js lost {}".format(name)

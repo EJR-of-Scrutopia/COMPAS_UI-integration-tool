@@ -1311,7 +1311,7 @@ def test_hdri_mode_loads_estimates_and_persists():
     assert "HDRLoader" in js and "three/addons/loaders/HDRLoader.js" in js
     body = _function_body(js, "loadHdri")
     assert "setDataType(THREE.FloatType)" in body, (
-        "the estimator needs Float32 pixels, not half floats")
+        "Float32 is tried first: full precision when the image fits")
     assert "EquirectangularReflectionMapping" in body
     assert "estimateSunFromEquirect" in body
     assert 'localStorage.setItem("bench-studio-hdri"' in body
@@ -1324,6 +1324,34 @@ def test_hdri_mode_loads_estimates_and_persists():
     assert "no HDRIs installed" in refresh
     # The upload path PUTs to the guarded route and then adopts the file.
     assert '"/api/uploads/hdri/"' in js
+
+
+def test_hdri_big_files_retry_at_half_float_then_banner_the_ceiling():
+    # W3: a 16K equirect at Float32 RGBA is around 2 GB, past the
+    # browser's ArrayBuffer ceiling (RangeError: "Array buffer allocation
+    # failed"). loadHdri must try FloatType first, retry HalfFloatType on
+    # that specific failure, and only banner when the retry ALSO
+    # overflows -- never pre-choose by a size heuristic, and never treat
+    # an unrelated error (bad file, network) as the allocation case.
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    body = _function_body(js, "loadHdri")
+    assert "setDataType(THREE.HalfFloatType)" in body, (
+        "a second, half-float attempt must follow the float one")
+    assert body.count("instanceof RangeError") >= 2, (
+        "both the float and the half-float catch must gate on RangeError specifically, "
+        "not swallow every failure into a silent retry"
+    )
+    assert "hdriHeaderDimensions" in body, (
+        "the double-failure banner names the image's true size, read from the "
+        "header, not the size the failed decode never reached"
+    )
+    assert "image too large:" in body and "practical ceiling is around" in body
+    assert "HDRI_HALF_FLOAT_PIXEL_CEILING" in js
+    header_fn = _function_body(js, "hdriHeaderDimensions")
+    assert "Range" in header_fn and "getReader" in header_fn and ".cancel()" in header_fn, (
+        "reading the header must never require pulling a whole failed-to-decode "
+        "file across the wire a third time"
+    )
 
 
 def test_hdri_failures_reach_the_banner():

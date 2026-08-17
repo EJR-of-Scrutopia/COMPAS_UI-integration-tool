@@ -96,6 +96,14 @@ scene.environment = studioEnvironment;
 let environmentTarget = null; // the disposable PMREM target behind sky/hdri modes
 let hdriDome = null; // the disposable GroundedSkybox group, hdri mode + projected only (Task 2)
 
+// W3: the pixel count where even a HalfFloatType decode would hit the
+// same allocation ceiling that makes the FloatType attempt fail (8 bytes
+// per equirect pixel: 4 channels x Uint16, against the roughly 2 GB
+// ArrayBuffer ceiling a 16K Float32 RGBA equirect already sits past).
+// Named only in the failure banner loadHdri shows when both attempts
+// overflow -- it does not gate which type is tried first.
+const HDRI_HALF_FLOAT_PIXEL_CEILING = Math.pow(2, 31) / 8;
+
 // R2: render, tone-map to display space, then grade. Contrast pivots
 // around mid grey, which is only meaningful AFTER tone mapping, so the
 // grade pass sits last, on the OutputPass's sRGB result. samples: 4
@@ -374,12 +382,68 @@ async function refreshHdriList(selectName) {
   return files;
 }
 
+async function hdriHeaderDimensions(name) {
+  // The RGBE/Radiance ASCII preamble carries a "-Y height +X width" line
+  // in its first few hundred bytes, long before the pixel data that can
+  // run to gigabytes for a 16K file. Reading one stream chunk is enough
+  // to find it; cancelling the reader after that chunk bounds the read
+  // even if the server does not honour the Range header, so naming the
+  // image's size in the failure banner below never means pulling an
+  // already-too-big file across the wire a third time.
+  const response = await fetch("/api/hdri/" + encodeURIComponent(name),
+    { headers: { Range: "bytes=0-2047" } });
+  const reader = response.body.getReader();
+  const { value } = await reader.read();
+  reader.cancel();
+  const text = new TextDecoder("latin1").decode(value || new Uint8Array());
+  const match = text.match(/-Y\s+(\d+)\s+\+X\s+(\d+)/);
+  return match ? { width: Number(match[2]), height: Number(match[1]) } : null;
+}
+
 async function loadHdri(name) {
   const status = document.getElementById("hdri-status");
   status.textContent = "loading " + name;
   try {
-    const loader = new HDRLoader().setDataType(THREE.FloatType);
-    const texture = await loader.loadAsync("/api/hdri/" + encodeURIComponent(name));
+    let texture;
+    let halfFloat = false;
+    try {
+      const loader = new HDRLoader().setDataType(THREE.FloatType);
+      texture = await loader.loadAsync("/api/hdri/" + encodeURIComponent(name));
+    } catch (floatError) {
+      // A 16K equirect at Float32 RGBA is around 2 GB, past some
+      // browsers' ArrayBuffer allocation ceiling (RangeError: "Array
+      // buffer allocation failed", the message Param's own session
+      // showed). Anything else -- a bad file, a network failure -- is
+      // not this case, so it falls through to the outer catch unchanged.
+      if (!(floatError instanceof RangeError)) throw floatError;
+      logStudio("HDRI " + name + " overflowed float32 (" + floatError.message + "), retrying half float");
+      try {
+        // Half precision halves the bytes per channel, which clears the
+        // ceiling that just failed. Three's PMREMGenerator and both
+        // equirect backdrop paths (GroundedSkybox and scene.background)
+        // accept a HalfFloatType texture the same as a FloatType one
+        // (verified against a real 16K fixture in the studio probe --
+        // see task-3-report.md).
+        const loader = new HDRLoader().setDataType(THREE.HalfFloatType);
+        texture = await loader.loadAsync("/api/hdri/" + encodeURIComponent(name));
+        halfFloat = true;
+      } catch (halfError) {
+        if (!(halfError instanceof RangeError)) throw halfError;
+        // Even the half-float retry overflowed: genuinely too big. Name
+        // the image's true size (a header-only read, not the failed
+        // decode) and the ceiling that a HalfFloatType decode can reach,
+        // so the banner is a fact, not just "try something smaller".
+        const dims = await hdriHeaderDimensions(name).catch(() => null);
+        const megapixels = dims ? Math.round((dims.width * dims.height) / 1e6) : null;
+        const ceilingMegapixels = Math.round(HDRI_HALF_FLOAT_PIXEL_CEILING / 1e6);
+        status.textContent = "";
+        showBanner(
+          "image too large: " + (megapixels !== null ? megapixels + " MP" : "size unknown")
+          + ", the practical ceiling is around " + ceilingMegapixels + " MP", "error");
+        regenerateEnvironment();
+        return;
+      }
+    }
     texture.mapping = THREE.EquirectangularReflectionMapping;
     if (state.hdriTexture) state.hdriTexture.dispose();
     state.hdriTexture = texture;
@@ -393,7 +457,9 @@ async function loadHdri(name) {
     // azimuth, not the negated image azimuth. state.hdriRotation spins the
     // dome/background on top of that, so it folds into the same sum; the
     // raw estimate is kept so the rotation slider can redo this without
-    // re-scanning pixels (Task 2).
+    // re-scanning pixels (Task 2). image.data is a Uint16Array when
+    // halfFloat is true; estimateSunFromEquirect detects that itself and
+    // decodes through halfToFloat, so nothing here needs to branch on it.
     state.hdriEstimateAzimuth = estimate.azimuthDeg;
     const azimuth = ((180 - estimate.azimuthDeg + state.hdriRotation) % 360 + 360) % 360;
     document.getElementById("sun-azimuth").value = Math.round(azimuth);
@@ -406,7 +472,7 @@ async function loadHdri(name) {
     status.textContent = "";
     applyEnvironment();
     regenerateEnvironment();
-    logStudio("loaded hdri " + name);
+    logStudio("loaded hdri " + name + (halfFloat ? " (half float)" : ""));
   } catch (error) {
     // #hdri-status keeps progress text only; the failure itself goes to
     // the banner, named, so it cannot be missed off-screen or overwritten
