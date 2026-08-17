@@ -474,6 +474,26 @@ def test_clamped_points_are_disclosed_in_metres_not_only_counted():
     assert 0.0 < report["clamped_median_m"] <= report["clamped_max_m"]
 
 
+def test_fit_seat_plane_is_none_on_a_genuinely_degenerate_line():
+    """Minor, fix round 1 on K2 (2026-08-17): four collinear points have a
+    diagonal covariance matrix with TWO tied zero-variance axes (y and z
+    both carry no spread at all) -- a genuinely degenerate 1D spread with
+    no single least-varying direction, matching fit_seat_plane's own
+    documented "None on a genuinely degenerate spread" contract. Before
+    this fix, the diagonal fast path picked whichever tied axis Python's
+    min() happened to see first and shipped that arbitrary plane instead
+    of None -- this exercises exactly the code path the review's minor
+    point named, not the general eigensolve branch
+    (test_fit_seat_plane_recovers_a_known_tilted_plane already covers
+    that one, and a tied pair there is naturally caught by every pairwise
+    row cross product coming back zero).
+    """
+
+    p = studio("pieces")
+    points = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]]
+    assert p.fit_seat_plane(points, [0.0, 0.0, 1.0]) is None
+
+
 def test_fit_seat_plane_recovers_a_known_tilted_plane():
     """K2 (cutting truth, 2026-08-17): the eigensolve itself, independent
     of segment_pieces or any real cut. Five points placed exactly on a
@@ -572,6 +592,71 @@ def test_the_prism_the_client_builds_is_flat_and_constant_thickness():
             top = [belly[i] + normal[i] * thickness for i in range(3)]
             top_d = sum((top[i] - origin[i]) * normal[i] for i in range(3))
             assert abs(top_d - thickness) <= 1e-9, piece["key"]
+
+
+def test_the_prism_shrink_stays_on_plane_at_a_real_joint_gap():
+    """I1, fix round 1 on K2 (2026-08-17): buildPieceMeshes's joint-gap
+    shrink scales (point - centre) in raw XYZ, and for a prism centre
+    sits at the extrusion's mid thickness -- on neither cap's own plane --
+    so (point - centre) always carries a constant nonzero component along
+    the plane normal, which a uniform scale shrank too: at the default
+    20 mm gap the belly lifted 1.03 mm off its own seat plane and the
+    block thinned to 197.93 mm of a nominal 200. The coverage hole the
+    review exploited was exactly that
+    test_the_prism_the_client_builds_is_flat_and_constant_thickness above
+    never applied any shrink at all. This replicates the CLIENT's exact
+    FIXED arithmetic (decompose into a plane-normal component, left
+    alone, and an in-plane component, the only part scaled -- see
+    test_static.py's test_prism_shrink_moves_in_plane_only for the pin
+    against the real source) in Python, at that same 20 mm gap, and
+    checks both caps stay on plane and the thickness survives exactly.
+    """
+
+    p = studio("pieces")
+    surface, _, _ = saddle_surface()
+    tess = saddle_cells()
+    made, _ = p.segment_pieces(tess, surface, [])
+    thickness = 0.2
+    gap = 0.02
+    assert made
+    for piece in made:
+        origin, normal = piece["seat_plane"]["origin"], piece["seat_plane"]["normal"]
+        belly = []
+        for point in piece["mid"]:
+            d = sum((point[i] - origin[i]) * normal[i] for i in range(3))
+            belly.append([point[i] - d * normal[i] for i in range(3)])
+        top = [[b[i] + normal[i] * thickness for i in range(3)] for b in belly]
+        points = top + belly  # order does not matter for centre/extent below
+
+        n = len(points)
+        centre = [sum(pt[i] for pt in points) / n for i in range(3)]
+        extent = max(
+            math.sqrt(sum((pt[i] - centre[i]) ** 2 for i in range(3)))
+            for pt in points
+        )
+        extent = max(extent, 1e-9)
+        shrink = max(0.0, 1.0 - (gap / 2.0) / extent)
+        assert shrink < 1.0, "the fixture must actually exercise the shrink"
+
+        def shrunk(point, centre=centre, normal=normal, shrink=shrink):
+            delta = [point[i] - centre[i] for i in range(3)]
+            along = sum(delta[i] * normal[i] for i in range(3))
+            axis = [along * normal[i] for i in range(3)]
+            return [
+                centre[i] + (delta[i] - axis[i]) * shrink + axis[i]
+                for i in range(3)
+            ]
+
+        for b in belly:
+            plane_offset = sum(
+                (shrunk(b)[i] - origin[i]) * normal[i] for i in range(3)
+            )
+            assert abs(plane_offset) <= 1e-9, piece["key"]
+        for t in top:
+            plane_offset = sum(
+                (shrunk(t)[i] - origin[i]) * normal[i] for i in range(3)
+            )
+            assert abs(plane_offset - thickness) <= 1e-9, piece["key"]
 
 
 def test_seat_gap_stats_are_disclosed_and_the_max_is_positive_on_the_saddle():

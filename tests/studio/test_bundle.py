@@ -170,6 +170,33 @@ def test_the_bundle_ships_drawn_pieces_on_the_render_mesh(tmp_path, monkeypatch)
         assert piece["faces"], "a piece needs faces"
 
 
+def test_timber_with_monolithic_bands_ships_no_seat_plane(tmp_path, monkeypatch):
+    """I2, fix round 1 on K2 (2026-08-17): a jointed piece's seat_plane is
+    decided by the CUT's pattern (pieces.segment_pieces has no material
+    argument at all -- material and thickness never reach _cut_for, see
+    bundle.py's own comment on that memoisation), not by whether the
+    requested material is nominally a jointed one. The pattern control is
+    independently overridable from the UI per material
+    (studio.js's patternChosen survives a material change), so a user can
+    really request timber (jointed by default, bonded-courses) with
+    monolithic-bands (the sprayed generator): this is a combination
+    reachable today through the real UI, not a hypothetical one. It must
+    build cleanly and ship no seat_plane on any piece; the client falls
+    back to K1's curved extrusion for a cut that has no real joints to
+    begin with, whatever the material label says.
+    """
+
+    bundle, _, _ = fake_export(tmp_path, monkeypatch)
+    document = bundle.build_bundle("Tiny", "timber", "monolithic-bands", 0.9)
+    assert document["pieces"], "the mismatched pairing must still cut and draw"
+    for piece in document["pieces"]:
+        assert "seat_plane" not in piece, piece["key"]
+        assert "seat_gap" not in piece, piece["key"]
+    assert document["tessellation"]["seat_gap_stats"] == {
+        "count": 0, "median": 0.0, "max": 0.0,
+    }
+
+
 def test_stale_cached_bundles_missing_pieces_are_rebuilt(tmp_path, monkeypatch):
     bundle, _, _ = fake_export(tmp_path, monkeypatch)
     fresh = bundle.build_bundle("Tiny", "concrete", "bonded-courses", 0.9)

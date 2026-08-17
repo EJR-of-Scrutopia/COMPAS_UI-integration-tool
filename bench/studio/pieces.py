@@ -455,13 +455,30 @@ def _smallest_symmetric_eigenpair(a00, a01, a02, a11, a12, a22):
     p1 = a01 * a01 + a02 * a02 + a12 * a12
     if p1 < 1e-24:
         # Already diagonal: the smallest diagonal entry is the smallest
-        # eigenvalue and its own axis is the eigenvector.
-        diagonal = [
-            (a00, (1.0, 0.0, 0.0)),
-            (a11, (0.0, 1.0, 0.0)),
-            (a22, (0.0, 0.0, 1.0)),
-        ]
-        return min(diagonal, key=lambda pair: pair[0])
+        # eigenvalue and its own axis is the eigenvector -- UNLESS it ties
+        # with the next smallest (within a tolerance relative to the
+        # matrix's own scale), in which case two axes vary equally little
+        # and no single direction is uniquely the least-varying one: a
+        # genuinely degenerate spread (e.g. a sliver piece with near-zero
+        # extent along two axes at once), not a plane to report. Minor,
+        # fix round 1 on K2 (2026-08-17): this branch used to pick
+        # whichever tied axis Python's min() happened to see first,
+        # silently shipping an arbitrary (and not necessarily physical)
+        # plane where fit_seat_plane's own docstring already promised
+        # None; the general (non-diagonal) branch below does not have
+        # this gap, since a symmetric matrix's tied eigenvalue always
+        # makes (A - eig*I) rank-deficient enough that every pairwise row
+        # cross product comes back zero, which _normalise already turns
+        # into None.
+        ordered = sorted((a00, a11, a22))
+        spread = max(a00, a11, a22, 1e-18)
+        if ordered[1] - ordered[0] < 1e-9 * spread:
+            return ordered[0], None
+        if ordered[0] == a00:
+            return a00, (1.0, 0.0, 0.0)
+        if ordered[0] == a11:
+            return a11, (0.0, 1.0, 0.0)
+        return a22, (0.0, 0.0, 1.0)
 
     q = (a00 + a11 + a22) / 3.0
     p2 = (a00 - q) ** 2 + (a11 - q) ** 2 + (a22 - q) ** 2 + 2.0 * p1

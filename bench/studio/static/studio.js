@@ -2958,6 +2958,9 @@ function buildPieceMeshes() {
     const full = state.bundle.provenance.thickness * taperAt(piece.course);
     const points = [];
     const seatPlane = piece.seat_plane;
+    // Hoisted out of the branch below: the shrink loop further down needs
+    // the plane normal too (I1 fix), not only the belly/top construction.
+    let nx = 0, ny = 0, nz = 0;
     if (seatPlane) {
       // K2 (cutting truth, 2026-08-17): a jointed piece with a fitted
       // seat plane is a true prismatic block, not a curved shell. The
@@ -2968,7 +2971,7 @@ function buildPieceMeshes() {
       // point's own surface normal, so the two caps stay exactly
       // parallel and the sides rule dead straight between them.
       const [ox, oy, oz] = seatPlane.origin;
-      const [nx, ny, nz] = seatPlane.normal;
+      [nx, ny, nz] = seatPlane.normal;
       const belly = [];
       for (let i = 0; i < count; i++) {
         const m = piece.mid[i];
@@ -3024,6 +3027,24 @@ function buildPieceMeshes() {
           // offsets from mid and normal.
           if (shrink === 1) {
             positions.push(p[0], p[1], p[2]);
+          } else if (seatPlane) {
+            // I1 fix (2026-08-17, fix round 1 on K2): centre sits at the
+            // extrusion's mid thickness, on neither the belly's nor the
+            // top's own plane, so (p - centre) always carries a constant
+            // nonzero component along the plane normal -- shrinking that
+            // raw vector shrinks the normal component too, lifting the
+            // belly off its own seat plane and thinning the block by
+            // however much the joint gap asked for. Decomposing into the
+            // plane-normal component (left exactly alone) and the
+            // in-plane component (the only part actually scaled) keeps
+            // both caps on their own parallel planes at any shrink factor.
+            const dx = p[0] - centre[0], dy = p[1] - centre[1], dz = p[2] - centre[2];
+            const along = dx * nx + dy * ny + dz * nz;
+            const ax = along * nx, ay = along * ny, az = along * nz;
+            positions.push(
+              centre[0] + (dx - ax) * shrink + ax,
+              centre[1] + (dy - ay) * shrink + ay,
+              centre[2] + (dz - az) * shrink + az);
           } else {
             positions.push(
               centre[0] + (p[0] - centre[0]) * shrink,

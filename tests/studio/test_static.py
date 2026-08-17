@@ -765,7 +765,10 @@ def test_jointed_pieces_take_the_prismatic_path():
     prism_end = body.index("} else {", prism_start)
     prism_body = body[prism_start:prism_end]
     assert "const [ox, oy, oz] = seatPlane.origin;" in prism_body
-    assert "const [nx, ny, nz] = seatPlane.normal;" in prism_body
+    # nx/ny/nz are hoisted above this branch (fix round 1, I1): the shrink
+    # loop further down needs the plane normal too, so this is a plain
+    # reassignment of an outer `let`, not its own `const` declaration.
+    assert "[nx, ny, nz] = seatPlane.normal;" in prism_body
     # The belly: every mid point projected onto the plane by subtracting
     # its own signed distance along the plane normal.
     assert "const d = (m[0] - ox) * nx + (m[1] - oy) * ny + (m[2] - oz) * nz;" in prism_body
@@ -782,6 +785,50 @@ def test_jointed_pieces_take_the_prismatic_path():
     fallback_body = body[prism_end:]
     assert "m[0] + n[0] * offset" in fallback_body, (
         "the else branch must keep K1's curved extrusion verbatim"
+    )
+
+
+def test_prism_shrink_moves_in_plane_only():
+    """I1, fix round 1 on K2 (2026-08-17): the joint-gap shrink toward the
+    piece's own centroid scales (point - centre) in raw XYZ. For a prism,
+    centre sits at the extrusion's mid thickness -- on neither the belly's
+    nor the top's own plane -- so (point - centre) always carries a
+    constant nonzero component along the plane normal, and a uniform
+    scale shrinks that component too: at the default 20 mm gap the belly
+    lifted 1.03 mm off its own seat plane and the block thinned from a
+    nominal 200 mm. The fix decomposes the offset into its plane-normal
+    component (left exactly alone) and its in-plane component (the only
+    part actually scaled) for a piece with a seat plane; the curved
+    (sprayed / no-plane) path keeps the old uniform scale unchanged, since
+    it never had a flat cap to drift off of.
+    """
+
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    body = _function_body(js, "buildPieceMeshes")
+    shrink_start = body.index("if (shrink === 1) {")
+    prism_shrink_start = body.index("} else if (seatPlane) {", shrink_start)
+    curved_shrink_start = body.index("} else {", prism_shrink_start)
+    prism_shrink = body[prism_shrink_start:curved_shrink_start]
+    curved_shrink = body[curved_shrink_start:]
+
+    # The decomposition itself, pinned against the real source.
+    assert "const dx = p[0] - centre[0], dy = p[1] - centre[1], dz = p[2] - centre[2];" in prism_shrink
+    assert "const along = dx * nx + dy * ny + dz * nz;" in prism_shrink
+    assert "const ax = along * nx, ay = along * ny, az = along * nz;" in prism_shrink
+    assert "centre[0] + (dx - ax) * shrink + ax," in prism_shrink
+    assert "centre[1] + (dy - ay) * shrink + ay," in prism_shrink
+    assert "centre[2] + (dz - az) * shrink + az);" in prism_shrink
+
+    # The curved/no-plane branch must keep the old uniform scale verbatim:
+    # it never gets a plane-normal component to protect in the first
+    # place, so decomposing it would be a no-op at best and a needless
+    # divergence from K1's pinned formula at worst.
+    assert "centre[0] + (p[0] - centre[0]) * shrink," in curved_shrink
+    assert "centre[1] + (p[1] - centre[1]) * shrink," in curved_shrink
+    assert "centre[2] + (p[2] - centre[2]) * shrink);" in curved_shrink
+    assert "along" not in curved_shrink, (
+        "the curved/no-plane shrink branch must not decompose by a plane "
+        "normal it does not have"
     )
 
 
