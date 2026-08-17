@@ -2733,6 +2733,14 @@ def test_w6_ground_appearance_persists_per_preset():
     assert "JSON.parse(stored)" in restore_body
     assert "{ tint: null, scale: null }" in restore_body
     assert "typeof parsed.scale === \"number\"" in restore_body
+    # Fix round 1 (task review): a stored scale is type-checked AND
+    # clamped to the control's own bounds, matching #ground-scale's
+    # min="0.25" max="4" -- a tampered or legacy entry (999, a negative
+    # number) must not slip past the type check and render a wildly
+    # scaled or mirrored texture while the slider itself displays a
+    # sane, silently-clamped value.
+    assert "GROUND_SCALE_MIN = 0.25" in js and "GROUND_SCALE_MAX = 4" in js
+    assert "Math.min(GROUND_SCALE_MAX, Math.max(GROUND_SCALE_MIN, parsed.scale))" in restore_body
     # Boot restores before the first study (and its ground mesh) loads.
     boot_body = _function_body(js, "boot")
     boot_restore_at = boot_body.index("restoreGroundAppearance(state.groundPreset);")

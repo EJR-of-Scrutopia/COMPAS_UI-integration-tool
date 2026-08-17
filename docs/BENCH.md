@@ -192,7 +192,8 @@ crown.
   change. HDRI mode uses .hdr files dropped into bench/studio/hdri/ or
   uploaded from the browser (any valid Radiance .hdr); the decode tries
   full float precision first and, if that overflows the browser's array
-  buffer allocation, retries at half float, so an 8K or 16K equirect still
+  buffer allocation, retries at half float, so an image once too large for
+  a full-float decode (16K-class equirects, around 2 GB at Float32) now
   loads where it used to fail outright. Past even half float's own ceiling
   (around 268 megapixels) a banner names the image's actual megapixel
   count instead of leaving a stuck, unexplained error. The studio

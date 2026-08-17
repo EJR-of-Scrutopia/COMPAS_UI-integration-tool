@@ -3403,6 +3403,13 @@ function rebuildAppearance() {
 }
 
 // ---------- Task 5 / W6: ground tint and scale (render-only, per preset) ----------
+// Mirrors #ground-scale's own min/max (SIZE_MIN/SIZE_MAX's own precedent
+// above): a stored scale is clamped to these bounds on restore, not just
+// type-checked, so a tampered or legacy localStorage entry (an out-of-range
+// or negative number) cannot render a wildly scaled or mirrored texture
+// while the slider itself displays a sane, silently-clamped value.
+const GROUND_SCALE_MIN = 0.25, GROUND_SCALE_MAX = 4;
+
 function groundStorageKey(preset) {
   return "bench-studio-ground:" + preset;
 }
@@ -3450,7 +3457,9 @@ function restoreGroundAppearance(preset) {
       const parsed = JSON.parse(stored);
       appearance = {
         tint: parsed.tint || null,
-        scale: typeof parsed.scale === "number" ? parsed.scale : null,
+        scale: typeof parsed.scale === "number"
+          ? Math.min(GROUND_SCALE_MAX, Math.max(GROUND_SCALE_MIN, parsed.scale))
+          : null,
       };
     } catch (error) { /* corrupt localStorage entry: fall back to the defaults above */ }
   }
