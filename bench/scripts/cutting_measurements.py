@@ -82,17 +82,23 @@ EXPECTED = {
     "regression_orphan_faces": 0,
     "default_folded": 0,
     # Fix round 1: the plain max badly misrepresents the typical corner, so
-    # the controller measured the whole distribution across all 695
-    # corners and gave the median, mean, p99, max and counts over a fixed
-    # set of thresholds. pieces.residual_stats reproduces exactly this.
-    "residual_count": 695,
-    "residual_median": 0.0196,
-    "residual_mean": 0.0325,
-    "residual_p99": 0.2428,
+    # the controller measured the whole distribution across all corners and
+    # gave the median, mean, p99, max and counts over a fixed set of
+    # thresholds. pieces.residual_stats reproduces exactly this.
+    #
+    # F3 fix wave (cutting truth final review, 2026-08-17): K3's rim fix
+    # (course 0's outline simplified against the boundary polyline, 538
+    # points down to 358) changes which corners are welded at all, so the
+    # population these figures describe moved from 695 corners to 515.
+    # Re-measured on the same real Trial 2 export at 0.9 m, post-K3.
+    "residual_count": 515,
+    "residual_median": 0.0316,
+    "residual_mean": 0.0414,
+    "residual_p99": 0.2548,
     "residual_max": 0.3295,
-    "residual_over_0.01": 487,
-    "residual_over_0.05": 134,
-    "residual_over_0.1": 38,
+    "residual_over_0.01": 414,
+    "residual_over_0.05": 140,
+    "residual_over_0.1": 42,
     "residual_over_0.2": 10,
     "residual_over_0.3": 2,
 }
