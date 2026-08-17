@@ -2386,3 +2386,97 @@ def test_appearance_overrides_are_render_only_and_persist():
     body = _function_body(js, "appearanceMaterialBase")
     assert "SKINS" in body
     assert "state.appearance.skin" not in _function_body(js, "loadStudy")
+
+
+def test_wire_net_vertex_colours_are_off_at_rest():
+    """Task 1 (studio tweaks, 2026-08-17): the dark "ghost shell" Param saw
+    through mid-build vaults was never falsework -- state.formworkMode was
+    "hidden" throughout every probe capture, and forcing Animation or
+    Always mode changed nothing visible (task-1 diagnosis file,
+    captures/task1-*-ghost.png, task1b-scrub*-*.png). It was the thrust
+    wire net: buildWiresAndNodes left wireMaterial.vertexColors permanently
+    true, and three 0.185's InstancedMesh + MeshPhysicalMaterial(metalness:
+    1) renders dramatically darker with vertexColors on than off even when
+    every instance colour is exactly white (1, 1, 1) -- isolated by a
+    live A/B probe that flipped only that one property
+    (captures/task1m-A-vcTrue-needsUpdate.png vs
+    task1m-B-vcFalse-needsUpdate.png; task1n-vcFalse-onlyChange.png shows it
+    as the ONLY change from the shipped colour/metalness/roughness
+    defaults). vertexColors is only meaningful while the Wire forces layer
+    is actively tinting edges, so it must start off and applyWireForces
+    must be the sole place that turns it back on and off again.
+    """
+
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    build_body = _function_body(js, "buildWiresAndNodes")
+    assert "wireMaterial.vertexColors = false;" in build_body, (
+        "the net must not carry vertexColors at rest; the dark ghost was "
+        "this flag, not falsework, metalness or colour"
+    )
+    force_body = _function_body(js, "applyWireForces")
+    inactive_start = force_body.index("if (!active) {")
+    inactive_end = force_body.index("return;", inactive_start)
+    inactive_branch = force_body[inactive_start:inactive_end]
+    assert "wires.material.vertexColors = false;" in inactive_branch, (
+        "turning the forces layer off must also turn vertexColors back "
+        "off, or a rebuild after using it once leaves the net dark again"
+    )
+    assert "wires.material.needsUpdate = true;" in inactive_branch
+    active_branch = force_body[inactive_end:]
+    assert "wires.material.vertexColors = true;" in active_branch, (
+        "the forces layer needs per-instance colour to show its tint"
+    )
+    assert "wires.material.needsUpdate = true;" in active_branch
+    # buildWiresAndNodes never turned nodeMaterial's vertexColors on in the
+    # first place (nodes have no per-instance force tint), which matches
+    # the probe finding that the node spheres were never part of the
+    # defect -- nothing to fix there, but pin that it stays that way.
+    assert "nodeMaterial.vertexColors" not in build_body
+
+
+def test_drop_reach_scales_with_the_shells_own_extent():
+    """Task 1 (studio tweaks, 2026-08-17): the "ribbon of blocks flying
+    above the crown" was DROP_HEIGHT (a flat 12 m constant) outliving the
+    vault's own scale -- 6.98 m on "Algebraic TNA method" -- so every
+    falling piece spent most of its 0.8 s fall above the vault's own
+    tallest point regardless of which course it belonged to. The build
+    order itself was checked against the server's own bundle and is clean
+    (course-major, angularly swept -- see the diagnosis file), so the fix
+    is scoped to the flight path's height alone: derived from the loaded
+    shell's own vertical extent, capped at the original constant so a
+    genuinely tall export keeps today's look.
+    """
+
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    extent_body = _function_body(js, "shellHeightExtent")
+    assert "state.bundle.analysis_mesh.vertices" in extent_body
+    assert "return maxZ - minZ;" in extent_body
+    rebuild_body = _function_body(js, "rebuildTimeline")
+    assert "dropReach: Math.max(0.5, 0.4 * shellHeightExtent())," in rebuild_body, (
+        "the reach must be derived from the loaded bundle's own extent, "
+        "not a bare constant, and floored so a tiny export still visibly drops"
+    )
+    scene_body = _function_body(js, "applySceneAtTime")
+    assert "const dropReach = Math.min(DROP_HEIGHT, state.timeline.dropReach);" in scene_body, (
+        "DROP_HEIGHT must remain the ceiling a tall export is capped at, "
+        "not the value every export falls through"
+    )
+    assert "segment.position.z = dropReach * (1 - easeOutCubic(u));" in scene_body
+    # DROP_HEIGHT itself, DROP_SECONDS, the stagger and the sprayed
+    # (scale-based) branch are all untouched by this fix.
+    assert "const DROP_HEIGHT = 12" in js
+    sprayed_branch = scene_body[
+        scene_body.index("if (sprayed) {"):scene_body.index("} else {", scene_body.index("if (sprayed) {"))
+    ]
+    assert "userData.centreZ * (1 - grown)" in sprayed_branch, (
+        "the sprayed branch must stay scale-based and untouched by the "
+        "drop-height fix"
+    )
+    # Replay the numbers the probe actually read (Algebraic TNA method,
+    # crownRestZ 6.9794) through the shipped formula: the reach must land
+    # comfortably under DROP_HEIGHT's old 12 m, so a piece no longer spends
+    # most of its fall above the crown.
+    extent = 6.9794  # captures/task1-ribbon-scan.json: crownRestZ, base near 0
+    reach = max(0.5, 0.4 * extent)
+    assert reach < 12, "the reach must actually be smaller than the old constant"
+    assert 2.0 < reach < 4.0, reach

@@ -776,10 +776,24 @@ function buildWiresAndNodes(bundle) {
   const wireMaterial = materials.steel.clone();
   // Task 6 fix: InstancedMesh.setColorAt writes the instanceColor buffer,
   // but per-instance colour only reaches the fragment shader when the
-  // material also opts into the vertex-colour path. vertexColors stays
-  // true for the wires' whole lifetime; every instance starts white below
-  // so the plain steel look is unchanged until applyWireForces tints it.
-  wireMaterial.vertexColors = true;
+  // material also opts into the vertex-colour path.
+  //
+  // Task 1 (studio tweaks, 2026-08-17): this used to read
+  // `wireMaterial.vertexColors = true` unconditionally, on the assumption
+  // that every instance starting white made it a no-op until
+  // applyWireForces tints something. It was not a no-op: three 0.185's
+  // InstancedMesh + MeshPhysicalMaterial(metalness: 1) renders dramatically
+  // darker with vertexColors on than off, even with every instance colour
+  // exactly white (probe: .superpowers/sdd/2026-08-17-studio-tweaks/
+  // captures/task1m-*, task1n-vcFalse-onlyChange.png -- vertexColors was
+  // the only property that moved the picture). That is the dark "ghost
+  // shell" Param saw through mid-build vaults; formwork was never it (same
+  // workspace, task1-*-ghost.png, task1b-scrub*-*.png: every formwork mode
+  // rendered identically). vertexColors is only meaningful while the Wire
+  // forces layer is actively tinting edges, so it starts off here and
+  // applyWireForces is now the sole place that turns it on (entering the
+  // layer) and off again (leaving it).
+  wireMaterial.vertexColors = false;
   wireMaterial.transparent = true;
   const wires = new THREE.InstancedMesh(cylinder, wireMaterial, edges.length);
   const up = new THREE.Vector3(0, 1, 0);
@@ -1211,10 +1225,16 @@ const STRESS_SCALE = (() => {
 // (endpoint/orientation/length) matrix per edge on wires.userData so this
 // can rebuild thicker/tinted matrices when on and restore the originals
 // exactly when off, without touching the "wires" visibility toggle.
-// buildWiresAndNodes also sets the material's vertexColors true for good:
 // setColorAt alone writes the instanceColor buffer, but per-instance
-// colour only reaches a pixel when the material opts into that path, so
-// both the on and off states below rely on it being set already.
+// colour only reaches a pixel when the material also opts into that path.
+// Task 1 (studio tweaks, 2026-08-17): this used to be permanently on
+// (buildWiresAndNodes set it once, for the wires' whole lifetime), on the
+// assumption that an all-white instance colour was a no-op the rest of the
+// time -- it was not (see buildWiresAndNodes's own comment: leaving
+// vertexColors on with nothing to say through it was the dark "ghost
+// shell" defect). This function is now the only place that flips it: on
+// while the layer is active and instance colour carries real information,
+// off the moment it is not.
 function applyWireForces() {
   const wires = state.objects.wires;
   const base = wires && wires.userData.baseMatrices;
@@ -1230,6 +1250,8 @@ function applyWireForces() {
     wires.instanceMatrix.needsUpdate = true;
     wires.instanceColor.needsUpdate = true;
     wires.material.color.copy(materials.steel.color);
+    wires.material.vertexColors = false;
+    wires.material.needsUpdate = true;
     return;
   }
   const forces = state.bundle.member_forces;
@@ -1238,6 +1260,8 @@ function applyWireForces() {
   const position = new THREE.Vector3(), quaternion = new THREE.Quaternion(), scale = new THREE.Vector3();
   const m = new THREE.Matrix4();
   wires.material.color.set(0xffffff);   // tint through instance colour, not the material
+  wires.material.vertexColors = true;
+  wires.material.needsUpdate = true;
   forces.forEach((force, i) => {
     base[i].decompose(position, quaternion, scale);
     const radiusScale = 1 + 2 * Math.abs(force) / magnitude;
@@ -2837,6 +2861,31 @@ function placementStep() {
   return BUILD_TARGET_SECONDS / Math.max(1, placementCount());
 }
 
+// Task 1 (studio tweaks, 2026-08-17): DROP_HEIGHT is a flat metre constant,
+// but a real export's own crown is routinely well under it -- 6.98 m on
+// "Algebraic TNA method" against a 12 m constant. Because easeOutCubic
+// front-loads its motion (fast at u=0, slow approaching u=1), a piece
+// stays elevated for MOST of its fall, not just the first instant: at
+// u=0.5 it is still DROP_HEIGHT/8 above its own rest z, at u=0.6 still
+// DROP_HEIGHT/16. With DROP_HEIGHT exceeding the whole vault's height,
+// every falling piece -- whichever course it belongs to -- spends most of
+// its 0.8 s airborne above the vault's own tallest point: the probe's
+// course-3 in-flight cohort read worldZ up to 16.47 m against a 6.98 m
+// crown (task-1 probe, captures/task1-ribbon-scan.json), the "ribbon of
+// blocks flying above the crown" Param's screenshot caught. The order and
+// stagger that put a handful of pieces airborne together were checked and
+// are clean (course-major, angularly swept, see the diagnosis file); only
+// the flight path's height needed to know the building's own scale.
+function shellHeightExtent() {
+  const vertices = state.bundle.analysis_mesh.vertices;
+  let minZ = Infinity, maxZ = -Infinity;
+  for (const v of vertices) {
+    if (v[2] < minZ) minZ = v[2];
+    if (v[2] > maxZ) maxZ = v[2];
+  }
+  return maxZ - minZ;
+}
+
 function rebuildTimeline(preserve) {
   state.timeline = {
     playing: false, t: 0,
@@ -2845,6 +2894,10 @@ function rebuildTimeline(preserve) {
     orbitSpeed: +document.getElementById("orbit-speed").value,
     orbitDistance: +document.getElementById("orbit-distance").value,
     autoSpin: true,
+    // The desired reach before DROP_HEIGHT's own ceiling applies (see
+    // applySceneAtTime): a genuinely tall export is still capped at
+    // today's 12 m look, never made to fall from further than before.
+    dropReach: Math.max(0.5, 0.4 * shellHeightExtent()),
   };
   state.centre = sceneCentroid();
   if (!preserve) {
@@ -3313,6 +3366,10 @@ function applySceneAtTime(t) {
   const build = Math.max(0, t - state.timeline.inflateSeconds);
   const sprayed = sprayedMaterial();
   const step = placementStep();
+  // DROP_HEIGHT is a ceiling, never exceeded regardless of scale; the
+  // scale-derived reach (rebuildTimeline, shellHeightExtent) is what a real
+  // export actually falls through. See the comment on shellHeightExtent.
+  const dropReach = Math.min(DROP_HEIGHT, state.timeline.dropReach);
   for (const segment of state.objects.shell.children) {
     // No piece exists on screen while the net is still finding its form:
     // gate on inflation, not on the drop-window arithmetic below, or the
@@ -3358,7 +3415,7 @@ function applySceneAtTime(t) {
       // Both halves reset, so switching material mid-timeline can never
       // leave a piece carrying the other branch's growth or offset.
       segment.scale.set(1, 1, 1);
-      segment.position.z = DROP_HEIGHT * (1 - easeOutCubic(u));
+      segment.position.z = dropReach * (1 - easeOutCubic(u));
     }
   }
   const buildEnd = placementCount() * step + DROP_SECONDS;
