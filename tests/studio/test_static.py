@@ -705,6 +705,36 @@ def test_pieces_are_built_at_the_bundles_thickness():
     assert "basePositions" in body
 
 
+def test_pieces_extrude_upward_from_the_intrados():
+    """K1 (cutting truth, 2026-08-17): the durable pin on the actual
+    client-side invariant. pieces.py ships no thickness and builds no
+    solid (see test_pieces.py's saddle test for the server-side contract
+    that extrusion depends on); this is what pins the extrusion itself --
+    the bottom cap at offset 0 on the shipped surface, the top cap the
+    full taper-scaled thickness outward -- against a reintroduction of
+    the old symmetric mid-surface split.
+    """
+
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    body = _function_body(js, "buildPieceMeshes")
+    assert "const full = state.bundle.provenance.thickness * taperAt(piece.course);" in body
+    assert "for (const offset of [full, 0]) {" in body
+    assert "for (const sign of [1, -1])" not in body, (
+        "the symmetric mid-surface split must not come back"
+    )
+    # The offset sweep this task's contract named: falsework sits directly
+    # on the surface (always mode), and the load-arrow tip lifts the full
+    # thickness to reach the extrados from a node that is now ON the
+    # intrados.
+    scene_body = _function_body(js, "applySceneAtTime")
+    assert "? -0.05" in scene_body, (
+        "the always-mode falsework ghost must sit directly on the "
+        "intrados, not offset by half the thickness"
+    )
+    arrow_body = _function_body(js, "arrowField")
+    assert "const lift = tipAnchored ? state.bundle.provenance.thickness : 0;" in arrow_body
+
+
 def test_rebuilding_the_shell_frees_what_it_replaces():
     # The shell is rebuilt on every joint gap and taper commit, and
     # recoloured on every layer toggle, so both paths have to free what they

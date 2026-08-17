@@ -5,10 +5,11 @@
 // This module used to also carry vertexNormals, segmentBoundaryEdges and
 // extrudeSegment, a JS mirror of the offset maths in bench/studio/pieces.py
 // and bench/studio/blocks.py. The viewer no longer extrudes anything
-// itself: pieces.py ships mid-surface points and normals per piece in the
-// bundle, and studio.js's buildPieceMeshes just offsets those by half the
-// thickness. Python is now the only implementation of that maths, which is
-// the point: one fewer mirror to keep in step.
+// itself: pieces.py ships surface points and normals per piece in the
+// bundle -- the intrados, under K1 (cutting truth, 2026-08-17) -- and
+// studio.js's buildPieceMeshes extrudes those upward by the full (taper
+// scaled) thickness. Python is now the only implementation of that maths,
+// which is the point: one fewer mirror to keep in step.
 
 export function segmentUVOffset(key) {
   let hash = 2166136261;

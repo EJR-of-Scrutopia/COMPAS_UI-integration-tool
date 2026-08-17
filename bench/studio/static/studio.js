@@ -2976,14 +2976,17 @@ function buildPieceMeshes() {
     built.push({ piece, positions, weights, surface, centre });
   }
   // Sprayed concrete is one continuous surface: the joint gap is zero,
-  // the shrink factor is exactly 1 and shared boundary points are
-  // bit-identical across pieces at taper 0, so the crease normals are
-  // computed over the WHOLE shell in one call and sliced back per piece.
-  // Course joints then stop stepping in the light. With the crown taper
-  // above zero, adjacent courses are offset by different half
-  // thicknesses and their shared points honestly stop welding. Jointed
-  // materials keep per-piece normals: their pieces are genuinely
-  // separate and the lighting step at a joint is honest.
+  // the shrink factor is exactly 1, and every intrados (bottom, offset 0)
+  // boundary point is bit-identical across pieces at ANY taper -- offset
+  // 0 does not scale with taper -- so the crease normals are computed
+  // over the WHOLE shell in one call and sliced back per piece. Course
+  // joints then stop stepping in the light. With the crown taper above
+  // zero, only the extrados (top) boundary points at a course-to-course
+  // joint diverge: adjacent courses scale the same full thickness by a
+  // different taperAt(course), so their shared top points honestly stop
+  // welding there. Jointed materials keep per-piece normals: their
+  // pieces are genuinely separate and the lighting step at a joint is
+  // honest.
   let welded = null;
   if (sprayedMaterial()) {
     let total = 0;
