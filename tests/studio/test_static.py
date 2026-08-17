@@ -1752,15 +1752,17 @@ def test_the_show_select_offers_four_exclusive_modes():
     assert "material.opacity = 1" in body
     # Crown seam (2026-08-16-studio-finish task 4): the flat restore to
     # "position.z = 0" pinned since the repairs wave held for every non
-    # Timeline mode alike, but Both mode's net sits directly on the shell's
-    # mid-surface with no clearance from the extrados, and pokes through it
+    # Timeline mode alike, but Both mode's net sat directly on the shell's
+    # mid-surface with no clearance from the extrados, and poked through it
     # at the crown (test_static.py cannot see the picture; the probe
     # captures crown-seam-both-before.png / -closeup-before.png are the
-    # evidence). Framework still restores the true z = 0; Both now clears
-    # the shell by half its thickness plus each object's OWN radius --
-    # fix round 1 gave wires and nodes separate clearances (see
-    # test_both_mode_and_the_pre_strike_timeline_clear_the_net_of_the_crown_seam),
-    # since a shared wireRadius-only clearance under-cleared the nodes.
+    # evidence). Framework still restores the true z = 0. K1 (cutting
+    # truth, 2026-08-17) changed what Both clears: the net's raw position
+    # now coincides with the shell's own bottom (intrados) face, so a
+    # radius-only lift is enough (see
+    # test_both_mode_and_the_pre_strike_timeline_clear_the_net_of_the_crown_seam)
+    # -- fix round 1's separate wire/node clearances still apply, just
+    # without the thickness term.
     assert 'state.showMode === "both"' in body
     assert "position.z = wireClearance" in body
     assert "position.z = nodeClearance" in body
@@ -1770,11 +1772,11 @@ def test_both_mode_and_the_pre_strike_timeline_clear_the_net_of_the_crown_seam()
     # Task 4 of the 2026-08-16-studio-finish wave. Diagnosis: the net
     # (buildWiresAndNodes) is drawn straight off bundle.analysis_mesh, the
     # raw mid-surface, with no display offset; the shell (buildPieceMeshes)
-    # is offset off that same mid-surface family by half the built
-    # thickness a side. Nothing guarantees those two independently-built
-    # surfaces stay clear of one another, and at the crown -- this vault's
+    # was offset off that same mid-surface family by half the built
+    # thickness a side. Nothing guaranteed those two independently-built
+    # surfaces stayed clear of one another, and at the crown -- this vault's
     # shallowest, most tightly curved region -- the net's own wire/node
-    # radius is enough to break through the shell's extrados: a black line
+    # radius was enough to break through the shell's extrados: a black line
     # with regularly spaced white dots along the ridge. Probed against the
     # real "Algebraic TNA method" export, camera close on the crown, in
     # both Show=both and Show=timeline just before the strike hides the
@@ -1782,12 +1784,7 @@ def test_both_mode_and_the_pre_strike_timeline_clear_the_net_of_the_crown_seam()
     #   .superpowers/sdd/2026-08-16-studio-finish/crown-seam-both-before.png
     #   .superpowers/sdd/2026-08-16-studio-finish/crown-seam-both-closeup-before.png
     #   .superpowers/sdd/2026-08-16-studio-finish/crown-seam-timeline-strike-950-before.png
-    # and their -after equivalents once the fix below landed. The fix is a
-    # display-only nudge along +Z by half the built thickness plus each
-    # object's OWN radius -- an approximation of "outward along the local
-    # normal" that only holds where that normal is close to vertical, which
-    # is exactly the shallow crown where the seam showed (see the comments
-    # beside each assertion's source for the caveat spelled out in full).
+    # and their -after equivalents once the fix below landed.
     #
     # Fix round 1 (review finding, Medium): the first cut shared one
     # clearance (thickness/2 + wireRadius) between wires AND nodes, but
@@ -1796,15 +1793,27 @@ def test_both_mode_and_the_pre_strike_timeline_clear_the_net_of_the_crown_seam()
     # Node size slider) -- a node's nearest point sat at
     # clearance - nodeRadius, under-cleared by the radius difference, and
     # growing Node size alone could push the white dots back through the
-    # shell: the exact reported symptom. Each object now clears by its own
+    # shell: the exact reported symptom. Each object clears by its own
     # radius, both sites.
+    #
+    # K1 (cutting truth, 2026-08-17): the net's raw position now coincides
+    # with the shell's own bottom (intrados) face -- both come from the
+    # same lifted surface point -- so the thickness/2 term is gone from
+    # both call sites, AND the sign flips: the shell only ever extends UP
+    # from the intrados now, so the clearance has to push the net DOWN,
+    # away from the shell, or it is buried inside the opaque solid instead
+    # of cleared (a probed regression: no net was visible at all under a
+    # Both-mode shell before this negative sign landed). A radius-only
+    # drop is enough to keep each object's own surface just clear of that
+    # coincident point, read clean at the crown of Trial 2
+    # (.superpowers/sdd/2026-08-17-cutting-truth/).
     js = (STATIC / "studio.js").read_text(encoding="utf-8")
     show_body = _function_body(js, "applyShowMode")
-    assert "state.bundle.provenance.thickness / 2 + state.wireRadius" in show_body
-    assert "state.bundle.provenance.thickness / 2 + state.nodeRadius" in show_body
+    assert "state.showMode === \"both\" ? -state.wireRadius : 0" in show_body
+    assert "state.showMode === \"both\" ? -state.nodeRadius : 0" in show_body
     scene_body = _function_body(js, "applySceneAtTime")
-    assert "wires: state.bundle.provenance.thickness / 2 + state.wireRadius," in scene_body
-    assert "nodes: state.bundle.provenance.thickness / 2 + state.nodeRadius," in scene_body
+    assert "wires: -state.wireRadius," in scene_body
+    assert "nodes: -state.nodeRadius," in scene_body
     # The strike's own drop is additive with the clearance, so the net still
     # lands 1.5 m clear of the shell once fully struck (strikeU = 1).
     assert "clearance[key] - 1.5 * strikeU" in scene_body

@@ -121,6 +121,11 @@ def test_bundles_are_cached_per_thickness(tmp_path, monkeypatch):
     )
     assert default["provenance"]["thickness"] == 0.2
     assert thin["provenance"]["thickness"] == 0.1
+    # K1 (cutting truth, 2026-08-17): the surface pieces.py ships is now
+    # the intrados, named explicitly so a viewer can tell the convention a
+    # bundle was built under; every thickness variant carries it.
+    assert default["provenance"]["surface"] == "intrados"
+    assert thin["provenance"]["surface"] == "intrados"
     assert (
         studies / "tiny" / "studio"
         / "bundle-concrete-bonded-courses-s900-t200.json"

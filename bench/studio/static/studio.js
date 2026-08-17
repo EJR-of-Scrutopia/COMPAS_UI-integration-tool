@@ -1506,12 +1506,14 @@ function arrowField(entries, colour, anchor) {
     const dir = v.lengthSq() ? v.clone().normalize() : new THREE.Vector3(0, 0, -1);
     const start = new THREE.Vector3(...at);
     const tipAnchored = anchor === "tip";
-    // The analysis node sits on the mid-surface, half a thickness inside
-    // the drawn shell, so a head composed at the node is buried in opaque
-    // geometry. The tip-anchored arrow stands off by that half thickness
-    // and the cone's own half height, so its point touches the outer
-    // surface at the point of application.
-    const lift = tipAnchored ? state.bundle.provenance.thickness / 2 : 0;
+    // K1: the analysis node sits ON the intrados now (mid, offset 0 in
+    // buildPieceMeshes), and the extrados is a full thickness further out
+    // along the normal, so a head composed at the node is buried in
+    // opaque geometry all the way up. The tip-anchored arrow stands off
+    // by that full thickness (was half, under the old mid-surface
+    // convention) and the cone's own half height, so its point touches
+    // the outer (extrados) surface at the point of application.
+    const lift = tipAnchored ? state.bundle.provenance.thickness : 0;
     const surface = start.clone().addScaledVector(dir, -lift);
     const from = tipAnchored ? surface.clone().addScaledVector(dir, -length) : start;
     const to = tipAnchored ? surface : start.clone().addScaledVector(dir, length);
@@ -2916,15 +2918,25 @@ function buildPieceMeshes() {
   const built = [];
   for (const piece of state.bundle.pieces) {
     const count = piece.mid.length;
-    const half = state.bundle.provenance.thickness * taperAt(piece.course) / 2;
+    // K1 (cutting truth, 2026-08-17): mid/normals ship the surface the
+    // formwork touches -- provenance.surface === "intrados" -- so the
+    // bottom cap sits ON it (offset 0) and the top cap is extruded the
+    // full taper-scaled thickness outward along the normal; taper still
+    // means "thins toward the crown", it just scales the whole thickness
+    // now instead of half of it. Loop order matches pieces.py's doubled
+    // index topology: the first `count` points are the "top"/extrados
+    // cap (faces index 0..count-1, unreversed winding), the second
+    // `count` are the "bottom"/intrados cap (index count..2*count-1,
+    // reversed winding) -- see the piece.faces comment in pieces.py.
+    const full = state.bundle.provenance.thickness * taperAt(piece.course);
     const points = [];
-    for (const sign of [1, -1]) {
+    for (const offset of [full, 0]) {
       for (let i = 0; i < count; i++) {
         const m = piece.mid[i], n = piece.normals[i];
         points.push([
-          m[0] + n[0] * half * sign,
-          m[1] + n[1] * half * sign,
-          m[2] + n[2] * half * sign,
+          m[0] + n[0] * offset,
+          m[1] + n[1] * offset,
+          m[2] + n[2] * offset,
         ]);
       }
     }
@@ -3204,18 +3216,17 @@ function applySceneAtTime(t) {
   const mode = state.formworkMode;
   falsework.visible = mode === "always" || (mode === "animation" && strikeU < 1);
   falsework.material.opacity = mode === "always" ? 0.3 : 0.3 * inflate * (1 - strikeU);
-  // R3: the ghost is built from the analysis mid-surface mesh
-  // (buildPieceMeshes offsets the real, opaque pieces from that same
-  // surface by half the shell thickness). The old -0.02 constant sat
-  // comfortably inside the opaque shell's own thickness and was never
-  // visible from outside it. Half the thickness clears the intrados
-  // exactly; 5 cm of air on top of that keeps it legible as a ghost
-  // rather than flush against the shell.
-  // The BUNDLE's own thickness, same reason arrowField's lift does at
-  // studio.js:1396: state.thickness is the control's live value and can
-  // drift from what the shell on screen was actually built at.
+  // R3: the ghost is built from the analysis surface mesh. K1 (cutting
+  // truth, 2026-08-17): buildPieceMeshes now extrudes the opaque pieces
+  // UPWARD from that same surface by the full shell thickness -- the
+  // surface IS the intrados, so no half-thickness offset is needed to
+  // clear it any more; 5 cm of air on top of the (now exact) surface
+  // keeps the ghost legible as a ghost rather than flush against the
+  // shell. The -0.02 constant in the animation branch below is unchanged:
+  // it was always a bare clearance constant standing a small gap below
+  // the surface, never a thickness-derived offset, so K1 leaves it be.
   falsework.position.z = mode === "always"
-    ? -(state.bundle.provenance.thickness / 2) - 0.05
+    ? -0.05
     : -0.02 - 1.5 * strikeU;
   // The strike takes the thrust network with it: wires and nodes fade,
   // drop and vanish on the same clock, and scrubbing back restores them
@@ -3240,9 +3251,24 @@ function applySceneAtTime(t) {
   // Node size slider alone could push the white dots back through the
   // shell at any clearance computed from wireRadius. Each object clears by
   // its own radius.
+  // K1 (cutting truth, 2026-08-17): the net (buildWiresAndNodes) is drawn
+  // straight off the raw analysis vertices, the same points piece.mid
+  // ships, so it now sits exactly at the shell's own bottom (intrados)
+  // face rather than at an independent mid-surface a half thickness below
+  // it. No thickness term is needed to clear the belly any more, and the
+  // sign flips from the old formula's: the clearance now pushes DOWN, away
+  // from the shell into the open air below it (the shell only ever
+  // extends UP from the intrados, so a positive push would bury the net
+  // inside the opaque solid instead of clearing it -- caught by the probe,
+  // which showed no net at all under a Both-mode shell until this negative
+  // sign landed). A radius-only drop keeps each object's own surface just
+  // clear of the coincident intrados point, read clean at the crown of
+  // Trial 2. The full thickness would drape the net over the EXTRADOS
+  // instead, putting it above the blocks, the opposite of what this wave
+  // asks the probe to show.
   const clearance = {
-    wires: state.bundle.provenance.thickness / 2 + state.wireRadius,
-    nodes: state.bundle.provenance.thickness / 2 + state.nodeRadius,
+    wires: -state.wireRadius,
+    nodes: -state.nodeRadius,
   };
   for (const key of ["wires", "nodes"]) {
     const object = state.objects[key];
@@ -3302,37 +3328,36 @@ function applyShowMode() {
   // studio_probe.mjs against the real "Algebraic TNA method" export in Both
   // mode, camera close on the ridge: buildWiresAndNodes draws the net
   // straight off bundle.analysis_mesh with no display offset (z = 0, right
-  // above), i.e. the raw structural mid-surface; buildPieceMeshes offsets
-  // the opaque shell off that same mid-surface family by half the built
-  // thickness a side. Nothing keeps those two independently-built surfaces
-  // a guaranteed distance apart, and at the crown -- the shallowest, most
-  // tightly curved part of this vault -- they come close enough that the
-  // net's own wire/node radius is enough to break through the shell's
+  // above); under the mid-surface convention this wave replaced,
+  // buildPieceMeshes offset the opaque shell off that same family by half
+  // the built thickness a side, and nothing kept the two independently
+  // built surfaces a guaranteed distance apart, so at the crown -- the
+  // shallowest, most tightly curved part of this vault -- they came close
+  // enough that the net's own wire/node radius broke through the shell's
   // extrados: Param's black line with regularly spaced white dots along
   // the ridge, confirmed in
   // .superpowers/sdd/2026-08-16-studio-finish/crown-seam-both-before.png
-  // and the tight crown-seam-both-closeup-before.png beside it, which shows
-  // one wire segment and one node sphere both breaking the surface.
-  // Pushing the net along +Z by half the built thickness plus its own
-  // radius is a display-only fix, not a re-derivation of the true offset
-  // surface: it approximates "outward along the local normal" and is only
-  // guaranteed to clear the shell where that normal is close to vertical,
-  // which is exactly the shallow crown region where the seam shows; it
-  // would under- or over-clear a steeply sloped stretch nearer the
-  // springing, where the net was already comfortably inside the shell.
-  // Framework mode has no shell to clash with, so it keeps rendering the
-  // net at its true mid-surface position, z = 0, for the form-finding
-  // diagram. Fix round 1: wires and nodes are separate InstancedMeshes at
-  // separate, independently user-adjustable radii (state.wireRadius,
+  // and the tight crown-seam-both-closeup-before.png beside it.
+  // K1 (cutting truth, 2026-08-17): the net's raw position now coincides
+  // with the shell's own bottom (intrados) face -- both come from the same
+  // lifted surface point -- so clearing the crown seam no longer needs a
+  // thickness-derived push at all. The sign flips from the pre-K1 formula
+  // too: the shell only ever extends UP from the intrados now, so the
+  // clearance has to push the net DOWN, into the open air below the
+  // shell, or it buries the net inside the opaque solid instead of
+  // clearing it (the probe caught exactly that: no net visible at all
+  // under a Both-mode shell before this negative sign landed). A
+  // radius-only drop keeps each object's own surface just clear of that
+  // coincident point, read clean at the crown of Trial 2. Framework mode
+  // has no shell to clash with, so it keeps rendering the net at its true
+  // surface position, z = 0, for the form-finding diagram. Fix round 1
+  // (pre-K1): wires and nodes are separate InstancedMeshes at separate,
+  // independently user-adjustable radii (state.wireRadius,
   // state.nodeRadius), so each clears the shell by its OWN radius -- a
   // shared clearance under-cleared whichever one was bigger, and growing
   // the Node size slider alone could push the white dots back through.
-  const wireClearance = state.showMode === "both"
-    ? state.bundle.provenance.thickness / 2 + state.wireRadius
-    : 0;
-  const nodeClearance = state.showMode === "both"
-    ? state.bundle.provenance.thickness / 2 + state.nodeRadius
-    : 0;
+  const wireClearance = state.showMode === "both" ? -state.wireRadius : 0;
+  const nodeClearance = state.showMode === "both" ? -state.nodeRadius : 0;
   state.objects.wires.position.z = wireClearance;
   state.objects.nodes.position.z = nodeClearance;
   const falsework = state.objects.falsework;
@@ -3342,11 +3367,10 @@ function applyShowMode() {
     if (wanted) {
       falsework.material.opacity = 0.3;
       // Same offset as the always branch in applySceneAtTime above, so
-      // the two never disagree about where the ghost sits at rest. The
-      // BUNDLE's own thickness, same reason arrowField's lift does at
-      // studio.js:1396: state.thickness is the control's live value and
-      // can drift from what the shell on screen was actually built at.
-      falsework.position.z = -(state.bundle.provenance.thickness / 2) - 0.05;
+      // the two never disagree about where the ghost sits at rest. K1:
+      // the surface IS the intrados now, so no half-thickness offset is
+      // needed to clear it; 5 cm of air keeps the ghost legible.
+      falsework.position.z = -0.05;
     }
   }
 }

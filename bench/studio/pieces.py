@@ -7,9 +7,11 @@ heatmaps keep their resolution, and its boundary is the outline exactly.
 Neighbours share boundary points because both took them from the same
 welded cut, so their joints coincide rather than nearly coincide.
 
-Thickness is not applied here. Each vertex ships as a mid surface point
-plus a unit normal, and the viewer offsets by half the thickness either
-way, which keeps thickness, taper and the joint gap client side.
+Thickness is not applied here. Each vertex ships as a surface point --
+under K1 (cutting truth, 2026-08-17) the surface the formwork touches,
+the intrados, recorded as provenance["surface"] == "intrados" -- plus a
+unit normal, and the viewer extrudes upward by the full thickness, which
+keeps thickness, taper and the joint gap client side.
 
 A corner sits where two facets meet, and a single stored normal can only
 lie in one of their two planes at once. So exactly one of a corner's

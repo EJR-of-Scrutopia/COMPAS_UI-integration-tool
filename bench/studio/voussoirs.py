@@ -287,6 +287,11 @@ def mesh_volume(
 def _solid_from_corners(corners: List[int], normals, vertices, thickness) -> dict:
     """A closed prismatoid through the corners: caps plus one side per run."""
 
+    # K1 (cutting truth, 2026-08-17) left this CRA analysis solid on the
+    # mid-surface convention deliberately: it feeds solve_cra's rigid-block
+    # equilibrium check, not the drawn viewer pieces, which now build up
+    # from the intrados instead (see pieces.py, buildPieceMeshes). The two
+    # will disagree in the viewer until the CRA rescue reconciles them.
     half = thickness / 2.0
     count = len(corners)
     block_vertices: List[List[float]] = []

@@ -350,6 +350,99 @@ def test_a_clamp_free_cut_reports_no_magnitude_at_all():
     assert report["clamped_median_m"] == 0.0
 
 
+def saddle_z(x, y):
+    return 0.25 * (x * x - y * y)
+
+
+def saddle_surface(side=8):
+    """A side by side quad mesh over [-2, 2] squared, lifted into a
+    hyperbolic paraboloid: negative Gaussian curvature everywhere but the
+    centre point, same z = 0.25 * (x*x - y*y) formula as
+    tests/fixtures/saddle_contract.json (the Cutting Truth wave's Task 1
+    fixture, added because dome_surface/flat_surface above are both
+    synclastic or flat). Built directly, mirroring dome_surface()'s own
+    pattern, rather than through the equilibrium/formGraph contract that
+    JSON file carries for the TNA pipeline: pieces.py's own tests never
+    load a contract, they build the render mesh Surface straight.
+    """
+
+    cutting = studio("cutting")
+    step = 4.0 / side
+    vertices = [
+        [-2.0 + i * step, -2.0 + j * step, saddle_z(-2.0 + i * step, -2.0 + j * step)]
+        for j in range(side + 1) for i in range(side + 1)
+    ]
+    faces = []
+    n = side + 1
+    for j in range(side):
+        for i in range(side):
+            faces.append([j * n + i, j * n + i + 1, (j + 1) * n + i + 1, (j + 1) * n + i])
+    return cutting.Surface(vertices, faces), vertices, faces
+
+
+def saddle_cells():
+    """Four 2 m cells covering the same [-2, 2] squared span, two courses."""
+
+    t = studio("tessellation")
+    raw = []
+    for j in range(2):
+        for i in range(2):
+            x0, y0 = -2.0 + i * 2.0, -2.0 + j * 2.0
+            raw.append({
+                "key": "s{}{}".format(i, j),
+                "course": j,
+                "outline": [
+                    [x0, y0], [x0 + 2.0, y0],
+                    [x0 + 2.0, y0 + 2.0], [x0, y0 + 2.0],
+                ],
+                "holes": [],
+            })
+    return t.build_tessellation(raw, "test", "generated", 2.0, 2)
+
+
+def test_nothing_sits_below_the_intrados_on_the_saddle():
+    """K1 (cutting truth, 2026-08-17): the surface segment_pieces ships
+    (mid, normals) IS the intrados now, the face the formwork touches; the
+    viewer only ever extrudes forward along the normal, from 0 up to the
+    (taper scaled) thickness, never backward (buildPieceMeshes, studio.js).
+
+    pieces.py ships no thickness and builds no solid itself -- the solid
+    is built client side -- so this cannot exercise buildPieceMeshes
+    directly. What it pins down, on a genuinely doubly curved fixture (the
+    saddle: negative Gaussian curvature in both directions at once, unlike
+    the dome/flat fixtures above), is the numeric contract that extrusion
+    depends on: every shipped normal is a true unit vector, so offset 0
+    reproduces the shipped surface point exactly (the bottom/intrados cap)
+    and a positive offset along that same normal never reads as behind it.
+    A reintroduction of the old symmetric mid-surface split (offset
+    -thickness/2) would read as negative here.
+    """
+
+    p = studio("pieces")
+    surface, _, _ = saddle_surface()
+    tess = saddle_cells()
+    made, _ = p.segment_pieces(tess, surface, [])
+    assert made, "the saddle fixture must actually produce pieces"
+    thickness = 0.2
+    for piece in made:
+        for mid, normal in zip(piece["mid"], piece["normals"]):
+            length = math.sqrt(sum(component * component for component in normal))
+            assert length == pytest.approx(1.0, abs=1e-6), piece["key"]
+            # The bottom cap: offset 0, exactly the shipped surface point,
+            # nothing below it along its own normal.
+            bottom = [mid[axis] + normal[axis] * 0.0 for axis in range(3)]
+            along_bottom = sum(
+                (bottom[axis] - mid[axis]) * normal[axis] for axis in range(3))
+            assert along_bottom == pytest.approx(0.0, abs=1e-9)
+            assert bottom == mid
+            # The top cap: the full thickness outward, never inward.
+            top = [mid[axis] + normal[axis] * thickness for axis in range(3)]
+            along_top = sum(
+                (top[axis] - mid[axis]) * normal[axis] for axis in range(3))
+            assert along_top == pytest.approx(thickness, abs=1e-9)
+            assert along_top >= -1e-9
+
+
 def test_clamped_points_are_disclosed_in_metres_not_only_counted():
     """A count with no magnitude cannot be read.
 

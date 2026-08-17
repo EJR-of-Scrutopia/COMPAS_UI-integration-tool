@@ -324,6 +324,12 @@ def build_bundle(
         "provenance": {
             "contract_file": pairs[export_name]["contract"].name,
             "thickness": thickness,
+            # K1 (cutting truth, 2026-08-17): the piece "mid" points this
+            # bundle ships are the surface the formwork touches, and the
+            # viewer (buildPieceMeshes, studio.js) builds the drawn solid
+            # upward from there by the full thickness. Named explicitly so
+            # a viewer can tell which convention a bundle was built under.
+            "surface": "intrados",
             "combination": "ULS",
             "combination_factor": 1.35,
             "note": "staging and verification are null until their runs "
