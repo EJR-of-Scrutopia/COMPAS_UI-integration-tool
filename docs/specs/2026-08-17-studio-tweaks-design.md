@@ -120,3 +120,27 @@ the queue resumes: cut cancellation, 6b patterns, Wave B, ROS.
   constant height; ground tint/scale applied.
 - Suites from the repo root; no em dashes; no attribution; nothing
   pushed (pushing is Param's).
+
+## Retrospective corrections
+
+Added by the wave's final fix review, 2026-08-17, after the plan above
+had already shipped and been reviewed against what actually landed.
+
+(a) W3 (above) reads as "switches to half-float above a pixel-count
+threshold": a pre-choice to decide the data type from the image's own
+pixel count before attempting a decode. What shipped, by controller
+ruling, is a different shape: `loadHdri` always attempts FloatType
+first and falls back to HalfFloatType only when that attempt throws a
+RangeError, the browser's own ArrayBuffer allocation ceiling, then
+falls through to the failure banner if the half-float retry also
+throws a RangeError. No pixel count is ever consulted to choose which
+type to try first; `HDRI_HALF_FLOAT_PIXEL_CEILING` is read only inside
+that final banner, to name the practical ceiling in the message, not to
+gate an upfront choice.
+
+(b) W4's "the Brightness slider's lower half" and "above the midpoint"
+wording (above) describes the fade threshold as the arithmetic midpoint
+of the slider's own range. The slider spans 0.3 to 2.0, whose
+arithmetic midpoint is 1.15. The threshold the plan actually pinned,
+and the code follows, is brightness 1.0: the slider's neutral default
+value, not the midpoint of its span.

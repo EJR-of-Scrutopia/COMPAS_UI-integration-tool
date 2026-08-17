@@ -2424,7 +2424,14 @@ def test_w2_render_skin_is_removed_entirely():
     for token in ("SKINS", "skinMaterialCache", "white-presentation", "basalt-dark", "timber-ply"):
         assert token not in js
     assert "state.appearance.skin" not in js
-    assert ".skin" not in js
+    # M2 (final fix wave, 2026-08-17): a whole-file ".skin" ban would
+    # misfire on any future identifier merely ending in those letters
+    # (e.g. a CSS class or an unrelated field); the two targeted absences
+    # below, plus the state.appearance.skin check above and
+    # test_w2_stored_skin_appearance_migrates_to_tint_and_finish_only's
+    # restoreAppearance/reset checks, already cover every site the skin
+    # concept could have left a trace.
+    assert "parsed.skin" not in js
     # appearanceMaterialBase is reduced to the material registry entry,
     # always -- no skin substitution branch left to read.
     body = _function_body(js, "appearanceMaterialBase")
@@ -2638,6 +2645,22 @@ def test_w5_turntable_is_flat_and_advances_in_frame():
         "the live orbit advance must stand down while a recording drives "
         "its own frame-indexed pass, or the two clocks race"
     )
+
+    # C1 (final fix wave, 2026-08-17): orbitActive itself must gate on the
+    # playing flag, not just !userDragging/!recording, or the camera orbits
+    # at boot, mid-pause and mid-scrub. Sliced to the condition's own
+    # source text (not the whole frame_body) so the playback-advance block
+    # above, which also reads state.timeline.playing, cannot pass this pin
+    # by accident -- this checks the gate at its actual seam.
+    orbit_active_at = frame_body.index("const orbitActive =")
+    orbit_active_line = frame_body[orbit_active_at:frame_body.index(";", orbit_active_at) + 1]
+    assert "state.timeline.playing" in orbit_active_line, (
+        "orbitActive must gate on the playing flag, or the camera keeps "
+        "orbiting while the timeline is paused"
+    )
+    assert "state.timeline.autoSpin" in orbit_active_line
+    assert "!state.userDragging" in orbit_active_line
+    assert "!state.recording" in orbit_active_line
 
     # applyTimeline no longer touches the camera at all: the advance lives
     # in frame(), not the pure-in-t function recordAnimation also drives.

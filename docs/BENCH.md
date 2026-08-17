@@ -155,9 +155,10 @@ crown.
   turntable: the camera holds a constant height and constant distance and
   orbits about the built shell's own bounding-box centre (recomputed on
   every study load and cut swap, so the pavilion stays centred regardless
-  of the export's own origin), no vertical bobbing. The height comes from
-  wherever the camera sits when the orbit starts (boot, or right after a
-  drag release), so a manual reframe holds through the turntable. The
+  of the export's own origin), no vertical bobbing. The turntable runs
+  during playback, live or recorded; while paused the camera is exactly
+  where the user left it. Height and azimuth are both taken from the
+  camera when the orbit starts; the distance slider sets the radius. The
   falsework strikes after the last segment lands.
 - The panel holds six collapsible sections in order: Import, Study,
   Analysis, View, Animation, Scene. Record is a button inside Animation

@@ -138,11 +138,14 @@ function applyGrade() {
   // own input handler calls only applyGrade (see its addEventListener
   // below); applyEnvironment never runs on a
   // brightness drag, so the fade has to sit where brightness is actually
-  // read live. 0.6 and 0.5 restate applyEnvironment's own studio-mode
-  // baselines for environmentIntensity and hemi.intensity as absolute
-  // assignments (never a *=, so repeated calls cannot compound the
-  // scale); sky and hdri modes are untouched, guarded out entirely by the
-  // mode check below, exactly as W4 asks.
+  // read live. 0.6 and 0.5 ARE the studio-mode baselines for
+  // environmentIntensity and hemi.intensity, the single source for both
+  // (I2, final fix wave, 2026-08-17: applyEnvironment's studio branch used
+  // to restate them as dead writes, always overwritten by the call to this
+  // function it ends with; those writes are gone, this is the one live
+  // site) -- absolute assignments, never a *=, so repeated calls cannot
+  // compound the scale; sky and hdri modes are untouched, guarded out
+  // entirely by the mode check below, exactly as W4 asks.
   if (state.environmentMode === "studio") {
     const ambientScale = state.brightness < 1 ? Math.min(1, state.brightness) ** 2 : 1;
     scene.environmentIntensity = 0.6 * ambientScale;
@@ -304,11 +307,15 @@ function applyEnvironment() {
       document.getElementById("sun-colour").value = "#" + sun.color.getHexString();
     }
     sun.shadow.radius = 1;
-    hemi.intensity = 0.5;
     // Light concretes were clipping to white under the room environment plus
     // filmic tone mapping, which made three different presets look identical.
     state.exposureBase = 0.85;
-    scene.environmentIntensity = 0.6;
+    // I2 (final fix wave, 2026-08-17): no environmentIntensity/hemi.intensity
+    // writes here -- this branch always ends in the applyGrade() call below,
+    // and applyGrade's own studio-mode block (guarded on the same mode
+    // check) unconditionally overwrites both as absolute assignments, so a
+    // write here would be dead code restating applyGrade's baselines a
+    // second time. See applyGrade for the one live site.
   }
   applyGrade();
 }
@@ -3540,9 +3547,11 @@ function seatGapClearanceMax() {
 // and the integrity pulse. setLayer's wires/falsework toggle and
 // rebuildWiresAndNodes both need to recompute this scene state after the
 // objects they touch change, but neither one should be allowed to move the
-// camera -- only applyTimeline's own scrubber/play/record callers get to
-// do that. Kept pure in t, same as applyTimeline: no clock reads here
-// either.
+// camera -- and none of applyTimeline's own scrubber/play/record callers
+// move it either, not even those. The only camera writer in the whole
+// module is frame()'s own orbitActive gate (applyOrbit), and only while
+// the timeline is playing. Kept pure in t, same as applyTimeline: no
+// clock reads here either.
 function applySceneAtTime(t) {
   state.timeline.t = t;
   // Guarded like every sibling that touches these two (recolourSegments,
@@ -3860,8 +3869,12 @@ async function recordAnimation() {
   // recording (the state.recording guard), so the live orbitTheta never
   // moved and would otherwise leave the turntable's very next live frame
   // snapping back to a stale pre-recording azimuth instead of continuing
-  // from wherever the recording's own clock left the camera.
-  let recordOrbitTheta = 0;
+  // from wherever the recording's own clock left the camera. Initialised
+  // to the live orbitTheta, not 0: a throw before frame 1 writes this
+  // starting value straight back through the finally block below, and
+  // 0 would snap the live turntable's next active tick to azimuth zero
+  // instead of leaving it exactly where it already was.
+  let recordOrbitTheta = orbitTheta;
   try {
     for (let frameIndex = 0; frameIndex < total; frameIndex++) {
       if (state.dayCycle.record) {
@@ -3989,10 +4002,12 @@ for (const [id, prop] of [["inflate-seconds", "inflateSeconds"], ["orbit-speed",
   });
 }
 // Speed is a playback rate, not a scene parameter: routing it through the
-// loop above would call applyTimeline on every drag tick, which snaps an
-// orbited camera back onto the ring for no scene effect at all. It is set
-// here instead, alongside the label it already updates, with no
-// applyTimeline call.
+// loop above would call applyTimeline(state.timeline.t) on every drag
+// tick, recomputing the same instant in t for no scene effect at all
+// (applyTimeline never touches the camera; only frame()'s own
+// orbitActive gate does, and only while playing). It is set here
+// instead, alongside the label it already updates, with no applyTimeline
+// call.
 document.getElementById("timeline-speed").addEventListener("input", (e) => {
   document.getElementById("timeline-speed-value").textContent = (+e.target.value).toFixed(2);
   if (state.timeline) state.timeline.speed = +e.target.value;
@@ -4047,21 +4062,30 @@ function frame(now) {
   if (state.timeline && document.activeElement !== scrubber) {
     scrubber.value = Math.round(1000 * state.timeline.t / timelineDuration());
   }
-  // W5 (studio tweaks, 2026-08-17): the turntable -- pure azimuthal orbit
-  // at constant height and radius about the study centroid. theta only
-  // advances here, off frame()'s wall clock, the sole advancer;
-  // recordAnimation drives its own deterministic pass instead (its own
-  // frameIndex-based theta), for the same reason the day cycle's F2
-  // comment gives above: two clocks racing the same state would make a
-  // recording non-deterministic, which is also why this stands down while
-  // state.recording is set. height is captured once, the instant the
-  // orbit (re)starts -- boot, or the frame right after a drag release --
-  // from wherever the camera already sits, so the user's own framing is
-  // what the turntable holds, never a formula in r.
-  const orbitActive = state.timeline && state.timeline.autoSpin &&
+  // W5 (studio tweaks, 2026-08-17), regated by the final fix wave's C1
+  // (2026-08-17): the turntable -- pure azimuthal orbit at constant
+  // height and radius about the study centroid, run only while the
+  // timeline is playing. theta only advances here, off frame()'s wall
+  // clock, the sole advancer while playing; recordAnimation drives its
+  // own deterministic pass instead (its own frameIndex-based theta), for
+  // the same reason the day cycle's F2 comment gives above: two clocks
+  // racing the same state would make a recording non-deterministic,
+  // which is also why this stands down while state.recording is set.
+  // C1: state.timeline.playing gates the whole block, or the camera
+  // orbited even at boot, mid-pause and mid-drag, undoing every pan and
+  // eating wheel zoom. height AND theta are both captured once, the
+  // instant the orbit (re)starts -- pressing play, or the frame right
+  // after a drag release with playback already running -- from wherever
+  // the camera already sits, so the user's own framing is what the
+  // turntable continues, never a formula in r or a stale theta left over
+  // from before the pause.
+  const orbitActive = state.timeline && state.timeline.autoSpin && state.timeline.playing &&
     !state.userDragging && !state.recording;
   if (orbitActive) {
-    if (!orbitWasActive) orbitHeight = camera.position.z;
+    if (!orbitWasActive) {
+      orbitHeight = camera.position.z;
+      orbitTheta = Math.atan2(camera.position.y - state.centre.y, camera.position.x - state.centre.x);
+    }
     orbitTheta += state.timeline.orbitSpeed * delta;
     applyOrbit(orbitTheta, orbitHeight);
   }
