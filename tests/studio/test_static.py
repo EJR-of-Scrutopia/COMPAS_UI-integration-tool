@@ -1706,11 +1706,26 @@ def test_sprayed_concrete_grows_about_its_own_centroid():
     # the ground stretching vertically through the falsework to their true
     # height. Sprayed concrete thickens where it is sprayed, so the growth
     # is taken about the piece's own centroid.
+    #
+    # F6 fix wave (cutting truth final review, 2026-08-17): that centroid
+    # must be the piece's INTRADOS centroid, not its mid-thickness solid
+    # centroid -- under K1's intrados-based build the solid centroid sits
+    # about half a thickness above the formwork, so growing from it made a
+    # casting materialise mid-air instead of beginning as a sheet ON the
+    # formwork and thickening upward.
     js = (STATIC / "studio.js").read_text(encoding="utf-8")
     build_start = js.index("function buildPieceMeshes(")
     build_body = js[build_start:js.index("\n}", build_start)]
     assert "userData.centreZ" in build_body, (
         "each piece must record its own centroid height at build time"
+    )
+    assert "mesh.userData.centreZ = intradosZ;" in build_body, (
+        "centreZ must be the intrados cap's own average z, not the solid's "
+        "mid-thickness centroid, or a sprayed casting starts mid-air"
+    )
+    assert "intradosZ += points[i][2]" in build_body, (
+        "the intrados centroid must be averaged from the offset-0 cap "
+        "points, the ones that actually rest on the formwork"
     )
     start = js.index("function applySceneAtTime(")
     body = js[start:js.index("\n}", start)]
@@ -1966,16 +1981,31 @@ def test_both_mode_and_the_pre_strike_timeline_clear_the_net_of_the_crown_seam()
     # drop is enough to keep each object's own surface just clear of that
     # coincident point, read clean at the crown of Trial 2
     # (.superpowers/sdd/2026-08-17-cutting-truth/).
+    #
+    # F1 (cutting truth final review, 2026-08-17): a radius-only drop still
+    # under-cleared K2's flat-cut jointed pieces -- the true surface can
+    # rise up to seat_gap_stats.max above the flat belly plane between a
+    # piece's corners, burying 28.2% of wire locations on Trial 2 (up to
+    # 98.9 mm). Both call sites now add seatGapClearanceMax() -- the
+    # measured max when the bundle has one and it is positive, else 0 --
+    # to the radius, in lockstep.
     js = (STATIC / "studio.js").read_text(encoding="utf-8")
     show_body = _function_body(js, "applyShowMode")
-    assert "state.showMode === \"both\" ? -state.wireRadius : 0" in show_body
-    assert "state.showMode === \"both\" ? -state.nodeRadius : 0" in show_body
+    assert "state.showMode === \"both\" ? -(state.wireRadius + seatGapMax) : 0" in show_body
+    assert "state.showMode === \"both\" ? -(state.nodeRadius + seatGapMax) : 0" in show_body
     scene_body = _function_body(js, "applySceneAtTime")
-    assert "wires: -state.wireRadius," in scene_body
-    assert "nodes: -state.nodeRadius," in scene_body
+    assert "wires: -(state.wireRadius + seatGapMax)," in scene_body
+    assert "nodes: -(state.nodeRadius + seatGapMax)," in scene_body
     # The strike's own drop is additive with the clearance, so the net still
     # lands 1.5 m clear of the shell once fully struck (strikeU = 1).
     assert "clearance[key] - 1.5 * strikeU" in scene_body
+    # Both call sites read the same helper (byte-identical expressions),
+    # which reads the exact bundle path the Data panel already reads and
+    # falls back to 0 when there is no positive max to add.
+    assert "seatGapClearanceMax()" in show_body and "seatGapClearanceMax()" in scene_body
+    helper_body = _function_body(js, "seatGapClearanceMax")
+    assert "state.bundle.tessellation.seat_gap_stats" in helper_body
+    assert "typeof max === \"number\" && max > 0 ? max : 0" in helper_body
 
 
 def test_the_formwork_default_is_hidden():

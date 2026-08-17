@@ -3038,6 +3038,20 @@ function buildPieceMeshes() {
         }
       }
     }
+    // F6 fix wave (cutting truth final review, 2026-08-17): the sprayed
+    // growth anchor used to be centre[2] below, the solid's own
+    // mid-thickness centroid -- under K1's intrados-based build that sits
+    // about half a thickness above the formwork, so a casting grown from
+    // it materialised mid-air and only touched the formwork once fully
+    // thickened. The intrados cap is the second `count` points pushed
+    // above (offset 0, per the loop-order comment at the top of this
+    // function) and is what actually rests on the formwork, so its own
+    // average z is where growth must start from to begin as a sheet ON
+    // the formwork and thicken upward, per the sprayed branch's own
+    // comment in applySceneAtTime.
+    let intradosZ = 0;
+    for (let i = count; i < 2 * count; i++) intradosZ += points[i][2];
+    intradosZ /= count;
     // The joint: shrink the whole casting toward its own centroid, so
     // neighbours stand apart by twice the inset and the cut reads.
     let cx = 0, cy = 0, cz = 0;
@@ -3089,7 +3103,7 @@ function buildPieceMeshes() {
         }
       }
     }
-    built.push({ piece, positions, weights, surface, centre });
+    built.push({ piece, positions, weights, surface, centre, intradosZ });
   }
   // Sprayed concrete is one continuous surface: the joint gap is zero,
   // the shrink factor is exactly 1, and every intrados (bottom, offset 0)
@@ -3119,7 +3133,7 @@ function buildPieceMeshes() {
   }
   let offset = 0;
   for (const entry of built) {
-    const { piece, positions, weights, surface, centre } = entry;
+    const { piece, positions, weights, surface, centre, intradosZ } = entry;
     const normals = welded
       ? welded.slice(offset, offset + positions.length)
       : creaseNormals(positions);
@@ -3132,11 +3146,13 @@ function buildPieceMeshes() {
     const mesh = new THREE.Mesh(geometry, pieceMaterial(piece.key));
     mesh.castShadow = mesh.receiveShadow = true;
     mesh.userData.key = piece.key;
-    // The casting's own centroid height. Piece geometry is in absolute
-    // world coordinates and the mesh sits at the origin, so the sprayed
-    // growth needs this to scale a piece about itself rather than about
-    // z = 0 (see applySceneAtTime).
-    mesh.userData.centreZ = centre[2];
+    // The casting's own intrados centroid height (F6 fix wave, cutting
+    // truth final review, 2026-08-17 -- see the intradosZ comment above).
+    // Piece geometry is in absolute world coordinates and the mesh sits
+    // at the origin, so the sprayed growth needs this to scale a piece
+    // about the height it actually rests at rather than about z = 0
+    // (see applySceneAtTime).
+    mesh.userData.centreZ = intradosZ;
     mesh.userData.weights = weights;
     mesh.userData.surface = surface;
     mesh.userData.basePositions = new Float32Array(positions);
@@ -3255,6 +3271,22 @@ function applyInflation(u) {
   }
 }
 
+// F1 fix wave (cutting truth final review, 2026-08-17): both net-clearance
+// call sites below (applySceneAtTime's Timeline branch and applyShowMode's
+// Both branch) need the same worst-case seat gap, so it is read once here
+// rather than typed twice where a future edit could let the two drift.
+// K2's flat-cut jointed pieces can rise above their own belly plane at a
+// flat spot between corners -- the true curved surface bulges up past the
+// piece's cut plane -- and a radius-only drop under-cleared exactly that
+// rise: 28.2% of wire locations buried under Trial 2's flattest pieces, up
+// to 98.9 mm. A missing or non-positive max (sprayed concrete, no jointed
+// pieces, or a bundle cached before K2 landed) contributes nothing.
+function seatGapClearanceMax() {
+  const stats = state.bundle && state.bundle.tessellation && state.bundle.tessellation.seat_gap_stats;
+  const max = stats && stats.max;
+  return typeof max === "number" && max > 0 ? max : 0;
+}
+
 // Everything that depends on the build/strike clock but not on the camera:
 // inflation, segment drop/visibility, falsework, wires/nodes strike state,
 // and the integrity pulse. setLayer's wires/falsework toggle and
@@ -3313,7 +3345,12 @@ function applySceneAtTime(t) {
       // true height, which is a piece arriving from elsewhere, not
       // concrete being built up. Compensating the position by
       // centreZ * (1 - grown) pins the centroid in place while the
-      // thickness comes on.
+      // thickness comes on. F6 fix wave (cutting truth final review,
+      // 2026-08-17): centreZ is the piece's INTRADOS centroid, not its
+      // mid-thickness solid centroid (see the intradosZ comment in
+      // buildPieceMeshes) -- growth now begins as a sheet ON the
+      // formwork and thickens upward, rather than materialising mid-air
+      // about half a thickness above it.
       const grown = 0.001 + 0.999 * easeOutCubic(u);
       segment.scale.set(1, 1, grown);
       segment.position.z = segment.userData.centreZ * (1 - grown);
@@ -3385,9 +3422,18 @@ function applySceneAtTime(t) {
   // Trial 2. The full thickness would drape the net over the EXTRADOS
   // instead, putting it above the blocks, the opposite of what this wave
   // asks the probe to show.
+  // F1 fix wave (cutting truth final review, 2026-08-17): a radius-only
+  // drop still buried the net under K2's flat-cut jointed pieces, whose
+  // true surface can rise as far as seat_gap_stats.max above the flat
+  // belly plane between corners; seatGapClearanceMax() folds that
+  // worst case in. Steep-slope caveat: a world-Z drop like this one is
+  // only worth radius*|n_z| along the local normal, not the full radius,
+  // on a steeply sloped stretch -- the seat-gap term added here covers
+  // the flat-belly rise, not that slope case.
+  const seatGapMax = seatGapClearanceMax();
   const clearance = {
-    wires: -state.wireRadius,
-    nodes: -state.nodeRadius,
+    wires: -(state.wireRadius + seatGapMax),
+    nodes: -(state.nodeRadius + seatGapMax),
   };
   for (const key of ["wires", "nodes"]) {
     const object = state.objects[key];
@@ -3475,8 +3521,17 @@ function applyShowMode() {
   // state.nodeRadius), so each clears the shell by its OWN radius -- a
   // shared clearance under-cleared whichever one was bigger, and growing
   // the Node size slider alone could push the white dots back through.
-  const wireClearance = state.showMode === "both" ? -state.wireRadius : 0;
-  const nodeClearance = state.showMode === "both" ? -state.nodeRadius : 0;
+  // F1 fix wave (cutting truth final review, 2026-08-17): a radius-only
+  // drop still buried the net under K2's flat-cut jointed pieces, whose
+  // true surface can rise as far as seat_gap_stats.max above the flat
+  // belly plane between corners; seatGapClearanceMax() folds that
+  // worst case in. Steep-slope caveat: a world-Z drop like this one is
+  // only worth radius*|n_z| along the local normal, not the full radius,
+  // on a steeply sloped stretch -- the seat-gap term added here covers
+  // the flat-belly rise, not that slope case.
+  const seatGapMax = seatGapClearanceMax();
+  const wireClearance = state.showMode === "both" ? -(state.wireRadius + seatGapMax) : 0;
+  const nodeClearance = state.showMode === "both" ? -(state.nodeRadius + seatGapMax) : 0;
   state.objects.wires.position.z = wireClearance;
   state.objects.nodes.position.z = nodeClearance;
   const falsework = state.objects.falsework;
