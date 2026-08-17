@@ -1865,6 +1865,35 @@ function renderDataPanel(v) {
       content.appendChild(residualCounts);
     }
 
+    // K2 (cutting truth, 2026-08-17): a jointed piece is cut flat -- its
+    // belly and top are both planes, not the true curved surface -- so
+    // every jointed piece leaves a gap between its seat plane and the
+    // surface it actually rests on: the packing or mortar bed a flat cut
+    // on a curved form always implies. Guarded the same way the residual
+    // distribution above is: a bundle cached before this landed has no
+    // seat_gap_stats to read a count off.
+    const seatStats = tess.seat_gap_stats;
+    if (!seatStats) {
+      const seatMissing = document.createElement("p");
+      seatMissing.textContent = "seat gaps: not measured in this cached "
+        + "bundle. Delete the cached bundle, or change any control, to re-cut.";
+      content.appendChild(seatMissing);
+    } else if (seatStats.count === 0) {
+      const seatNone = document.createElement("p");
+      seatNone.textContent = "seat gaps: no jointed pieces in this cut -- "
+        + "sprayed concrete stays a curved, moulded shell with no flat "
+        + "seat to gap at all.";
+      content.appendChild(seatNone);
+    } else {
+      const seatLine = document.createElement("p");
+      seatLine.textContent = "seat gaps (flat cut on curved form): median "
+        + (seatStats.median * 1000).toFixed(1) + " mm, max "
+        + (seatStats.max * 1000).toFixed(1) + " mm, over " + seatStats.count
+        + " jointed piece(s). A flat belly on a curved form always leaves "
+        + "a wedge; this is that wedge, not hidden by the drawing.";
+      content.appendChild(seatLine);
+    }
+
     // With denominators and, for the clamp, with the magnitude. The same
     // 137 clamped points are either rounding noise or ten times the 5 mm
     // chord target depending on how far they moved, which is why the
@@ -2919,25 +2948,58 @@ function buildPieceMeshes() {
   for (const piece of state.bundle.pieces) {
     const count = piece.mid.length;
     // K1 (cutting truth, 2026-08-17): mid/normals ship the surface the
-    // formwork touches -- provenance.surface === "intrados" -- so the
-    // bottom cap sits ON it (offset 0) and the top cap is extruded the
-    // full taper-scaled thickness outward along the normal; taper still
-    // means "thins toward the crown", it just scales the whole thickness
-    // now instead of half of it. Loop order matches pieces.py's doubled
-    // index topology: the first `count` points are the "top"/extrados
-    // cap (faces index 0..count-1, unreversed winding), the second
-    // `count` are the "bottom"/intrados cap (index count..2*count-1,
-    // reversed winding) -- see the piece.faces comment in pieces.py.
+    // formwork touches -- provenance.surface === "intrados". Loop order
+    // matches pieces.py's doubled index topology either way below: the
+    // first `count` points are the "top"/extrados cap (faces index
+    // 0..count-1, unreversed winding), the second `count` are the
+    // "bottom"/intrados cap (index count..2*count-1, reversed winding)
+    // -- see the piece.faces comment in pieces.py. Taper still means
+    // "thins toward the crown", scaling the whole thickness, not half.
     const full = state.bundle.provenance.thickness * taperAt(piece.course);
     const points = [];
-    for (const offset of [full, 0]) {
+    const seatPlane = piece.seat_plane;
+    if (seatPlane) {
+      // K2 (cutting truth, 2026-08-17): a jointed piece with a fitted
+      // seat plane is a true prismatic block, not a curved shell. The
+      // belly is every mid point projected onto the piece's OWN plane
+      // (origin + unit normal, both shipped by pieces.py's least-squares
+      // fit); the top is the same projected points offset by the full
+      // taper-scaled thickness along the PLANE's normal, not each
+      // point's own surface normal, so the two caps stay exactly
+      // parallel and the sides rule dead straight between them.
+      const [ox, oy, oz] = seatPlane.origin;
+      const [nx, ny, nz] = seatPlane.normal;
+      const belly = [];
       for (let i = 0; i < count; i++) {
-        const m = piece.mid[i], n = piece.normals[i];
-        points.push([
-          m[0] + n[0] * offset,
-          m[1] + n[1] * offset,
-          m[2] + n[2] * offset,
-        ]);
+        const m = piece.mid[i];
+        const d = (m[0] - ox) * nx + (m[1] - oy) * ny + (m[2] - oz) * nz;
+        belly.push([m[0] - d * nx, m[1] - d * ny, m[2] - d * nz]);
+      }
+      for (const offset of [full, 0]) {
+        for (let i = 0; i < count; i++) {
+          const b = belly[i];
+          points.push([
+            b[0] + nx * offset,
+            b[1] + ny * offset,
+            b[2] + nz * offset,
+          ]);
+        }
+      }
+    } else {
+      // Sprayed concrete, and any jointed piece the server could not fit
+      // a plane for, keep K1's straight extrusion: the bottom cap sits ON
+      // the shipped surface (offset 0) and the top cap is extruded the
+      // full taper-scaled thickness outward along each point's OWN
+      // normal, so the built solid stays as curved as the true surface.
+      for (const offset of [full, 0]) {
+        for (let i = 0; i < count; i++) {
+          const m = piece.mid[i], n = piece.normals[i];
+          points.push([
+            m[0] + n[0] * offset,
+            m[1] + n[1] * offset,
+            m[2] + n[2] * offset,
+          ]);
+        }
       }
     }
     // The joint: shrink the whole casting toward its own centroid, so

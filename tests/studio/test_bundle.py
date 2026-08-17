@@ -254,6 +254,9 @@ def test_a_bundle_cached_before_a_tessellation_field_existed_is_stale(
         "tessellation.clamped_max_m",
         "tessellation.clamped_median_m",
         "tessellation.report.folded",
+        # K2 (cutting truth, 2026-08-17): the seat-gap distribution, read
+        # by the Data panel beside the corner residual stats.
+        "tessellation.seat_gap_stats",
     ):
         assert path in bundle.REQUIRED_BUNDLE_KEYS, (
             "{} is read by the Data panel and must invalidate a cache that "

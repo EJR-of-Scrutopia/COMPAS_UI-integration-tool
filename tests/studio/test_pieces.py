@@ -380,24 +380,30 @@ def saddle_surface(side=8):
     return cutting.Surface(vertices, faces), vertices, faces
 
 
-def saddle_cells():
-    """Four 2 m cells covering the same [-2, 2] squared span, two courses."""
+def saddle_cells(cell=2.0):
+    """An n by n grid of `cell` metre wide cells covering the same
+    [-2, 2] squared span, one course per row. cell=2.0 (the default) is
+    the original four cell, two course layout; a smaller cell subdivides
+    the same span into more, smaller pieces, which is what K2's seat-gap
+    monotonicity test (below) needs two cuts of the same surface for.
+    """
 
     t = studio("tessellation")
+    n = round(4.0 / cell)
     raw = []
-    for j in range(2):
-        for i in range(2):
-            x0, y0 = -2.0 + i * 2.0, -2.0 + j * 2.0
+    for j in range(n):
+        for i in range(n):
+            x0, y0 = -2.0 + i * cell, -2.0 + j * cell
             raw.append({
                 "key": "s{}{}".format(i, j),
                 "course": j,
                 "outline": [
-                    [x0, y0], [x0 + 2.0, y0],
-                    [x0 + 2.0, y0 + 2.0], [x0, y0 + 2.0],
+                    [x0, y0], [x0 + cell, y0],
+                    [x0 + cell, y0 + cell], [x0, y0 + cell],
                 ],
                 "holes": [],
             })
-    return t.build_tessellation(raw, "test", "generated", 2.0, 2)
+    return t.build_tessellation(raw, "test", "generated", cell, n)
 
 
 def test_normals_are_unit_length_on_the_saddle():
@@ -466,3 +472,171 @@ def test_clamped_points_are_disclosed_in_metres_not_only_counted():
     # on this cell is further out than that.
     assert report["clamped_max_m"] == pytest.approx(overhang)
     assert 0.0 < report["clamped_median_m"] <= report["clamped_max_m"]
+
+
+def test_fit_seat_plane_recovers_a_known_tilted_plane():
+    """K2 (cutting truth, 2026-08-17): the eigensolve itself, independent
+    of segment_pieces or any real cut. Five points placed exactly on a
+    known, deliberately tilted plane (not axis aligned, so this cannot
+    pass by only handling the trivial z = constant case): the fit must
+    recover that plane's own normal and a point on that plane, oriented
+    to agree with a reference on the true normal's own side.
+    """
+
+    p = studio("pieces")
+
+    def z(x, y):
+        return 0.5 * x + 0.25 * y + 1.0
+
+    points = [
+        [0.0, 0.0, z(0.0, 0.0)],
+        [3.0, 0.0, z(3.0, 0.0)],
+        [3.0, 2.0, z(3.0, 2.0)],
+        [0.0, 2.0, z(0.0, 2.0)],
+        [1.5, 1.0, z(1.5, 1.0)],
+    ]
+    raw_normal = [-0.5, -0.25, 1.0]
+    length = math.sqrt(sum(c * c for c in raw_normal))
+    true_normal = [c / length for c in raw_normal]
+
+    fit = p.fit_seat_plane(points, true_normal)
+    assert fit is not None
+    origin, normal = fit
+    for axis in range(3):
+        assert normal[axis] == pytest.approx(true_normal[axis], abs=1e-9)
+    # Every point is exactly on the known plane, so the fitted origin must
+    # be too: this checks the recovered point, not only the normal.
+    residual = sum((origin[i] - points[0][i]) * normal[i] for i in range(3))
+    assert residual == pytest.approx(0.0, abs=1e-9)
+    # Orientation: passing the true normal's own negation as the
+    # reference must flip the fitted sign to match it, not keep whichever
+    # sign the eigensolve happened to return.
+    flipped = p.fit_seat_plane(points, [-c for c in true_normal])
+    for axis in range(3):
+        assert flipped[1][axis] == pytest.approx(-normal[axis], abs=1e-9)
+
+
+def test_seat_planes_are_exact_and_gap_free_on_a_flat_surface():
+    """An oracle check independent of the eigensolve's own algebra: cut
+    from a genuinely flat (z = 0) surface, every jointed piece's fitted
+    seat plane must come out horizontal (normal along +/-z) with a seat
+    gap of (near enough) zero, since a flat cut of a flat surface is
+    already exactly seated -- there is no honest gap to disclose at all.
+    """
+
+    p = studio("pieces")
+    surface = flat_surface()
+    tess = running_bond()
+    made, report = p.segment_pieces(tess, surface, [])
+    assert made
+    for piece in made:
+        plane = piece["seat_plane"]
+        normal = plane["normal"]
+        assert abs(normal[0]) < 1e-9 and abs(normal[1]) < 1e-9, piece["key"]
+        assert abs(normal[2]) == pytest.approx(1.0, abs=1e-9), piece["key"]
+        assert piece["seat_gap"] == pytest.approx(0.0, abs=1e-9), piece["key"]
+    assert report["seat_gap_stats"]["max"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_the_prism_the_client_builds_is_flat_and_constant_thickness():
+    """Server-side pin on the geometry buildPieceMeshes's K2 branch
+    constructs: project every one of a jointed piece's mid points onto
+    its own shipped seat plane (the belly, exactly as studio.js does),
+    offset the same points by an arbitrary thickness along the plane's
+    normal (the top), and check both caps stay exactly flat against their
+    own plane and a constant distance apart. This is a division of
+    labour, not a simulation of the deployed JS: it verifies the SERVER's
+    own contribution the client's formula depends on -- a correctly unit
+    normal and a plane the piece's own points are genuinely near -- the
+    same role test_normals_are_unit_length_on_the_saddle plays for K1;
+    the client formula itself is pinned separately, against the real
+    source, in test_static.py's test_jointed_pieces_take_the_prismatic_
+    path.
+    """
+
+    p = studio("pieces")
+    surface, _, _ = saddle_surface()
+    tess = saddle_cells()
+    made, _ = p.segment_pieces(tess, surface, [])
+    thickness = 0.2
+    assert made
+    for piece in made:
+        origin, normal = piece["seat_plane"]["origin"], piece["seat_plane"]["normal"]
+        length = math.sqrt(sum(c * c for c in normal))
+        assert length == pytest.approx(1.0, abs=1e-9), piece["key"]
+        for point in piece["mid"]:
+            d = sum((point[i] - origin[i]) * normal[i] for i in range(3))
+            belly = [point[i] - d * normal[i] for i in range(3)]
+            belly_d = sum((belly[i] - origin[i]) * normal[i] for i in range(3))
+            assert abs(belly_d) <= 1e-9, piece["key"]
+            top = [belly[i] + normal[i] * thickness for i in range(3)]
+            top_d = sum((top[i] - origin[i]) * normal[i] for i in range(3))
+            assert abs(top_d - thickness) <= 1e-9, piece["key"]
+
+
+def test_seat_gap_stats_are_disclosed_and_the_max_is_positive_on_the_saddle():
+    """A curved form MUST leave a gap under a flat cut: seat_gap_stats
+    has to be present and its max strictly positive on the doubly curved
+    saddle fixture, never silently reading as clean. Each piece's own
+    seat_gap is also cross checked against the shipped plane and mid
+    points it was supposedly measured from.
+    """
+
+    p = studio("pieces")
+    surface, _, _ = saddle_surface()
+    tess = saddle_cells()
+    made, report = p.segment_pieces(tess, surface, [])
+    stats = report["seat_gap_stats"]
+    assert stats["count"] == len(made)
+    assert stats["max"] > 0.0, "a flat cut on a curved form must leave a gap"
+    assert 0.0 <= stats["median"] <= stats["max"]
+    for piece in made:
+        origin, normal = piece["seat_plane"]["origin"], piece["seat_plane"]["normal"]
+        worst = max(
+            abs(sum((point[i] - origin[i]) * normal[i] for i in range(3)))
+            for point in piece["mid"]
+        )
+        assert piece["seat_gap"] == pytest.approx(worst, abs=1e-12), piece["key"]
+
+
+def test_seat_gaps_grow_with_piece_size_on_the_saddle():
+    """A flat cut's deviation from a curved form grows with the square of
+    the piece's own footprint (the second order term of the surface's own
+    curvature), so a coarser cut of the SAME saddle span must show a
+    strictly larger worst seat gap than a finer cut of it.
+    """
+
+    p = studio("pieces")
+    surface, _, _ = saddle_surface()
+    _, coarse = p.segment_pieces(saddle_cells(cell=2.0), surface, [])
+    _, fine = p.segment_pieces(saddle_cells(cell=0.5), surface, [])
+    assert fine["seat_gap_stats"]["max"] > 0.0
+    assert coarse["seat_gap_stats"]["max"] > fine["seat_gap_stats"]["max"], (
+        "a bigger flat-cut piece must leave a bigger gap against the same "
+        "curved surface, not a smaller or equal one"
+    )
+
+
+def test_monolithic_bands_ship_no_seat_plane_at_all():
+    """Sprayed concrete's cut (pattern monolithic-bands) is moulded on the
+    formwork and stays genuinely curved: it must ship no seat_plane and no
+    seat_gap on any piece, and seat_gap_stats must read as a true empty
+    distribution, not a hopeful zero hiding a bug that skipped every piece
+    silently.
+    """
+
+    p = studio("pieces")
+    t = studio("tessellation")
+    surface, _, _ = saddle_surface()
+    raw = [{
+        "key": "band0", "course": 0,
+        "outline": [[-2.0, -2.0], [2.0, -2.0], [2.0, 2.0], [-2.0, 2.0]],
+        "holes": [],
+    }]
+    tess = t.build_tessellation(raw, "monolithic-bands", "generated", 4.0, 1)
+    made, report = p.segment_pieces(tess, surface, [])
+    assert made
+    for piece in made:
+        assert "seat_plane" not in piece, piece["key"]
+        assert "seat_gap" not in piece, piece["key"]
+    assert report["seat_gap_stats"] == {"count": 0, "median": 0.0, "max": 0.0}

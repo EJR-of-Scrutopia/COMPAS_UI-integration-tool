@@ -713,14 +713,30 @@ def test_pieces_extrude_upward_from_the_intrados():
     the bottom cap at offset 0 on the shipped surface, the top cap the
     full taper-scaled thickness outward -- against a reintroduction of
     the old symmetric mid-surface split.
+
+    K2 (cutting truth, 2026-08-17) added a second, prismatic path
+    alongside this one rather than replacing it: a jointed piece with a
+    seat_plane takes the flat-belly prism branch (pinned separately in
+    test_jointed_pieces_take_the_prismatic_path below), and this curved
+    extrusion stays exactly as it was for sprayed pieces and any piece the
+    server could not fit a plane for. Both branches literally contain the
+    `for (const offset of [full, 0])` loop text below, which is why this
+    test now counts it rather than merely asserting it is present once.
     """
 
     js = (STATIC / "studio.js").read_text(encoding="utf-8")
     body = _function_body(js, "buildPieceMeshes")
     assert "const full = state.bundle.provenance.thickness * taperAt(piece.course);" in body
-    assert "for (const offset of [full, 0]) {" in body
+    assert body.count("for (const offset of [full, 0]) {") == 2, (
+        "one occurrence per branch: the K2 prism path and the K1 curved "
+        "fallback each extrude from full down to 0"
+    )
     assert "for (const sign of [1, -1])" not in body, (
         "the symmetric mid-surface split must not come back"
+    )
+    assert "piece.seat_plane" in body, (
+        "buildPieceMeshes must branch on whether the server shipped a "
+        "seat plane for this piece"
     )
     # The offset sweep this task's contract named: falsework sits directly
     # on the surface (always mode), and the load-arrow tip lifts the full
@@ -733,6 +749,40 @@ def test_pieces_extrude_upward_from_the_intrados():
     )
     arrow_body = _function_body(js, "arrowField")
     assert "const lift = tipAnchored ? state.bundle.provenance.thickness : 0;" in arrow_body
+
+
+def test_jointed_pieces_take_the_prismatic_path():
+    """K2 (cutting truth, 2026-08-17): a jointed piece with a fitted seat
+    plane must build a true prism -- belly and top both flat, parallel
+    planes -- not K1's curved offset along each point's own normal. Pins
+    the actual projection and offset formulas against the real source,
+    the way test_pieces_extrude_upward_from_the_intrados pins K1's.
+    """
+
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    body = _function_body(js, "buildPieceMeshes")
+    prism_start = body.index("if (seatPlane) {")
+    prism_end = body.index("} else {", prism_start)
+    prism_body = body[prism_start:prism_end]
+    assert "const [ox, oy, oz] = seatPlane.origin;" in prism_body
+    assert "const [nx, ny, nz] = seatPlane.normal;" in prism_body
+    # The belly: every mid point projected onto the plane by subtracting
+    # its own signed distance along the plane normal.
+    assert "const d = (m[0] - ox) * nx + (m[1] - oy) * ny + (m[2] - oz) * nz;" in prism_body
+    assert "belly.push([m[0] - d * nx, m[1] - d * ny, m[2] - d * nz]);" in prism_body
+    # The top: the belly offset along the PLANE's normal, not piece.normals
+    # -- the whole point is that both caps stay exactly parallel.
+    assert "b[0] + nx * offset" in prism_body
+    assert "b[1] + ny * offset" in prism_body
+    assert "b[2] + nz * offset" in prism_body
+    assert "piece.normals" not in prism_body, (
+        "the prism branch must build both caps from the seat plane's own "
+        "normal, not the per-point surface normal K1's branch uses"
+    )
+    fallback_body = body[prism_end:]
+    assert "m[0] + n[0] * offset" in fallback_body, (
+        "the else branch must keep K1's curved extrusion verbatim"
+    )
 
 
 def test_rebuilding_the_shell_frees_what_it_replaces():
@@ -1006,6 +1056,10 @@ def test_the_data_panel_has_a_cut_section_with_every_measured_disclosure():
         # points are rounding noise or ten times the chord target
         # depending on how far they actually moved.
         "tess.clamped_max_m", "tess.clamped_median_m",
+        # K2 (cutting truth, 2026-08-17): a jointed piece's flat seat
+        # leaves a gap against the true curved surface; a bare count of
+        # jointed pieces says nothing about how big that gap gets.
+        "tess.seat_gap_stats",
     ):
         assert field in body, "the Cut section must read {}".format(field)
     # The counts need denominators. "137 cap points clamped" and "137 of
@@ -1055,6 +1109,16 @@ def test_the_data_panel_has_a_cut_section_with_every_measured_disclosure():
         "the panel must say the residual's worst corners cluster in the "
         "rim course, not just list numbers"
     )
+    # K2: the seat-gap disclosure, beside the corner residual it shares a
+    # category with -- both are "how far does this cut's own honesty run".
+    assert "seatStats.median" in body and "seatStats.max" in body, (
+        "the Cut section must read the seat-gap distribution's median and "
+        "max, not only a bare count of jointed pieces"
+    )
+    assert "flat cut on curved form" in body, (
+        "the panel must say plainly that a jointed piece's belly is a "
+        "flat cut, not the true curved surface"
+    )
     # An imported cut has to quote its own provenance verbatim and the
     # measured z offset, not the generated cut's target size.
     assert "tess.provenance" in body
@@ -1102,6 +1166,12 @@ def test_the_data_panel_survives_a_bundle_cached_before_a_field_existed():
             "{} must be guarded the same way: an older cache has neither "
             "the field nor a reason to crash the panel".format(guarded)
         )
+    # K2: seat_gap_stats landed after this fix wave, so it needs the exact
+    # same guard, not just a hopeful read of tess.seat_gap_stats.median.
+    assert "if (!seatStats)" in body, (
+        "the seat-gap distribution must be guarded the same way: an older "
+        "cache has neither the field nor a reason to crash the panel"
+    )
 
 
 def test_the_hud_and_the_size_control_do_not_call_an_authored_size_a_target():

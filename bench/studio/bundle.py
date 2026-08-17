@@ -50,6 +50,11 @@ REQUIRED_BUNDLE_KEYS = (
     "tessellation.clamped_max_m",
     "tessellation.clamped_median_m",
     "tessellation.report.folded",
+    # K2 (cutting truth, 2026-08-17): landed after every entry above and
+    # read by the Data panel's own seat-gap disclosure (studio.js), so a
+    # bundle cut before this task is exactly as stale as one missing any
+    # other field this list already guards.
+    "tessellation.seat_gap_stats",
 )
 
 
