@@ -210,6 +210,11 @@ def _lift(surface: cutting.Surface, plan) -> Dict:
         "weights": found["weights"],
         "clamped": found["clamped"],
         "clamp_m": found["clamp_m"],
+        # K3 (cutting truth, 2026-08-17): whether this point was pulled
+        # onto the surface by the new boundary-polyline projection rather
+        # than the old nearest-face clamp -- see cutting.Surface.lift.
+        "projected": found["projected"],
+        "projected_m": found["projected_m"],
     }
 
 
@@ -593,6 +598,7 @@ def segment_pieces(
     residuals_by_corner = corner_residuals(tess, surface, planes, owners)
 
     clamp_reach: List[float] = []
+    projected_reach: List[float] = []
     missing_planes = 0
     facet_counts: List[int] = []
     boundary_counts: List[int] = []
@@ -606,6 +612,9 @@ def segment_pieces(
         lifted = {index: _lift(surface, points[index]) for index in used}
         clamp_reach.extend(
             lifted[index]["clamp_m"] for index in used if lifted[index]["clamped"]
+        )
+        projected_reach.extend(
+            lifted[index]["projected_m"] for index in used if lifted[index]["projected"]
         )
 
         mid = {index: list(lifted[index]["point"]) for index in used}
@@ -741,13 +750,34 @@ def segment_pieces(
         # mesh and were pulled back onto it (see cutting.Surface.lift).
         # clamped_max_m and clamped_median_m say by how far, in metres,
         # over exactly that population: a count with no magnitude cannot be
-        # read, because the same 137 points are either rounding noise or
-        # ten times the 5 mm chord target depending on a number the report
-        # did not carry. On the real Trial 2 export at 0.9 m they come out
-        # at 0.0523 and 0.0246, so it is the second of those.
+        # read, because the same points are either rounding noise or many
+        # times the chord target depending on a number the report did not
+        # carry before this was measured.
+        #
+        # K3 (cutting truth, 2026-08-17): before this task these three
+        # fields counted every off-mesh cap point (137 on the real Trial 2
+        # export at 0.9 m, up to 52.3 mm out), because the only fallback
+        # was the nearest-face clamp. That clamp is now the LAST resort
+        # (no boundary polyline attached, or the projection below still
+        # missed the mesh), so these should read zero or near it on any
+        # cut whose surface carries a boundary; a residual handful is
+        # disclosed here, not hidden, same as before. See projected_*
+        # immediately below for where the population that used to land
+        # here now goes.
         "clamped_points": len(clamp_reach),
         "clamped_max_m": max(clamp_reach) if clamp_reach else 0.0,
         "clamped_median_m": _median(clamp_reach),
+        # K3: the cap points that landed off the render mesh and were
+        # projected to the nearest point of the analysis mesh's own
+        # boundary polyline instead of clamped -- the mechanism that
+        # replaces the old clamp for a real cut (cutting.Surface.lift).
+        # projected_max_m and projected_median_m are the same shape as
+        # clamped_max_m/clamped_median_m, over this population instead: a
+        # projected point sits on the true rim, so this is a much smaller
+        # number than the clamp it replaces, not merely a renamed count.
+        "projected_points": len(projected_reach),
+        "projected_max_m": max(projected_reach) if projected_reach else 0.0,
+        "projected_median_m": _median(projected_reach),
         "missing_planes": missing_planes,
         # K2: the distribution of seat_gap over every jointed piece --
         # count 0 for a cut with no jointed pieces at all (a sprayed,

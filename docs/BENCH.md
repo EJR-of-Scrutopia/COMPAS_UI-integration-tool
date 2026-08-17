@@ -265,7 +265,7 @@ on the run this table is taken from, 2026-08-13:
 | subdivision rounds | 3, limited by rounds (the edge length target, not the chord target, is what the round budget cuts off here) |
 | cap chord deviation | 0.960 mm against a 5.0 mm target |
 | corner normal residual, 695 corners | median 0.0196, mean 0.0325, p99 0.2428, max 0.3295 (its own worst corner, in courses 0 and 1) |
-| clamped cap points | 137 of 41265, reaching 0.0523 m at the worst and 0.0246 m at the median |
+| clamped cap points | 137 of 41265, reaching 0.0523 m at the worst and 0.0246 m at the median (SUPERSEDED, see the rim section below: the cutting truth wave's K3 fix, 2026-08-17, replaced this clamp for a real cut) |
 | coverage | 0 orphan faces, 0 double faces (of 2400 analysis faces), 0 open facets, 0 slivers, 0 folded, 0 coverage holes, 0 broken boundary entries, 0 missing planes |
 
 The studio polish wave tried tightening the cap subdivision, CAP_EDGE_TARGET
@@ -340,18 +340,56 @@ default. `bench/studio/domain.py`'s note on WOBBLE_TOLERANCE traces them
 to the rim's own plus or minus 125.4 degree notch, where the boundary
 steps in from 10.9136 m to 9.4519 m while a cell's inner boundary is a
 straight chord that passes outside it: that is the cost of tolerating a
-rim wobble rather than refusing the export outright. The rim's clipped
-silhouette and crescent notches are genuine tessellation limits: 137 outline
-points are clamped by the cap's outermost-crossing rule, and on the reference
-export at 0.9 m they reach a median of 24.6 mm and a maximum of 52.3 mm.
-A density increase cannot remove the notches because they are outline points
-clamped by the cap's geometry rule, not a subdivision artifact. A folded
+rim wobble rather than refusing the export outright. A folded
 cell is still cut, still capped and still drawn, with one lobe of its cap
 inside out, and it enters none of the coverage counts above: the sliver
 test reads an algebraic area and a fold's two lobes cancel in it, so
 `report["folded"]` naming the cell by key is the entire disclosure. The
 studio's Data panel lists it beside the coverage line for exactly that
 reason. The default size stays at 0.9 m, which is clean on every count.
+
+**Updated 2026-08-17 (cutting truth wave, K3).** The paragraph this
+replaces described the rim's clipped silhouette and crescent notches as a
+genuine tessellation limit: 137 outline points clamped by the cap's
+outermost-crossing rule, reaching a median of 24.6 mm and a maximum of
+52.3 mm on the reference export at 0.9 m, with no density able to remove
+them because they were outline points clamped by the cap's geometry rule,
+not a subdivision artifact. That diagnosis (the notch itself, and
+`domain.radius_at`'s outermost-crossing rule producing an outline point
+outside the true rim) is unchanged and still correct -- what changed is
+what happens to that point afterward. `cutting.Surface.lift` no longer
+clamps such a point into the nearest render face (a poor proxy for "the
+true rim" whenever the render mesh's own faces are not small relative to
+the notch); it projects the point to the nearest point of the analysis
+mesh's own boundary polyline in plan instead, the real silhouette rather
+than an approximation of it. Course 0's outline is also simplified
+against that same boundary polyline, with a chord tolerance equal to
+`cutting.CHORD_TARGET` (5 mm, the cutter's own existing precision budget
+reused rather than a new number): course 0's 62 pieces carried 538
+outline points between them before this fix and 358 after, on the real
+Trial 2 domain at 0.9 m.
+
+Measured on the real export at 0.9 m, forced fresh over HTTP the same way
+the table above was: `clamped_points` drops from 137 to **0**;
+`projected_points` (the new field naming the population the clamp used to
+own) is 417, reaching 52.3 mm at the worst and 1.4 mm at the median -- the
+worst case is the same real displacement the old clamp reached (a point
+genuinely outside the true rim is still exactly that far outside it; what
+changed is that it is now pulled back to the true nearest point of the
+rim, not an arbitrary nearby face), while the median is over ten times
+smaller than the old clamp's 24.6 mm, because most of the 417 are near-
+boundary points a float's width outside the primary containment test, not
+notch casualties. The corner residual distribution moves too, since fewer
+welded points changes which corners exist at all: 515 corners (was 695),
+median 0.0316 (was 0.0196), max 0.3295 (unchanged, the same worst corner).
+The K2 seat-gap worst, 158 mm, drops to 118.8 mm on the same export, the
+rim fragmentation having been most of that gap's own cause. Full bundle
+payload 10.10 MB (was 11.70 MB) and wall time 3.83 s (was 5.22 s) --
+smaller and faster, not merely inside the wave's 3x/2x gate, because
+fewer welded points is less to cut, weld and ship. The rim's silhouette
+and crescent notches are retired as a known limit: `docs/plans/2026-08-17-cutting-truth.md`
+and `.superpowers/sdd/2026-08-17-cutting-truth/task-4-report.md` carry the
+fix and its own full measurement.
 
 A single worst-corner number for the residual badly misrepresents the cut,
 so `pieces.residual_stats` reports the whole distribution across every

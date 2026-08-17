@@ -1107,6 +1107,12 @@ def test_the_data_panel_has_a_cut_section_with_every_measured_disclosure():
         # leaves a gap against the true curved surface; a bare count of
         # jointed pieces says nothing about how big that gap gets.
         "tess.seat_gap_stats",
+        # K3 (cutting truth, 2026-08-17): the population that used to be
+        # counted only as clamped_points is now mostly projected_points
+        # instead (the nearest-face clamp is the last resort, not the
+        # primary fallback), so the panel has to read this new field or
+        # the rim fix has no disclosure of its own at all.
+        "tess.projected_points",
     ):
         assert field in body, "the Cut section must read {}".format(field)
     # The counts need denominators. "137 cap points clamped" and "137 of
@@ -1217,6 +1223,12 @@ def test_the_data_panel_survives_a_bundle_cached_before_a_field_existed():
     # same guard, not just a hopeful read of tess.seat_gap_stats.median.
     assert "if (!seatStats)" in body, (
         "the seat-gap distribution must be guarded the same way: an older "
+        "cache has neither the field nor a reason to crash the panel"
+    )
+    # K3 (cutting truth, 2026-08-17): projected_points landed after this
+    # too, and needs the same guard as the clamp magnitudes it sits beside.
+    assert 'typeof tess.projected_points !== "number"' in body, (
+        "the projected-point count must be guarded the same way: an older "
         "cache has neither the field nor a reason to crash the panel"
     )
 

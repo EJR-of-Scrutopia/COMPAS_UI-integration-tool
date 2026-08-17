@@ -315,6 +315,16 @@ class Surface:
         self.vertices = vertices
         self.faces = faces
         self.normals = _vertex_normals(vertices, faces)
+        # K3 (cutting truth, 2026-08-17): the analysis mesh's own boundary
+        # ring, projected to plan and ordered, so a cap point that lands
+        # off this mesh can be projected to the nearest point of the real
+        # rim (lift, below) instead of clamped into whichever face happens
+        # to be nearest by centroid. None until a caller attaches one
+        # (bundle.build_tessellation_for does, for every real cut); a
+        # Surface built directly, the way this module's own tests and
+        # pieces.py's fixtures do, keeps the old nearest-face clamp as its
+        # only fallback, unchanged.
+        self.boundary: Optional[Sequence[Sequence[float]]] = None
         spread = max(
             max(v[0] for v in vertices) - min(v[0] for v in vertices),
             max(v[1] for v in vertices) - min(v[1] for v in vertices),
@@ -331,22 +341,26 @@ class Surface:
         for i in range(1, len(face) - 1):
             yield (face[0], face[i], face[i + 1])
 
-    def lift(self, x: float, y: float) -> Dict:
-        best = None
+    def _on_mesh(self, x: float, y: float) -> Optional[Dict]:
+        """A sample if (x, y) lands inside some face's triangle, else None."""
+
         for index in self.grid.query(x, y, x, y):
             for a, b, c in self._triangles(self.faces[index]):
                 weights = self._barycentric(x, y, a, b, c)
                 if weights is not None and min(w for _, w in weights) >= -1e-9:
                     return self._sample(weights, False, 0.0)
+        return None
+
+    def lift(self, x: float, y: float) -> Dict:
+        found = self._on_mesh(x, y)
+        if found is not None:
+            return found
         # Off the mesh. This is not a float's rounding: measured on the real
-        # Trial 2 export at the default 0.9 m, 137 cap points land here, all
-        # of them genuinely outside the render mesh, at 6e-14 m at the
-        # closest, 0.0246 m at the median and 0.0523 m at the worst, and all
-        # but one of them inside the two clusters at plus and minus 125.4
-        # degrees where the rim notch is. Fifty-two millimetres is ten times
-        # CHORD_TARGET, so a count on its own was never enough to read: see
-        # clamped_max_m and clamped_median_m alongside clamped_points in
-        # pieces.segment_pieces's report.
+        # Trial 2 export at the default 0.9 m before this fix, 137 cap
+        # points landed here, all of them genuinely outside the render
+        # mesh, at 6e-14 m at the closest, 0.0246 m at the median and
+        # 0.0523 m at the worst, and all but one of them inside the two
+        # clusters at plus and minus 125.4 degrees where the rim notch is.
         #
         # The cause is upstream and deliberate. domain.radius_at takes the
         # OUTERMOST ray crossing, so wherever the tolerated rim wobble makes
@@ -354,9 +368,39 @@ class Surface:
         # is placed on the far crossing, past the near one, and therefore
         # past the real surface. That choice is what stops a ray grazing a
         # corner from falling back inside the rim, and it is not changed
-        # here; what changes is that the cost is now stated in metres.
-        # Clamp to the nearest face and measure it, rather than dropping the
-        # point.
+        # here.
+        #
+        # K3 (cutting truth, 2026-08-17): the point is projected to the
+        # NEAREST point of the real rim (self.boundary, the analysis mesh's
+        # own boundary polyline in plan, cached by whoever built this
+        # surface) rather than clamped into whichever render face happens
+        # to be nearest by centroid. The projected point sits on the true
+        # silhouette, so it is looked up again with the same on-mesh
+        # containment test that a well behaved point uses, not blended by
+        # face-relative barycentric weights the way the old clamp was: that
+        # blending is exactly what pulled a rim point up to 52 mm inward,
+        # since "nearest face by centroid" is a poor proxy for "nearest
+        # point of the boundary" wherever the render mesh's faces are not
+        # small relative to the notch that put the point off the mesh in
+        # the first place.
+        if self.boundary:
+            px, py = self._nearest_boundary_point(x, y)
+            found = self._on_mesh(px, py)
+            if found is not None:
+                found["projected"] = True
+                found["projected_m"] = math.hypot(px - x, py - y)
+                return found
+            # The projected point itself did not land inside any triangle:
+            # floating point at a seam, or a boundary polyline that does
+            # not actually trace this surface's own mesh boundary. Fall
+            # through to the old nearest-face clamp below rather than
+            # raising or silently returning an unlifted point.
+
+        # Clamp to the nearest face and measure it, rather than dropping
+        # the point. This is the last resort now, reached only when no
+        # boundary polyline was attached at all, or the projection above
+        # still failed to land on the mesh.
+        best = None
         best_distance = None
         for index, face in enumerate(self.faces):
             cx = sum(self.vertices[i][0] for i in face) / len(face)
@@ -372,6 +416,34 @@ class Surface:
         return self._sample(
             [(i, w / total) for i, w in clamped], True, self._reach(x, y, best)
         )
+
+    def _nearest_boundary_point(self, x: float, y: float) -> Tuple[float, float]:
+        """The point of self.boundary nearest (x, y), in plan.
+
+        self.boundary is a closed polygon (no point repeated at the end),
+        so the segment from the last point back to the first is included
+        by wrapping the index, the same convention domain.py's loop uses.
+        """
+
+        boundary = self.boundary
+        best_distance = None
+        best_point = (boundary[0][0], boundary[0][1])
+        n = len(boundary)
+        for i in range(n):
+            a = boundary[i]
+            b = boundary[(i + 1) % n]
+            ex, ey = b[0] - a[0], b[1] - a[1]
+            length2 = ex * ex + ey * ey
+            if length2 < 1e-24:
+                near = (a[0], a[1])
+            else:
+                along = min(1.0, max(0.0, ((x - a[0]) * ex + (y - a[1]) * ey) / length2))
+                near = (a[0] + along * ex, a[1] + along * ey)
+            distance = (x - near[0]) ** 2 + (y - near[1]) ** 2
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_point = near
+        return best_point
 
     def _reach(self, x: float, y: float, face) -> float:
         """How far, in plan and in metres, the clamp moved this point.
@@ -430,6 +502,13 @@ class Surface:
             # Zero when the point was on the mesh, so a caller can sum or
             # sort these without asking about clamped first.
             "clamp_m": clamp_m,
+            # K3 (cutting truth, 2026-08-17): set True/nonzero by lift's
+            # boundary-projection branch after this dict is built, for the
+            # same reason clamp_m defaults to zero here rather than being
+            # left absent -- a caller should never have to ask "is this key
+            # even present" before reading it.
+            "projected": False,
+            "projected_m": 0.0,
         }
 
 

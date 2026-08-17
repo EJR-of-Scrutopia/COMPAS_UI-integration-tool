@@ -245,6 +245,19 @@ def test_the_bundle_ships_the_tessellation_and_its_report(tmp_path, monkeypatch)
     # real, less regular export. See test_domain.py for the nonzero case.
     assert document["tessellation"]["backward_turn_degrees"] == 0.0
     assert document["tessellation"]["backward_steps"] == 0
+    # K3 (cutting truth, 2026-08-17): both fields must be present, not
+    # crash for want of a boundary polyline ever mattering on this export.
+    # tiny_contract's rim has no backward step and no notch, so nothing
+    # here needs the old nearest-face clamp at all -- but a handful of
+    # boundary-corner outline points still land a float's width outside
+    # the primary containment test (radius_at's own ray cast is a
+    # different computation from the render mesh's stored vertex
+    # coordinates), and the projection mechanism correctly catches those
+    # too: measured here at 1e-16 m, machine epsilon, nowhere near
+    # cutting.CHORD_TARGET.
+    assert document["tessellation"]["clamped_points"] == 0
+    assert document["tessellation"]["projected_points"] > 0
+    assert document["tessellation"]["projected_max_m"] < 1e-9
 
 
 def test_the_cache_key_carries_size_and_pattern(tmp_path):
@@ -284,6 +297,10 @@ def test_a_bundle_cached_before_a_tessellation_field_existed_is_stale(
         # K2 (cutting truth, 2026-08-17): the seat-gap distribution, read
         # by the Data panel beside the corner residual stats.
         "tessellation.seat_gap_stats",
+        # K3 (cutting truth, 2026-08-17): the count of points the new
+        # boundary projection handled, read by the Data panel beside
+        # clamped_max_m/clamped_median_m above.
+        "tessellation.projected_points",
     ):
         assert path in bundle.REQUIRED_BUNDLE_KEYS, (
             "{} is read by the Data panel and must invalidate a cache that "

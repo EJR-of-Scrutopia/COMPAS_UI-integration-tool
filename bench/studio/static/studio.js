@@ -1894,14 +1894,22 @@ function renderDataPanel(v) {
       content.appendChild(seatLine);
     }
 
-    // With denominators and, for the clamp, with the magnitude. The same
-    // 137 clamped points are either rounding noise or ten times the 5 mm
-    // chord target depending on how far they moved, which is why the
-    // report carries clamped_max_m and clamped_median_m at all.
+    // With denominators and, for the clamp, with the magnitude. A clamped
+    // point is either rounding noise or many times the chord target
+    // depending on how far it moved, which is why the report carries
+    // clamped_max_m and clamped_median_m at all.
+    //
+    // K3 (cutting truth, 2026-08-17): the nearest-face clamp below is the
+    // LAST resort now, reached only if a cap point lands off the render
+    // mesh AND the boundary projection just below still somehow misses
+    // it. Before K3 it was the only fallback there was, and on the real
+    // Trial 2 export at 0.9 m it clamped 137 rim points up to 52.3 mm
+    // inward, the crescent notches this fix ends.
     const capPoints = capPointCount();
     const clampedLine = document.createElement("p");
     let clampedText = tess.clamped_points + " of " + capPoints
-      + " cap point(s) clamped to the nearest render mesh face";
+      + " cap point(s) clamped to the nearest render mesh face (the last "
+      + "resort now: see projected cap points below)";
     if (typeof tess.clamped_max_m === "number"
         && typeof tess.clamped_median_m === "number") {
       clampedText += ", reaching " + (tess.clamped_max_m * 1000).toFixed(1)
@@ -1914,6 +1922,31 @@ function renderDataPanel(v) {
       + " boundary facet(s) with no joint plane to project onto";
     clampedLine.textContent = clampedText;
     content.appendChild(clampedLine);
+
+    // K3: a cap point that lands off the render mesh is now projected to
+    // the nearest point of the real rim (the analysis mesh's own boundary
+    // polyline in plan) first, rather than clamped into whichever render
+    // face happens to be nearest by centroid. Guarded the same way the
+    // clamp figures above are: a bundle cached before K3 has no
+    // projected_points to read a count off.
+    const projectedLine = document.createElement("p");
+    if (typeof tess.projected_points !== "number") {
+      projectedLine.textContent = "projected cap points: not measured in "
+        + "this cached bundle. Delete the cached bundle, or change any "
+        + "control, to re-cut.";
+    } else {
+      let projectedText = tess.projected_points + " of " + capPoints
+        + " cap point(s) projected to the nearest point of the real rim "
+        + "instead of clamped";
+      if (typeof tess.projected_max_m === "number"
+          && typeof tess.projected_median_m === "number") {
+        projectedText += ", reaching " + (tess.projected_max_m * 1000).toFixed(1)
+          + " mm at the worst and " + (tess.projected_median_m * 1000).toFixed(1)
+          + " mm at the median";
+      }
+      projectedLine.textContent = projectedText;
+    }
+    content.appendChild(projectedLine);
 
     const coverage = tess.report;
     const analysisFaces = state.bundle.analysis_mesh.faces.length;

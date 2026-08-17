@@ -7,6 +7,7 @@ neighbours have something to disagree about.
 
 from __future__ import annotations
 
+import json
 import math
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def studio(name):
@@ -725,3 +727,85 @@ def test_monolithic_bands_ship_no_seat_plane_at_all():
         assert "seat_plane" not in piece, piece["key"]
         assert "seat_gap" not in piece, piece["key"]
     assert report["seat_gap_stats"] == {"count": 0, "median": 0.0, "max": 0.0}
+
+
+def trial2_domain():
+    """The real Trial 2 plan domain (domain.plan_domain's own return
+    value), committed by tests/studio/make_fixtures.py -- the same source
+    test_generators.py's own real-geometry regression pin reads. Reused
+    here rather than requiring the 2521 vertex export file: everything
+    domain.radius_at needs to reproduce the real rim's own notch (axis,
+    loop, thetas) is in this JSON.
+    """
+
+    fixture = json.loads(
+        (FIXTURES / "trial-2-tessellation.json").read_text(encoding="utf-8")
+    )
+    return fixture["domain"]
+
+
+def trial2_surface(domain):
+    """A flat render mesh whose own footprint IS the real Trial 2 plan's
+    boundary polygon exactly, triangulated by cutting.ear_clip.
+
+    None of dome_surface/flat_surface/saddle_surface above ever exercises
+    cutting.Surface.lift's off-mesh fallback at all: every one of them was
+    built to tile its own surface's footprint exactly (see
+    test_a_clamp_free_cut_reports_no_magnitude_at_all), so nothing an
+    outline generates ever lands off mesh. This surface's footprint is
+    instead the real, irregular, notched rim itself (domain["loop"]), so
+    an outline point domain.radius_at places outside that footprint --
+    exactly the real defect K3 fixes -- genuinely lands off this mesh too,
+    the same way it does on the real 2521 vertex render mesh.
+    """
+
+    cutting = studio("cutting")
+    loop = domain["loop"]
+    vertices = [[p[0], p[1], 0.0] for p in loop]
+    triangles = cutting.ear_clip(list(range(len(loop))), loop)
+    surface = cutting.Surface(vertices, [list(triangle) for triangle in triangles])
+    surface.boundary = [list(p) for p in loop]
+    return surface
+
+
+def test_rim_points_project_to_the_boundary_on_the_real_trial_2_plan():
+    """K3 (cutting truth, 2026-08-17): before this fix, domain.radius_at's
+    outermost-crossing rule put some course-0 outline points (all inside
+    the real Trial 2 export's own plus/minus 125.4 degree rim notch, see
+    domain.WOBBLE_TOLERANCE) outside the true rim, and cutting.Surface.
+    lift's only fallback clamped them into the nearest render face by up
+    to 52.3 mm (Task 1's own baseline measurement, real Trial 2 export,
+    0.9 m, the studio's own default size).
+
+    This fixture is the one that actually exercises the defect (see
+    trial2_surface's own docstring for why the others in this file do
+    not): every off-mesh point here is real, not synthetic.
+    """
+
+    g = studio("generators")
+    p = studio("pieces")
+    cutting = studio("cutting")
+    domain = trial2_domain()
+    surface = trial2_surface(domain)
+    tess = g.generate("bonded-courses", domain, 0.9)
+    made, report = p.segment_pieces(tess, surface, [])
+    assert made
+
+    # The hard assert the spec's own gate names: whatever still needs the
+    # old nearest-face clamp (the last resort now, not the primary
+    # fallback) is within the cut's own edge tolerance of the true
+    # surface -- not merely closer than it used to be.
+    assert report["clamped_max_m"] <= cutting.CHORD_TARGET
+    # Measured, not merely bounded: on this fixture nothing needs the old
+    # clamp at all.
+    assert report["clamped_points"] == 0
+
+    # The mechanism actually engaged: this is not a fixture where nothing
+    # was ever off the mesh to begin with (contrast
+    # test_a_clamp_free_cut_reports_no_magnitude_at_all).
+    assert report["projected_points"] > 0
+    # The same worst displacement Task 1 measured on the real export: this
+    # fixture's surface tiles the real plan exactly, so radius_at's own
+    # outermost-crossing rule reproduces the true worst-case distance from
+    # the real rim here, not merely something of the same order.
+    assert report["projected_max_m"] == pytest.approx(0.052321, abs=1e-4)

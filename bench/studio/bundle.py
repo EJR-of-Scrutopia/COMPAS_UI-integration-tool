@@ -55,6 +55,12 @@ REQUIRED_BUNDLE_KEYS = (
     # bundle cut before this task is exactly as stale as one missing any
     # other field this list already guards.
     "tessellation.seat_gap_stats",
+    # K3 (cutting truth, 2026-08-17): landed after seat_gap_stats. A bundle
+    # cached before this task clamped rim points instead of projecting
+    # them, so its clamped_* figures mean something different from what
+    # this field's presence implies about the rest of the report; treating
+    # it as stale forces a re-cut rather than a mismatched read.
+    "tessellation.projected_points",
 )
 
 
@@ -184,6 +190,26 @@ def build_tessellation_for(export_name, contract, arrays, render, pattern, size)
     """
 
     surface = cutting.Surface(render["vertices"], render["faces"])
+    # K3 (cutting truth, 2026-08-17): the analysis mesh's own boundary
+    # ring, in plan, cached on the surface so cutting.Surface.lift can
+    # project a cap point that lands off the render mesh onto the real
+    # rim instead of clamping it into the nearest face. Built here,
+    # unconditionally, ahead of the authored/generated branch below: an
+    # authored tessellation never calls domain.plan_domain at all (it has
+    # no domain of its own), so this is the only place the boundary is
+    # available to it too. Guarded rather than left to raise: a handful of
+    # exports carry an authored tessellation over an analysis mesh whose
+    # boundary was never required to be a single clean loop before this
+    # (domain.boundary_ring demands exactly that), and a surface with no
+    # boundary attached simply keeps the old nearest-face clamp as its
+    # only fallback, which is no worse than every export had before K3.
+    try:
+        ring = domain.boundary_ring(arrays["faces"])
+        surface.boundary = [
+            [arrays["vertices"][i][0], arrays["vertices"][i][1]] for i in ring
+        ]
+    except ValueError:
+        pass
     authored = tessellation.read_tessellation(
         contract, tessellation_sidecar(export_name))
     if authored is not None:
