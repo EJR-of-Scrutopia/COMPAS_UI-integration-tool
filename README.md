@@ -66,6 +66,15 @@ open to start the studio.
 5. Render the result, with the day-cycle lighting and HDRI environment
    controls in the viewer.
 
+Set up the optional FEA solve environment with `launcher\setup-fea.cmd`:
+it builds `.venv-fea` and everything `requirements-fea.txt` lists into
+it, then points `bench/studio/staging.py` at it. One step it cannot
+script: download OpenSees by hand from https://opensees.berkeley.edu/
+and run `bench/scripts/install_opensees.py` against it, exactly as the
+setup script's own final output explains. The CRA environment
+(`.venv-cra`) is separate again, still built by
+`bench/scripts/setup_cra_env.sh`, unchanged by any of this.
+
 `docs/BENCH.md` is the fuller reference for the export format, the three
 Python environments, and the solver internals.
 

@@ -5,26 +5,38 @@
 # shelled out from bench/studio/staging.py) additionally needs this stack,
 # and it cannot share the main venv: compas_fea2's OpenSees backend pins
 # the core to a mid-2025 commit that this project's pyproject does not
-# carry, and the pin exists for a reason documented in bench/scripts/
-# setup_fea_env.sh.
+# carry.
 #
-# The setup script is the source of truth, not this file: two of these
-# come from git commits rather than PyPI, and a standalone OpenSees
-# executable has to be installed by hand afterwards (see docs/BENCH.md,
-# "The three environments", and bench/scripts/install_opensees.py).
-# Build the environment with:
+# This file is a complete, standalone list: `pip install -r
+# requirements-fea.txt` is everything a .venv-fea needs from PyPI and git
+# (two of these are pinned git commits, not PyPI releases, because the
+# two repos drifted apart after mid-2025 and only this commit pair is
+# mutually compatible). What it does NOT cover, because neither can be
+# scripted or installed by pip:
 #
-#     bash bench/scripts/setup_fea_env.sh
+#   - ananke_fea (src/ananke_fea/) itself. launcher/setup-fea.ps1 makes it
+#     importable with a .pth file pointing at src/, since this standalone
+#     repo has no pyproject.toml for an editable install against.
+#   - The standalone OpenSees executable. openseespy only provides the
+#     Python extension module; compas_fea2_opensees shells out to a real
+#     OpenSees binary. Download it by hand from
+#     https://opensees.berkeley.edu/ (JavaScript-driven page, cannot be
+#     scripted), then run
+#     `<venv-fea>\Scripts\python.exe bench\scripts\install_opensees.py <folder>`.
 #
-# That script also runs `pip install --no-deps -e .` against the source
-# repo's pyproject.toml to make ananke_fea importable there, a step this
-# standalone repo has no pyproject.toml to support yet (see the
-# housekeeping report for the open item). Until that is resolved, run
-# setup_fea_env.sh from the main COMPAS-workflow-GH_native checkout, and
-# copy or symlink the resulting .venv-fea here.
+# Build the whole environment, both of the above included, with:
+#
+#     launcher\setup-fea.cmd
+#
+# See that script's own comments for where it puts the venv and why (a
+# directory junction, not a repo-local venv: bench/studio/staging.py
+# hardcodes REPO/.venv-fea, and OneDrive's cloud-file handling makes a
+# repo-local multi-gigabyte venv unreliable to build in place). See also
+# docs/BENCH.md, "The three environments".
 numpy==2.0.2
 scipy==1.13.1
 compas==2.15.1
 git+https://github.com/fea2/compas_fea2@664ec20
 git+https://github.com/fea2/compas_fea2_opensees@main
 openseespy
+pytest>=8,<10
