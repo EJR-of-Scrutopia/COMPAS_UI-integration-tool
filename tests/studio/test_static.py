@@ -2692,3 +2692,105 @@ def test_w5_centroid_recompute_is_a_bounding_box_not_an_average():
     assert "(minZ + maxZ) / 2" in centroid_body
     rebuild_body = _function_body(js, "rebuildTimeline")
     assert "state.centre = sceneCentroid();" in rebuild_body
+
+
+def test_w6_ground_controls_exist_and_scale_hides_for_dark_studio():
+    """Task 5 (W6, studio tweaks 2026-08-17): each ground preset gains Tint
+    (colour) and Scale (texture repeat multiplier) controls, plus a reset.
+    Scale has no meaning for dark-studio (no texture), so its row hides for
+    that preset -- tint still applies (dark-studio is a colour, and tint
+    sets the colour directly)."""
+
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    assert 'id="ground-tint"' in html and 'type="color"' in html[html.index('id="ground-tint"'):html.index('id="ground-tint"') + 80]
+    scale_start = html.index('id="ground-scale"')
+    scale_tag = html[scale_start:html.index(">", scale_start)]
+    assert 'type="range"' in scale_tag
+    assert 'min="0.25"' in scale_tag
+    assert 'max="4"' in scale_tag
+    assert 'step="0.05"' in scale_tag
+    assert 'value="1"' in scale_tag
+    assert 'id="ground-reset"' in html
+    # The scale row hides for dark-studio: same class="hidden" idiom as
+    # background-row/weather-row/hdri-scale-row.
+    assert 'id="ground-scale-row"' in html
+    sync_body = _function_body(js, "syncGroundControls")
+    assert 'getElementById("ground-scale-row").classList.toggle("hidden", preset === "dark-studio")' in sync_body
+
+
+def test_w6_ground_appearance_persists_per_preset():
+    """Tint and scale persist under "bench-studio-ground:" + preset, mirroring
+    W2's appearanceStorageKey idiom exactly (see appearanceStorageKey /
+    persistAppearance / restoreAppearance): tolerant JSON parse, restored
+    both on preset change and on boot, before the ground material the
+    incoming preset uses is next read."""
+
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    key_body = _function_body(js, "groundStorageKey")
+    assert '"bench-studio-ground:" + preset' in key_body
+    restore_body = _function_body(js, "restoreGroundAppearance")
+    assert "JSON.parse(stored)" in restore_body
+    assert "{ tint: null, scale: null }" in restore_body
+    assert "typeof parsed.scale === \"number\"" in restore_body
+    # Boot restores before the first study (and its ground mesh) loads.
+    boot_body = _function_body(js, "boot")
+    boot_restore_at = boot_body.index("restoreGroundAppearance(state.groundPreset);")
+    boot_loadstudy_at = boot_body.index("await loadStudy(")
+    assert boot_restore_at < boot_loadstudy_at
+    # A preset change restores the incoming preset's own stored appearance.
+    preset_change_start = js.index('getElementById("ground-preset").addEventListener("change"')
+    preset_change_body = js[preset_change_start:js.index("\n});", preset_change_start)]
+    assert "restoreGroundAppearance(e.target.value);" in preset_change_body
+    # Persistence is keyed to the ACTIVE preset, not read off the select
+    # (the active preset is whichever one the handlers below are mutating).
+    persist_body = _function_body(js, "persistGroundAppearance")
+    assert "groundStorageKey(state.groundPreset)" in persist_body
+    assert "JSON.stringify(state.groundAppearance)" in persist_body
+
+
+def test_w6_ground_handlers_apply_the_active_material_in_place():
+    """Tint and scale mutate the ACTIVE preset's cached material in place
+    (color.set for tint; texture.repeat rescaled from the preset's own BASE
+    repeat, never compounded on the current value) -- never a new material,
+    never a rebuild. Repeat scaling must touch every map slot present: map,
+    roughnessMap, and bumpMap (patio-pavers and tiles both carry a
+    bumpMap)."""
+
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    apply_body = _function_body(js, "applyGroundAppearance")
+    assert "groundMaterial(preset)" in apply_body
+    assert "material.color.set(state.groundAppearance.tint)" in apply_body
+    for slot in ("map", "roughnessMap", "bumpMap"):
+        assert '"{}"'.format(slot) in apply_body
+    # Rescaled FROM the preset's captured base repeat, not the live value:
+    # compounding would make every drag tick scale further off the base.
+    assert "base.repeats[slot]" in apply_body
+    assert "material[slot].repeat.x" not in apply_body, (
+        "the multiplier must read the captured base repeat, never the "
+        "material's own current (possibly already-scaled) repeat"
+    )
+    capture_body = _function_body(js, "captureGroundBase")
+    for slot in ("map", "roughnessMap", "bumpMap"):
+        assert '"{}"'.format(slot) in capture_body
+    assert "repeat.clone()" in capture_body
+    assert "color.clone()" in capture_body
+    # Tint and scale wiring: tint on change (matches material-tint), scale
+    # on input (cheap: a texture repeat set, no piece rebuild), both persist
+    # and both re-apply to the live material immediately.
+    tint_start = js.index('getElementById("ground-tint").addEventListener(')
+    tint_body = js[tint_start:js.index("\n});", tint_start)]
+    assert "state.groundAppearance.tint = e.target.value;" in tint_body
+    assert "persistGroundAppearance();" in tint_body
+    assert "applyGroundAppearance(state.groundPreset);" in tint_body
+    scale_start = js.index('getElementById("ground-scale").addEventListener(')
+    scale_body = js[scale_start:js.index("\n});", scale_start)]
+    assert "state.groundAppearance.scale = +e.target.value;" in scale_body
+    assert "persistGroundAppearance();" in scale_body
+    assert "applyGroundAppearance(state.groundPreset);" in scale_body
+    reset_start = js.index('getElementById("ground-reset").addEventListener(')
+    reset_body = js[reset_start:js.index("\n});", reset_start)]
+    assert "state.groundAppearance = { tint: null, scale: null };" in reset_body
+    assert "localStorage.removeItem(groundStorageKey(state.groundPreset));" in reset_body
+    assert "syncGroundControls(state.groundPreset);" in reset_body
+    assert "applyGroundAppearance(state.groundPreset);" in reset_body

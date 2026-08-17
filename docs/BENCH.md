@@ -151,18 +151,24 @@ crown.
   piece count: each casting still falls for 0.8 s, but the stagger between
   drops is derived from the count, so castings overlap in flight rather
   than landing one at a time. A timeline speed control scrubs playback
-  from 0.25x to 4x; orbit speed and orbit distance sliders set how the
-  camera circles the model. The falsework strikes after the last segment
-  lands.
+  from 0.25x to 4x; orbit speed and orbit distance sliders drive a flat
+  turntable: the camera holds a constant height and constant distance and
+  orbits about the built shell's own bounding-box centre (recomputed on
+  every study load and cut swap, so the pavilion stays centred regardless
+  of the export's own origin), no vertical bobbing. The height comes from
+  wherever the camera sits when the orbit starts (boot, or right after a
+  drag release), so a manual reframe holds through the turntable. The
+  falsework strikes after the last segment lands.
 - The panel holds six collapsible sections in order: Import, Study,
   Analysis, View, Animation, Scene. Record is a button inside Animation
   that writes 1080p PNG frames through the server and stitches
   `recording.mp4` with ffmpeg.
 - Study section: material, pattern and piece size control, thickness,
-  joint gap, crown taper. A Render skin select (White presentation, Basalt
-  dark, Timber ply) with Tint and Finish (0.3 to 1.0) sliders and Reset
-  button; appearance changes are render-only, persisted per material, with
-  an on-screen note "render tint only, analysis unchanged".
+  joint gap, crown taper. The material always keeps its own texture and
+  base colour (no render-skin substitution): a Tint colour picker
+  recolours it and a Gloss to matt slider (0.3 to 1.0) sets the finish,
+  with a Reset appearance button. Changes are render-only, persisted per
+  material, with an on-screen note "render tint only, analysis unchanged".
 - Analysis section: Run staged analysis button; heatmap and vector layer
   toggles (stress and deflection per-element and per-node fields, load and
   reaction vectors, text overlays and the integrity pulse); stress surface
@@ -184,9 +190,14 @@ crown.
   light and sky, staying live across all presets with relighting on slider
   release. A Sun colour picker overrides preset colours until the next preset
   change. HDRI mode uses .hdr files dropped into bench/studio/hdri/ or
-  uploaded from the browser (any valid Radiance .hdr, no size cap); the studio
-  estimates the sun from the image's brightest region and sets the sliders,
-  which remain live to override the estimate. HDRI Projection select: Projected
+  uploaded from the browser (any valid Radiance .hdr); the decode tries
+  full float precision first and, if that overflows the browser's array
+  buffer allocation, retries at half float, so an 8K or 16K equirect still
+  loads where it used to fail outright. Past even half float's own ceiling
+  (around 268 megapixels) a banner names the image's actual megapixel
+  count instead of leaving a stuck, unexplained error. The studio
+  estimates the sun from the image's brightest region and sets the
+  sliders, which remain live to override the estimate. HDRI Projection select: Projected
   stands the image on the ground as a dome with Scale (10 to 300 m), Height
   (0.5 to 20 m, one correct viewpoint per Height), and Rotation sliders;
   Infinite keeps the classic flat backdrop with Rotation only. Shadows track
@@ -204,12 +215,24 @@ crown.
   ordering and sense always hold, and the rendered colours track the legend
   far closer than the old lit rendering did. Load and reaction vectors are
   ordinary lit scene objects, not exempt from lighting or the display grade.
+  In Studio mode only, dragging Brightness below 1 also fades the ambient
+  sources (the environment light and the hemisphere light) toward zero
+  quadratically, while the sun keeps fading at its existing linear rate;
+  at the bottom of the slider the scene reads near black with the sun as
+  the single projecting source, on purpose. Sky and HDRI modes are
+  untouched by that fade, since their light IS the environment.
 - Ground select offers four procedural presets: Dark studio (default), Concrete
-  slab, Patio pavers and Tiles. Props are five placeable objects (Figure, Tree,
-  Pallets, Barrier, Cone); arm a prop button, click the ground to place, drag
-  to move, press R for 15 degree rotations, Delete removes, clicking empty
-  ground deselects. Layouts save per study in the browser and survive a reload;
-  props appear in recordings. Clear props empties the layout.
+  slab, Patio pavers and Tiles. Each preset carries its own Tint colour picker
+  and Scale slider (0.25x to 4x, a repeat multiplier on the preset's own
+  texture) with a Reset ground appearance button; changes apply to that
+  preset's material in place and persist per preset, restored on both a
+  preset switch and a fresh page load. Dark studio has no texture, so Scale
+  hides for it and Tint alone sets its colour. Props are five placeable
+  objects (Figure, Tree, Pallets, Barrier, Cone); arm a prop button, click
+  the ground to place, drag to move, press R for 15 degree rotations, Delete
+  removes, clicking empty ground deselects. Layouts save per study in the
+  browser and survive a reload; props appear in recordings. Clear props
+  empties the layout.
 - Column geometry dropped into `bench/studio/columns/*.json` (either
   `{"vertices", "faces"}` or a contract-style export) renders in steel.
 - A bottom-right event log holds the last seven timestamped studio events

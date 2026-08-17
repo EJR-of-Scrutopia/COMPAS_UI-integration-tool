@@ -24,6 +24,12 @@ const state = {
   environmentMode: "studio", // E1: "studio" | "sky" | "hdri", each owns background, environment, fog, sun
   weatherPreset: "clear",    // E2: a key of WEATHER
   groundPreset: "dark-studio", // E4: a key of GROUNDS, independent of the environment mode
+  // W6 (studio tweaks, 2026-08-17): render-only ground overrides, keyed to
+  // groundPreset and persisted per preset under "bench-studio-ground:" +
+  // preset (see restoreGroundAppearance/persistGroundAppearance). null
+  // means no override; scale is a repeat multiplier off the preset's own
+  // base repeat (1 = unscaled).
+  groundAppearance: { tint: null, scale: null },
   props: [],            // E5: [{ type, x, y, rotation, object }], mirrored to localStorage
   armedPropType: null,  // a prop button was clicked; the next ground click places it
   selectedProp: null,   // the record whose object is highlighted and keyboard-driven
@@ -605,10 +611,30 @@ const GROUNDS = {
 };
 
 const groundMaterialCache = {};
+// W6: each preset's material as GROUNDS built it, captured once the first
+// time groundMaterial() constructs that preset -- the fixed point every
+// later tint/scale override is computed FROM, never compounded on top of.
+const groundBaseAppearance = {};
 
 function groundMaterial(preset) {
-  if (!groundMaterialCache[preset]) groundMaterialCache[preset] = GROUNDS[preset]();
+  if (!groundMaterialCache[preset]) {
+    const material = GROUNDS[preset]();
+    groundMaterialCache[preset] = material;
+    groundBaseAppearance[preset] = captureGroundBase(material);
+  }
   return groundMaterialCache[preset];
+}
+
+// W6: the preset's own base colour and, for every map slot it actually
+// carries, its own base repeat -- patio-pavers and tiles share one texture
+// object between map and bumpMap, concrete-slab uses two independent ones,
+// dark-studio has no maps at all, so repeats is built defensively per slot.
+function captureGroundBase(material) {
+  const repeats = {};
+  for (const slot of ["map", "roughnessMap", "bumpMap"]) {
+    if (material[slot]) repeats[slot] = material[slot].repeat.clone();
+  }
+  return { color: material.color.clone(), repeats };
 }
 
 // ---------- E5: placeable props ----------
@@ -2405,6 +2431,12 @@ async function loadStudy(exportName) {
 
 async function boot(preferredExport) {
   applyEnvironment();
+  // W6: the ground preset's own stored tint/scale must be in place before
+  // the first study load builds the ground mesh (buildScene reads
+  // groundMaterial(state.groundPreset), which returns whatever
+  // restoreGroundAppearance already mutated it to) -- restoreAppearance's
+  // own contract for materials, mirrored here for the ground.
+  restoreGroundAppearance(state.groundPreset);
   try {
     const payload = await fetchJson("/api/studies");
     state.studies = payload.studies;
@@ -2713,7 +2745,24 @@ document.getElementById("weather-preset").addEventListener("change", (e) => {
 });
 document.getElementById("ground-preset").addEventListener("change", (e) => {
   state.groundPreset = e.target.value;
+  restoreGroundAppearance(e.target.value); // the incoming preset's own stored tint/scale, before the mesh reads it
   if (state.objects.ground) state.objects.ground.material = groundMaterial(e.target.value);
+});
+document.getElementById("ground-tint").addEventListener("change", (e) => {
+  state.groundAppearance.tint = e.target.value;
+  persistGroundAppearance();
+  applyGroundAppearance(state.groundPreset);
+});
+document.getElementById("ground-scale").addEventListener("input", (e) => {
+  state.groundAppearance.scale = +e.target.value;
+  persistGroundAppearance();
+  applyGroundAppearance(state.groundPreset);
+});
+document.getElementById("ground-reset").addEventListener("click", () => {
+  state.groundAppearance = { tint: null, scale: null };
+  localStorage.removeItem(groundStorageKey(state.groundPreset));
+  syncGroundControls(state.groundPreset);
+  applyGroundAppearance(state.groundPreset);
 });
 for (const [id, type] of [["prop-figure", "figure"], ["prop-tree", "tree"],
                           ["prop-pallets", "pallets"], ["prop-barrier", "barrier"],
@@ -3351,6 +3400,63 @@ function rebuildAppearance() {
   buildPieceMeshes();
   recolourSegments();
   if (state.timeline) applySceneAtTime(state.timeline.t);
+}
+
+// ---------- Task 5 / W6: ground tint and scale (render-only, per preset) ----------
+function groundStorageKey(preset) {
+  return "bench-studio-ground:" + preset;
+}
+
+function persistGroundAppearance() {
+  localStorage.setItem(groundStorageKey(state.groundPreset), JSON.stringify(state.groundAppearance));
+}
+
+// Mutates the ACTIVE preset's cached material IN PLACE: color.set for
+// tint (or the preset's own base colour with no override), and every map
+// slot the preset actually carries rescaled from its own captured BASE
+// repeat -- never from the material's current repeat, or a second drag
+// tick would compound onto an already-scaled value instead of restating
+// the scale from scratch each time.
+function applyGroundAppearance(preset) {
+  const material = groundMaterial(preset);
+  const base = groundBaseAppearance[preset];
+  material.color.copy(base.color);
+  if (state.groundAppearance.tint) material.color.set(state.groundAppearance.tint);
+  const scale = state.groundAppearance.scale || 1;
+  for (const slot of ["map", "roughnessMap", "bumpMap"]) {
+    if (!base.repeats[slot]) continue;
+    material[slot].repeat.set(base.repeats[slot].x * scale, base.repeats[slot].y * scale);
+  }
+}
+
+// Dark-studio carries no texture at all, so its scale row is meaningless
+// and hides; tint still applies (dark-studio's "texture" IS its colour).
+function syncGroundControls(preset) {
+  groundMaterial(preset); // ensures groundBaseAppearance[preset] exists
+  const base = groundBaseAppearance[preset];
+  document.getElementById("ground-tint").value = state.groundAppearance.tint || "#" + base.color.getHexString();
+  document.getElementById("ground-scale").value = state.groundAppearance.scale || 1;
+  document.getElementById("ground-scale-row").classList.toggle("hidden", preset === "dark-studio");
+}
+
+// Called from both the ground-preset change handler and boot, both before
+// the incoming preset's material is next read by buildScene, exactly
+// restoreAppearance's own contract for materials.
+function restoreGroundAppearance(preset) {
+  let appearance = { tint: null, scale: null };
+  const stored = localStorage.getItem(groundStorageKey(preset));
+  if (stored) {
+    try {
+      const parsed = JSON.parse(stored);
+      appearance = {
+        tint: parsed.tint || null,
+        scale: typeof parsed.scale === "number" ? parsed.scale : null,
+      };
+    } catch (error) { /* corrupt localStorage entry: fall back to the defaults above */ }
+  }
+  state.groundAppearance = appearance;
+  syncGroundControls(preset);
+  applyGroundAppearance(preset);
 }
 
 function sceneCentroid() {
