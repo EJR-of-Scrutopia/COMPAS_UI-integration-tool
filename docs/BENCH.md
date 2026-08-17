@@ -173,9 +173,10 @@ crown.
   and is the default); Formwork select which defaults to Hidden (Always
   stands the ghost falsework clear of the shell's inner face); Node size
   (0.01 to 0.10 m) and Wire size (0.005 to 0.06 m) sliders. In Both mode
-  and Timeline, the thrust net clears the shell by half the built thickness
-  plus its own wire/node radius so the crown seam vanishes; Framework mode
-  keeps the true mid-surface.
+  and the pre-strike Timeline the net drapes just below the shell's underside
+  by its own wire or node radius only (its raw position coincides with the
+  intrados, the shell's bottom face); Framework mode shows the bare net at
+  the surface itself.
 - Scene section: Environment select offers three exclusive modes. Studio
   offers the neutral room as a backdrop (default), with a tone slider for it.
   Sky is a physical scattering shader with five weather presets (Clear, Hazy,
@@ -477,11 +478,11 @@ should be read as typical against the medians beside them.
 
 In plain physical terms: the residual is the sine of the angle between a
 corner's stored normal and the plane of the facet that does not own it, so
-at the shipped 0.2 m shell thickness (a half thickness of 0.1 m either
-side of the mid surface a corner's normal actually offsets along), a
-residual of `r` moves that corner roughly `100 * r` millimetres from where
-a perfectly flat joint would put it. The median, 0.0196, is about 2 mm;
-the worst corner, 0.3295, is about 33 mm. Nothing in the shipped
+at the shipped 0.2 m shell thickness, the corner normal offsets the full
+0.2 m thickness upward from the intrados; a residual of `r` moves that
+corner roughly `200 * r` millimetres from where a perfectly flat joint
+would put it. The median, 0.0196, is about 4 mm; the worst corner, 0.3295,
+is about 66 mm. Nothing in the shipped
 acceptance tests bounds either figure on real geometry (the `< 0.02` bound
 in `tests/studio/test_pieces.py` is pinned to the synthetic fixture only),
 so none of this is a failing measurement, but the tail is real and worth a
