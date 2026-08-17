@@ -37,13 +37,38 @@ if (-not $pySpec) {
 }
 
 $venvDir = Join-Path $env:LOCALAPPDATA "BenchStudio\venv"
-$venvPython = Join-Path $venvDir "Scripts\python.exe"
 
-if (-not (Test-Path $venvPython)) {
+# Microsoft Store Python virtualises writes under AppData\Local into its
+# package's LocalCache, so the venv can land somewhere other than the
+# requested path. Same probe setup-fea.ps1 uses: prefer the requested
+# location, fall back to any Store package redirect that actually exists.
+function Resolve-VenvPython([string]$requested) {
+    $direct = Join-Path $requested "Scripts\python.exe"
+    if (Test-Path $direct) { return $direct }
+    $relative = $requested.Substring(($env:LOCALAPPDATA).Length + 1)
+    $packages = Join-Path $env:LOCALAPPDATA "Packages"
+    if (Test-Path $packages) {
+        foreach ($pkg in Get-ChildItem $packages -Filter "PythonSoftwareFoundation.Python.*" -Directory -ErrorAction SilentlyContinue) {
+            $redirected = Join-Path $pkg.FullName "LocalCache\Local\$relative\Scripts\python.exe"
+            if (Test-Path $redirected) { return $redirected }
+        }
+    }
+    return $null
+}
+
+$venvPython = Resolve-VenvPython $venvDir
+if (-not $venvPython) {
     Write-Host "First run: creating a Python environment at $venvDir"
     & py $pySpec -m venv $venvDir
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Could not create the virtual environment. See README.md, Prerequisite."
+        Read-Host "Press Enter to close"
+        exit 1
+    }
+    $venvPython = Resolve-VenvPython $venvDir
+    if (-not $venvPython) {
+        Write-Host "The environment was created but its python.exe could not be located."
+        Write-Host "This can happen with Microsoft Store Python; see README.md, Prerequisite."
         Read-Host "Press Enter to close"
         exit 1
     }
