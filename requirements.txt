@@ -1,0 +1,10 @@
+# Runtime dependencies for the Bench Studio server (bench/studio/).
+#
+# This matches the "studio" extra in the source repo's pyproject.toml
+# exactly: the server is a pure web stack (FastAPI + Uvicorn, stdlib
+# everywhere else) and none of bench/studio/*.py, other than solve_stage.py
+# and solve_cra.py, import numpy, scipy, or compas. Those two files never
+# run in this process: staging.py shells them out to the .venv-fea and
+# .venv-cra interpreters (see requirements-fea.txt and docs/BENCH.md).
+fastapi>=0.115,<1
+uvicorn>=0.30,<1

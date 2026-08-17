@@ -1,0 +1,30 @@
+# Packages for .venv-fea: the finite-element solver environment.
+#
+# This is an OPTIONAL, advanced feature. Viewing and cutting a study needs
+# only requirements.txt. Per-stage structural analysis (solve_stage.py,
+# shelled out from bench/studio/staging.py) additionally needs this stack,
+# and it cannot share the main venv: compas_fea2's OpenSees backend pins
+# the core to a mid-2025 commit that this project's pyproject does not
+# carry, and the pin exists for a reason documented in bench/scripts/
+# setup_fea_env.sh.
+#
+# The setup script is the source of truth, not this file: two of these
+# come from git commits rather than PyPI, and a standalone OpenSees
+# executable has to be installed by hand afterwards (see docs/BENCH.md,
+# "The three environments", and bench/scripts/install_opensees.py).
+# Build the environment with:
+#
+#     bash bench/scripts/setup_fea_env.sh
+#
+# That script also runs `pip install --no-deps -e .` against the source
+# repo's pyproject.toml to make ananke_fea importable there, a step this
+# standalone repo has no pyproject.toml to support yet (see the
+# housekeeping report for the open item). Until that is resolved, run
+# setup_fea_env.sh from the main COMPAS-workflow-GH_native checkout, and
+# copy or symlink the resulting .venv-fea here.
+numpy==2.0.2
+scipy==1.13.1
+compas==2.15.1
+git+https://github.com/fea2/compas_fea2@664ec20
+git+https://github.com/fea2/compas_fea2_opensees@main
+openseespy

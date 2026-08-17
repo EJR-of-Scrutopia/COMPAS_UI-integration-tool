@@ -1,2 +1,76 @@
-# COMPAS_UI-integration-tool
-This is a dedicated locally hosted web app to combine the compas.dev framework into a legible, high quality render and animation suite. It will perform structured analysis, powered through visualization and an overhaul to the graphic capabilities of the vanilla three js interface
+# Bench Studio
+
+A local web UI for viewing and cutting Grasshopper thrust-network vault
+studies. It is the downstream step after
+[COMPAS-workflow-GH_native](https://github.com/EJR-of-Scrutopia/COMPAS-workflow-GH_native),
+the Grasshopper plugin that solves a vault's thrust network and exports it:
+drop that export here, and the studio tessellates it into masonry, lets you
+walk the cutting sequence stage by stage, and renders the result. Rhino is
+never required for any of that.
+
+## Prerequisite
+
+Python 3.12 or later, on PATH. The launcher finds it through the `py`
+launcher (`py -3.12`, falling back to `py -3`), which Python's own Windows
+installer sets up for you if you tick "Add python.exe to PATH" and "py
+launcher" during install. If neither resolves, the launcher tells you so
+and stops rather than guessing.
+
+## Quick start
+
+Double-click **`Launch Bench Studio.cmd`**.
+
+On first run it:
+
+1. Creates a Python virtual environment at `%LOCALAPPDATA%\BenchStudio\venv`.
+2. Installs `requirements.txt` into it, with the install output visible so
+   you can see it working (and see clearly if something goes wrong).
+3. Picks a free port starting at 8600.
+4. Starts the local server and opens it in your browser.
+
+Every later run skips straight to step 3: the venv persists, and `pip
+install` is quick when nothing changed. Closing the server's console window
+stops Bench Studio; nothing else on your machine is affected.
+
+## Updating
+
+Double-click **`Update.cmd`**. It downloads this repository's latest
+`main` as a zip and replaces the app files (`bench/`, `src/`, `launcher/`,
+`requirements*.txt`, `README.md`) with the new versions. It prints what it
+changed as it goes.
+
+It is a plain file-replace, not a merge, and it says so. It never touches
+your data: `bench/studio/hdri/` (rendered environment maps), `bench/demo/
+upload from grasshopper/` (your exports), and `bench/studies/` (studies and
+their solved results) are always skipped, whichever way this runs.
+
+## Create Desktop Shortcut.cmd
+
+Double-click it once to drop a "Bench Studio" shortcut on your desktop that
+points at `Launch Bench Studio.cmd`, so you do not have to keep this folder
+open to start the studio.
+
+## The workflow, in brief
+
+1. In Grasshopper, the Export component writes a matched pair of files
+   (`<name>-compas.json`, `<name>-contract.json`) for a solved vault.
+2. Drop both into `bench/demo/upload from grasshopper/`, or upload them
+   through the studio's own upload endpoint.
+3. Pick a tessellation pattern, a target piece size, and a material
+   thickness; the studio cuts the thrust mesh into masonry pieces.
+4. Walk the build sequence stage by stage. Each stage can be analysed: a
+   real per-stage structural solve (needs the optional `.venv-fea`
+   environment) and a rigid-block stand/fall verdict (needs the optional
+   `.venv-cra` environment), both documented in `docs/BENCH.md`. Neither is
+   required to view and cut a study; they are advanced, opt-in checks.
+5. Render the result, with the day-cycle lighting and HDRI environment
+   controls in the viewer.
+
+`docs/BENCH.md` is the fuller reference for the export format, the three
+Python environments, and the solver internals.
+
+## Data folders
+
+`bench/studio/hdri/`, `bench/demo/upload from grasshopper/`, and
+`bench/studies/` hold your renders, your exports, and your studies. Updates
+never touch them; back them up yourself if you care about keeping them.
