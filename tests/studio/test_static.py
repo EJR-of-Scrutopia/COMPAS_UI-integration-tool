@@ -2365,7 +2365,7 @@ def test_appearance_overrides_are_render_only_and_persist():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     js = (STATIC / "studio.js").read_text(encoding="utf-8")
     css = (STATIC / "studio.css").read_text(encoding="utf-8")
-    for control in ("material-tint", "material-finish", "material-reset", "render-skin"):
+    for control in ("material-tint", "material-finish", "material-reset"):
         assert 'id="{}"'.format(control) in html
     # F5: #appearance-note (the "render tint only" disclosure) must read as
     # a note, styled like every other sibling status/note line, not as
@@ -2380,12 +2380,59 @@ def test_appearance_overrides_are_render_only_and_persist():
     assert 'min="0.3"' in finish_tag
     assert "render tint only, analysis unchanged" in html
     assert '"bench-studio-appearance:"' in js
-    for skin in ("white-presentation", "basalt-dark", "timber-ply"):
-        assert '"{}"'.format(skin) in js
-    # The skin never reaches the server: no fetch uses the skin value.
+
+
+def test_w2_render_skin_is_removed_entirely():
+    """W2 (studio tweaks, 2026-08-17): Param's verdict was that the skin
+    dropdown was wrong -- a material should always keep its own texture and
+    base colour, Tint recolours it. The whole skin concept dies: the UI
+    select, the SKINS table, the per-skin material cache, and the
+    state.appearance.skin field."""
+
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    assert 'id="render-skin"' not in html
+    assert "Render skin" not in html
+    for token in ("SKINS", "skinMaterialCache", "white-presentation", "basalt-dark", "timber-ply"):
+        assert token not in js
+    assert "state.appearance.skin" not in js
+    assert ".skin" not in js
+    # appearanceMaterialBase is reduced to the material registry entry,
+    # always -- no skin substitution branch left to read.
     body = _function_body(js, "appearanceMaterialBase")
-    assert "SKINS" in body
-    assert "state.appearance.skin" not in _function_body(js, "loadStudy")
+    assert "materials[state.bundle.material] || materials.concrete" in body
+    assert "SKINS" not in body
+
+
+def test_w2_finish_slider_is_labelled_gloss_to_matt():
+    # The id stays material-finish (pins update minimally); only the
+    # visible label text changes to say what the slider actually does.
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert "Gloss to matt" in html
+    finish_start = html.index('id="material-finish"')
+    label_start = html.rindex("<label>", 0, finish_start)
+    assert "Gloss to matt" in html[label_start:finish_start]
+
+
+def test_w2_stored_skin_appearance_migrates_to_tint_and_finish_only():
+    """A persisted "bench-studio-appearance:" entry written before this task
+    can still carry a skin key (e.g. {"tint": "#ffffff", "finish": 0.6,
+    "skin": "basalt-dark"}). restoreAppearance's tolerant parse must load
+    such an entry as tint/finish only -- the skin key is read by nothing and
+    written by nothing, so it simply falls away on the next persist."""
+
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    body = _function_body(js, "restoreAppearance")
+    assert "skin" not in body
+    # The pre-parse default and the parsed result must both be exactly the
+    # two-key shape -- no skin field surviving anywhere in the fallback.
+    assert "{ tint: null, finish: null }" in body
+    assert "typeof parsed.finish === \"number\"" in body
+    # Reset must clear the same two-key shape, not the old three-key one.
+    reset_start = js.index('getElementById("material-reset")')
+    reset_body = js[reset_start:js.index("\n});", reset_start)]
+    assert "state.appearance = { tint: null, finish: null };" in reset_body
+    assert "skin" not in reset_body
 
 
 def test_wire_net_vertex_colours_are_off_at_rest():

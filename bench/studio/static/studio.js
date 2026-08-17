@@ -67,8 +67,10 @@ const state = {
   // Task 5: render-only overrides, keyed to the loaded ANALYSIS material
   // and persisted per material under "bench-studio-appearance:" + material
   // (see restoreAppearance/persistAppearance). null means no override; the
-  // registry material (or a skin) shows through untouched.
-  appearance: { tint: null, finish: null, skin: "none" },
+  // registry material always shows through untouched otherwise. W2 (studio
+  // tweaks, 2026-08-17): render skins are gone -- a material always keeps
+  // its own texture and base colour; tint recolours it.
+  appearance: { tint: null, finish: null },
 };
 
 const canvas = document.getElementById("view");
@@ -2266,7 +2268,7 @@ async function loadStudy(exportName) {
   // The incoming material's own stored appearance (or the defaults, if it
   // has none) must be in place before the pieces below are built, or the
   // first frame of a material switch briefly shows the PREVIOUS material's
-  // tint, finish and skin.
+  // tint and finish.
   restoreAppearance(material);
   // The token: whoever increments last owns the screen. A response that
   // comes back to find a newer sequence number is dropped silently, so
@@ -2434,11 +2436,6 @@ document.getElementById("material-select").addEventListener("change", (e) => {
   const select = document.getElementById("study-select");
   if (select.value && !requestMatchesLoaded(e.target.value)) loadStudy(select.value);
 });
-document.getElementById("render-skin").addEventListener("change", (e) => {
-  state.appearance.skin = e.target.value;
-  persistAppearance();
-  rebuildAppearance();
-});
 document.getElementById("material-tint").addEventListener("change", (e) => {
   state.appearance.tint = e.target.value;
   persistAppearance();
@@ -2453,7 +2450,7 @@ document.getElementById("material-finish").addEventListener("change", (e) => {
   rebuildAppearance();
 });
 document.getElementById("material-reset").addEventListener("click", () => {
-  state.appearance = { tint: null, finish: null, skin: "none" };
+  state.appearance = { tint: null, finish: null };
   localStorage.removeItem(appearanceStorageKey(document.getElementById("material-select").value));
   syncAppearanceControls();
   rebuildAppearance();
@@ -2950,45 +2947,18 @@ function pieceTint(key) {
   return (offset[0] % 1) * 0.06 - 0.03;
 }
 
-// Task 5: render skins. "none" is not a factory: it means "show the
-// registry material", which appearanceMaterialBase reads straight from
-// materials[]. The three real skins are lazily built and cached like
-// groundMaterial caches GROUNDS, since each is a MeshPhysicalMaterial with
-// its own procedural map and should not be rebuilt on every piece.
-const SKINS = {
-  none: null,
-  "white-presentation": () => new THREE.MeshPhysicalMaterial({
-    color: 0xf4f4f0, side: THREE.DoubleSide,
-    map: noiseTexture(256, 245, 8),
-    roughness: 0.55, metalness: 0.0,
-  }),
-  "basalt-dark": () => new THREE.MeshPhysicalMaterial({
-    color: 0x2e3236, side: THREE.DoubleSide,
-    roughness: 0.85, metalness: 0.0,
-  }),
-  "timber-ply": () => new THREE.MeshPhysicalMaterial({
-    color: 0xc9a86a, side: THREE.DoubleSide,
-    map: grainTexture(512),
-    roughness: 0.7, metalness: 0.0,
-  }),
-};
-
-const skinMaterialCache = {};
-
+// W2 (studio tweaks, 2026-08-17): render skins are removed. Param's
+// verdict was that a material should always keep its own texture and base
+// colour -- Tint recolours it, Gloss to matt adjusts it, but nothing ever
+// substitutes the material itself. appearanceMaterialBase now always
+// reads straight from the registry.
 function appearanceMaterialBase() {
-  // The base pieceMaterial clones from: a skin's material when one is
-  // chosen, else the registry entry for the loaded study's own material
-  // (unchanged from before this task). A skin only ever substitutes the
-  // BASE material a piece is built from; it carries no information back to
-  // the server and never touches state.bundle.material, so the whole-shell
-  // weld in buildPieceMeshes -- which triggers on sprayedMaterial(), i.e.
-  // the ANALYSIS material being concrete-sprayed -- keeps working exactly
-  // as before under any skin, including "none".
-  const skin = state.appearance.skin;
-  if (skin !== "none" && SKINS[skin]) {
-    if (!skinMaterialCache[skin]) skinMaterialCache[skin] = SKINS[skin]();
-    return skinMaterialCache[skin];
-  }
+  // The base pieceMaterial clones from: the registry entry for the loaded
+  // study's own material, always. It carries no information back to the
+  // server and never touches state.bundle.material, so the whole-shell weld
+  // in buildPieceMeshes -- which triggers on sprayedMaterial(), i.e. the
+  // ANALYSIS material being concrete-sprayed -- keeps working exactly as
+  // before.
   return materials[state.bundle.material] || materials.concrete;
 }
 
@@ -3238,7 +3208,7 @@ function updateMaterialControls() {
     sprayed ? " (sprayed concrete is monolithic: no joints to open)" : "";
 }
 
-// ---------- Task 5: tint, finish and render skins (render-only) ----------
+// ---------- Task 5 / W2: tint and finish (render-only) ----------
 function appearanceStorageKey(material) {
   return "bench-studio-appearance:" + material;
 }
@@ -3249,7 +3219,6 @@ function persistAppearance() {
 }
 
 function syncAppearanceControls() {
-  document.getElementById("render-skin").value = state.appearance.skin;
   document.getElementById("material-tint").value = state.appearance.tint || "#ffffff";
   const finish = state.appearance.finish !== null ? state.appearance.finish : 0.5;
   document.getElementById("material-finish").value = finish;
@@ -3260,8 +3229,16 @@ function syncAppearanceControls() {
 // BEFORE the incoming material's pieces are built, so a stored override
 // (or the lack of one) is always in state.appearance by the time
 // pieceMaterial first reads it for the material being switched to.
+//
+// W2 (studio tweaks, 2026-08-17) migration: a "bench-studio-appearance:"
+// entry written before render skins were removed can still carry a skin
+// key. The parse below only ever reads tint and finish off the stored
+// object, so such an entry loads as tint/finish only -- the leftover skin
+// key is read by nothing, and the next persistAppearance() call (a tint or
+// finish change) overwrites the stored entry with the two-key shape,
+// dropping it for good.
 function restoreAppearance(material) {
-  let appearance = { tint: null, finish: null, skin: "none" };
+  let appearance = { tint: null, finish: null };
   const stored = localStorage.getItem(appearanceStorageKey(material));
   if (stored) {
     try {
@@ -3269,7 +3246,6 @@ function restoreAppearance(material) {
       appearance = {
         tint: parsed.tint || null,
         finish: typeof parsed.finish === "number" ? parsed.finish : null,
-        skin: typeof parsed.skin === "string" ? parsed.skin : "none",
       };
     } catch (error) { /* corrupt localStorage entry: fall back to the defaults above */ }
   }
@@ -3277,9 +3253,9 @@ function restoreAppearance(material) {
   syncAppearanceControls();
 }
 
-// The joint-gap handler's exact rebuild shape, reused across the four
-// appearance controls: a tint, finish or skin change never touches the
-// bundle, so it never needs a server round trip, only a redraw.
+// The joint-gap handler's exact rebuild shape, reused across the appearance
+// controls: a tint or finish change never touches the bundle, so it never
+// needs a server round trip, only a redraw.
 function rebuildAppearance() {
   if (!state.bundle) return;
   buildPieceMeshes();
