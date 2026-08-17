@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Environments and local configuration
+.venv/
+.venv-fea/
+.venv-cra/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Python build and package artifacts
+build/
+dist/
+*.egg-info/
+*.whl
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local logs and scratch files
+*.log
+*.tmp
+*.bak
+scratch/
+
+# Study results are build products; the problem file is the source.
+bench/studies/**/results/
+bench/studies/*/studio/
+
+# Generated studio outputs: user data, never shipped and never touched by
+# Update.cmd. The four sample exports under bench/demo/upload from
+# grasshopper/ are tracked on purpose (demo and test fixtures come from
+# there); Update.cmd knows to leave that whole folder alone regardless.
+bench/studio/hdri/
+bench/demo/*.png
+!bench/demo/pavilion-result.json
+
+# The probe rig's node install: bench/scripts/studio_probe.mjs needs
+# puppeteer-core, installed locally next to it rather than pinned here.
+bench/scripts/probe-env/
+
+# Planning journals from Claude Code / superpowers sessions in this repo.
+.superpowers/
