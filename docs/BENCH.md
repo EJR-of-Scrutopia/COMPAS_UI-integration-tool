@@ -247,6 +247,47 @@ ring and wedge binning itself, is retired; the studio's own size and pattern
 controls, and `bench/scripts/cutting_measurements.py` below, are what now
 pin the cut on real geometry.
 
+#### Pieces build up from the surface, not around it
+
+**Updated 2026-08-17 (cutting truth wave, K1).** The surface `pieces.py`
+tessellates is the INTRADOS, the face that actually touches the formwork,
+and material builds UP from it: the built solid extrudes outward along the
+local normal by the full shell thickness, never down through the form.
+Before this wave the solid straddled the surface, half the thickness either
+side, which is exactly what put blocks visibly hanging BELOW the net in the
+studio's own belly view, the defect Param's own screenshot named. Every
+client offset that assumed the old mid-surface convention moved with it:
+the formwork ghost now sits directly under the surface, the net's display
+clearance in Both and pre-strike Timeline is a radius-only lift in the
+downward direction (the net's home is now the shell's bottom face, not its
+middle), and load arrows lift by the full thickness to reach the extrados.
+Sprayed (monolithic) concrete keeps the whole point of spraying: it is
+moulded directly onto the formwork, so it stays the curved, smoothly
+moulded solid, built upward from the same intrados. Sprayed pieces never
+flatten into blocks.
+
+**Updated 2026-08-17 (cutting truth wave, K2).** Jointed pieces, every
+pattern but sprayed, no longer mould themselves to the mesh on their
+undersides -- a real cutting tool cannot carry that curvature. Each jointed
+piece is now a true prismatic block: a least-squares seat plane fitted
+through its own lifted outline points, oriented outward; the belly is the
+outline projected onto that plane; the top is the same plane offset by the
+full thickness along its normal; the sides are ruled straight between belly
+and top, the straight-tool cut a real mason or fabricator actually makes.
+Global curvature lives entirely in the stepping between neighbouring
+blocks, the honest cut-voussoir reading, not inside any one piece.
+
+Seating honesty: a flat cut on a curved form leaves a wedge-shaped gap
+between the seat plane and the true surface, the packing or mortar bed a
+real mason would need to fill, and the studio measures and reports it
+rather than hiding it. Measured on the real Trial 2 export at 0.9 m, all
+233 jointed pieces: worst seat gap 158 mm, median 19.7 mm
+(`seat_gap_stats` in the tessellation report; the Data panel shows the same
+worst and median beside the corner-residual stats, with the honesty
+sentence stated in those words). K3, below, later cuts the worst of this
+gap to 118.8 mm, since most of it traced back to the same rim fragmentation
+K3 fixes.
+
 `bench/scripts/cutting_measurements.py` measures the replacement on the
 same Trial 2 export, at 0.9 m, the size the studio opens to by default. It
 writes nothing into `studies/`. Run it with
@@ -377,9 +418,20 @@ worst case is the same real displacement the old clamp reached (a point
 genuinely outside the true rim is still exactly that far outside it; what
 changed is that it is now pulled back to the true nearest point of the
 rim, not an arbitrary nearby face), while the median is over ten times
-smaller than the old clamp's 24.6 mm, because most of the 417 are near-
-boundary points a float's width outside the primary containment test, not
-notch casualties. The corner residual distribution moves too, since fewer
+smaller than the old clamp's 24.6 mm. The mechanism is the Douglas-Peucker
+simplification course 0's outline now runs against the boundary (named
+above, tolerance `cutting.CHORD_TARGET`, 5 mm): fewer kept boundary
+vertices means longer straight chords between them, and the cap's own edge
+subdivision inserts intermediate points along those chords, which sit
+slightly inside the true curved rim by construction (that is what a chord
+tolerance means) and land just outside the primary containment test,
+getting projected back onto the boundary polyline in turn. The 1.4 mm
+median is that bounded, DP-chord resubdivision gap showing up downstream
+in the cap, not float noise -- an earlier draft of this section attributed
+it to points "a float's width outside the primary containment test",
+which cannot be right at 1.4 mm (many orders of magnitude past a float's
+own precision at this scale); corrected here rather than left standing.
+The corner residual distribution moves too, since fewer
 welded points changes which corners exist at all: 515 corners (was 695),
 median 0.0316 (was 0.0196), max 0.3295 (unchanged, the same worst corner).
 The K2 seat-gap worst, 158 mm, drops to 118.8 mm on the same export, the
