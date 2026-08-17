@@ -326,6 +326,43 @@ def test_generation_is_deterministic():
     assert [c["key"] for c in first["cells"]] == [c["key"] for c in second["cells"]]
 
 
+def test_course_zero_outline_simplifies_against_the_boundary():
+    """K3 (cutting truth, 2026-08-17): course 0 used to insert every one
+    of the real rim's 240 boundary vertices between a piece's own two head
+    joints, one drawn boundary point per mesh vertex -- the
+    one-piece-per-boundary-vertex fragmentation the cutting truth spec
+    names. Measured on the real Trial 2 domain at the studio's own
+    default size (0.9 m): before this fix, course 0's 62 pieces carried
+    538 outline points between them (8.68 per piece, git history: this
+    exact figure, from the trial-2-tessellation.json fixture this test
+    reads, before the boundary-simplification commit); simplifying the
+    rim-following stretch of each piece's own outline against
+    cutting.CHORD_TARGET drops that to 358 (5.77 per piece), a genuine
+    35 percent cut, not a rounding accident.
+
+    Piece COUNT itself does not, and structurally cannot, change from this
+    fix: _course_count/_divisions size every course from the plan's own
+    measured circumference and the target size alone (720 angle samples,
+    fixed), never from how many boundary vertices the underlying mesh
+    happens to carry. What the spec's "ending the one-piece-per-boundary-
+    vertex fragmentation" language names, and what this test actually
+    pins, is each piece's own outline complexity -- the fragmentation a
+    reader sees in a single rim casting's own facet count -- not the
+    number of castings in the course.
+    """
+
+    g = studio("generators")
+    fixture = json.loads(
+        (FIXTURES / "trial-2-tessellation.json").read_text(encoding="utf-8")
+    )
+    tess = g.generate(fixture["pattern"], fixture["domain"], fixture["size"])
+    course0 = [cell for cell in tess["cells"] if cell["course"] == 0]
+    assert len(course0) == 62
+    total = sum(len(cell["outline"]) for cell in course0)
+    assert total == 358
+    assert total < 538 * 0.8, "a real reduction in rim outline density, not a rounding accident"
+
+
 def test_an_unknown_pattern_names_what_is_available():
     g = studio("generators")
     with pytest.raises(ValueError) as error:

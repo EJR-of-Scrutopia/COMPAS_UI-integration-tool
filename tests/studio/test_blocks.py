@@ -2,11 +2,13 @@
 
 The offset and boundary maths (vertex_normals, segment_boundary_edges) used
 to also be mirrored in static/fields.js, with a parity test at the bottom
-running the JS side in node on the same tilted mesh. The viewer no longer
-extrudes anything client-side (bench/studio/pieces.py ships mid-surface
-points and normals, and the viewer just offsets them), so that JS mirror
-was retired along with the parity test; blocks.py is now the only
-implementation of this maths, and pieces.py calls it directly.
+running the JS side in node on the same tilted mesh. That JS mirror was
+retired along with the parity test: bench/studio/pieces.py ships surface
+points and normals -- the intrados, under K1 (cutting truth,
+2026-08-17) -- and the viewer's own buildPieceMeshes extrudes upward from
+them, a separate, unmirrored implementation. blocks.py is now the only
+implementation of THIS module's own offset/boundary maths, and pieces.py
+calls it directly.
 """
 
 from __future__ import annotations

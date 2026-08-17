@@ -23,6 +23,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Tuple
 
+import cutting
 import domain as domain_module
 import tessellation
 
@@ -85,7 +86,102 @@ def _circumference(domain: Dict, f: float) -> float:
     return total
 
 
-def _arc(domain: Dict, f: float, start: float, end: float, extra_angles=None) -> List[List[float]]:
+def _inside_span(angles, start: float, end: float) -> List[float]:
+    """Every candidate angle, resolved to whichever branch lands strictly
+    inside (start, end) and deduplicated, sorted by the value actually
+    used rather than the angle it came from.
+
+    Tried at theta, theta plus a turn and theta minus a turn, because a
+    span can sit anywhere on the real line while an angle is reported in
+    minus pi to pi and a course's head joints run from an offset up past
+    2 pi. Sorting the surviving values, not the source angles, is what
+    lets a span crossing either seam (2 pi on the head joint pass, pi on
+    the rim pass) come out in sequence: some of its points are reached
+    through the wrapped branch and some directly, so ordering by theta
+    would emit them out of order and the outline would cross itself.
+    """
+
+    return sorted({
+        turn
+        for theta in angles
+        for turn in (theta, theta + TWO_PI, theta - TWO_PI)
+        if start + 1e-12 < turn < end - 1e-12
+    })
+
+
+def _point_line_distance(p, a, b) -> float:
+    """Perpendicular distance from p to the infinite line through a, b;
+    falls back to point-to-point distance if a and b coincide."""
+
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    length = math.hypot(dx, dy)
+    if length < 1e-12:
+        return math.hypot(p[0] - ax, p[1] - ay)
+    return abs(dx * (p[1] - ay) - dy * (p[0] - ax)) / length
+
+
+def _douglas_peucker_indices(anchor_a, points, anchor_b, tolerance: float) -> List[int]:
+    """Indices into points that survive simplifying anchor_a..points..
+    anchor_b against tolerance: the classic recursive rule -- keep the
+    point farthest from the current chord if it is over tolerance away,
+    then recurse on both halves; keep nothing between two points that are
+    already within tolerance of the chord joining them."""
+
+    n = len(points)
+    if n == 0:
+        return []
+    keep = [False] * n
+
+    def recurse(lo: int, hi: int, a, b) -> None:
+        if lo >= hi:
+            return
+        farthest_i, farthest_d = lo, -1.0
+        for i in range(lo, hi):
+            d = _point_line_distance(points[i], a, b)
+            if d > farthest_d:
+                farthest_i, farthest_d = i, d
+        if farthest_d <= tolerance:
+            return
+        keep[farthest_i] = True
+        recurse(lo, farthest_i, a, points[farthest_i])
+        recurse(farthest_i + 1, hi, points[farthest_i], b)
+
+    recurse(0, n, anchor_a, anchor_b)
+    return [i for i in range(n) if keep[i]]
+
+
+def _simplify_boundary_run(
+    domain: Dict, f: float, start: float, end: float, turns: List[float], tolerance: float
+) -> List[float]:
+    """Douglas-Peucker over one cell's own rim-following outline stretch.
+
+    K3 (cutting truth, 2026-08-17): course 0's outline used to insert
+    every one of the real rim's own boundary vertices between a cell's two
+    head joints (240 on the real Trial 2 export, one drawn piece boundary
+    point per mesh boundary vertex, the one-piece-per-boundary-vertex
+    fragmentation named in the cutting truth spec). The anchors here are
+    the arc's own start and end points, already exactly on the rim
+    (plan_point at f = 1.0), so simplifying the points between them
+    against a straight chord simplifies exactly this one cell's own
+    boundary-following stretch, never reaching past its own two head
+    joints into a neighbour's -- two adjacent course-0 cells therefore
+    still meet at the same welded point they always did, only the run
+    between meets thins out.
+    """
+
+    anchor_a = domain_module.plan_point(domain, f, start)
+    anchor_b = domain_module.plan_point(domain, f, end)
+    points = [domain_module.plan_point(domain, f, turn) for turn in turns]
+    keep = _douglas_peucker_indices(anchor_a, points, anchor_b, tolerance)
+    return [turns[i] for i in keep]
+
+
+def _arc(
+    domain: Dict, f: float, start: float, end: float, extra_angles=None,
+    boundary_tolerance: float = cutting.CHORD_TARGET,
+) -> List[List[float]]:
     """Outline points from start to end at radius f, ends included.
 
     At the rim the arc follows the mesh's own boundary corners, so the
@@ -93,33 +189,32 @@ def _arc(domain: Dict, f: float, start: float, end: float, extra_angles=None) ->
     straight chord between its two ends, which is what a cut bed joint
     actually is, and what keeps a piece a clean four sided shape.
 
-    extra_angles: optional list of angles to include if they fall strictly inside the span
+    extra_angles: optional list of angles to include if they fall strictly
+    inside the span -- always kept verbatim, never simplified: these are
+    deliberate cut joints (a neighbouring course's own head joint angles,
+    threaded through so two courses' shared boundary stays one set of
+    points on both sides), not boundary vertices, so there is nothing
+    about them a chord tolerance should be allowed to drop.
 
-    Every candidate angle is tried at theta, theta plus a turn and theta
-    minus a turn, because a span can sit anywhere on the real line while
-    boundary_angles reports atan2 values in minus pi to pi and a course's
-    head joints run from an offset up past 2 pi. Whichever of the three
-    lands inside the span is the one this arc wants. The angles that
-    survive are then sorted by the value actually used, not by the theta
-    they came from, and deduplicated: a span crossing either seam (2 pi on
-    the head joint pass, pi on the rim pass) reaches some of its points
-    through the wrapped branch and some directly, so ordering by theta
-    emits them out of sequence and the outline crosses itself. Sorting the
-    inserted values is also what lets both passes share one list, instead
-    of relying on the accident that the rim pass happened to run first.
+    boundary_tolerance: K3 (cutting truth, 2026-08-17). At the rim
+    (f >= 1), the mesh's own boundary corners strictly inside this span
+    are simplified against this chord tolerance before insertion (see
+    _simplify_boundary_run) -- reusing cutting.CHORD_TARGET, the cut's own
+    existing precision budget for how far a cap may depart from the true
+    surface, rather than inventing a new number for how far this outline
+    may depart from the true rim.
     """
 
-    turns: List[float] = []
+    plain_inside = _inside_span(extra_angles, start, end) if extra_angles else []
+
+    boundary_inside: List[float] = []
     if f >= 1.0 - 1e-12:
-        turns.extend(domain_module.boundary_angles(domain))
-    if extra_angles:
-        turns.extend(extra_angles)
-    inside = sorted({
-        turn
-        for theta in turns
-        for turn in (theta, theta + TWO_PI, theta - TWO_PI)
-        if start + 1e-12 < turn < end - 1e-12
-    })
+        boundary_inside = _inside_span(domain_module.boundary_angles(domain), start, end)
+        if boundary_inside:
+            boundary_inside = _simplify_boundary_run(
+                domain, f, start, end, boundary_inside, boundary_tolerance)
+
+    inside = sorted(set(plain_inside) | set(boundary_inside))
     return (
         [domain_module.plan_point(domain, f, start)]
         + [domain_module.plan_point(domain, f, turn) for turn in inside]

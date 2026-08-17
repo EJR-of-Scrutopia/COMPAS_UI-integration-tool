@@ -7,9 +7,25 @@ heatmaps keep their resolution, and its boundary is the outline exactly.
 Neighbours share boundary points because both took them from the same
 welded cut, so their joints coincide rather than nearly coincide.
 
-Thickness is not applied here. Each vertex ships as a mid surface point
-plus a unit normal, and the viewer offsets by half the thickness either
-way, which keeps thickness, taper and the joint gap client side.
+Thickness is not applied here. Each vertex ships as a surface point --
+under K1 (cutting truth, 2026-08-17) the surface the formwork touches,
+the intrados, recorded as provenance["surface"] == "intrados" -- plus a
+unit normal, and the viewer extrudes upward by the full thickness, which
+keeps thickness, taper and the joint gap client side.
+
+K2 (cutting truth, 2026-08-17): a jointed piece (any cut whose pattern is
+not monolithic-bands, i.e. one with real per-piece joints -- today only
+bonded-courses) also ships a seat_plane: the least-squares plane through
+its own lifted outline points, oriented outward. The viewer builds a true
+prismatic block from this, belly and top both flat and parallel, rather
+than K1's curved-surface offset. A flat cut on a curved form always
+leaves a gap between the seat plane and the true surface -- the packing
+or mortar bed the flat cut implies -- so seat_gap discloses the worst
+distance from any of the piece's own cap points to its seat plane, and
+seat_gap_stats in the report carries the distribution the same way
+clamped_* does for the outline clamp. Sprayed concrete (monolithic-bands)
+ships no seat_plane at all: it is moulded on the formwork, genuinely
+curved, and has no flat seat to gap against.
 
 A corner sits where two facets meet, and a single stored normal can only
 lie in one of their two planes at once. So exactly one of a corner's
@@ -194,6 +210,11 @@ def _lift(surface: cutting.Surface, plan) -> Dict:
         "weights": found["weights"],
         "clamped": found["clamped"],
         "clamp_m": found["clamp_m"],
+        # K3 (cutting truth, 2026-08-17): whether this point was pulled
+        # onto the surface by the new boundary-polyline projection rather
+        # than the old nearest-face clamp -- see cutting.Surface.lift.
+        "projected": found["projected"],
+        "projected_m": found["projected_m"],
     }
 
 
@@ -401,6 +422,142 @@ def _courses_touching(tess: Dict, corner: int) -> List[int]:
     return sorted(courses)
 
 
+def _mean_vector(vectors) -> List[float]:
+    total = [0.0, 0.0, 0.0]
+    for vector in vectors:
+        total = [total[i] + vector[i] for i in range(3)]
+    return total
+
+
+def _reference_normal(normals) -> List[float]:
+    """A stand-in outward direction for orienting a fitted plane's sign:
+    the mean of the piece's own shipped normals, unit length. Only the
+    SIGN of the dot product against this matters (see fit_seat_plane), so
+    a mean that is not itself perfectly unit length is not a problem; only
+    a genuinely zero mean (normals that cancel out exactly) needs a
+    fallback, which is arbitrary because there is no honest outward
+    direction left to prefer."""
+
+    unit = _normalise(_mean_vector(normals))
+    return unit if unit is not None else [0.0, 0.0, 1.0]
+
+
+def _smallest_symmetric_eigenpair(a00, a01, a02, a11, a12, a22):
+    """The eigenvalue nearest zero and its unit eigenvector, for a 3x3 real
+    symmetric matrix, in closed form.
+
+    No numpy or scipy: bench/studio is barred from importing a solver
+    stack at all (tests/studio/test_studio_guard.py), so this is the
+    standard trigonometric solution for a symmetric 3x3's eigenvalues
+    (Eberly, "A Robust Eigensolver for 3x3 Symmetric Matrices"; the same
+    closed form is in Wikipedia's Eigenvalue algorithm article), followed
+    by the null space of (A - eig*I) for the matching eigenvector, taken
+    as whichever pair of that matrix's three rows has the largest cross
+    product -- the most nearly orthogonal pair available, and so the most
+    numerically stable choice of the three.
+    """
+
+    p1 = a01 * a01 + a02 * a02 + a12 * a12
+    if p1 < 1e-24:
+        # Already diagonal: the smallest diagonal entry is the smallest
+        # eigenvalue and its own axis is the eigenvector -- UNLESS it ties
+        # with the next smallest (within a tolerance relative to the
+        # matrix's own scale), in which case two axes vary equally little
+        # and no single direction is uniquely the least-varying one: a
+        # genuinely degenerate spread (e.g. a sliver piece with near-zero
+        # extent along two axes at once), not a plane to report. Minor,
+        # fix round 1 on K2 (2026-08-17): this branch used to pick
+        # whichever tied axis Python's min() happened to see first,
+        # silently shipping an arbitrary (and not necessarily physical)
+        # plane where fit_seat_plane's own docstring already promised
+        # None; the general (non-diagonal) branch below does not have
+        # this gap, since a symmetric matrix's tied eigenvalue always
+        # makes (A - eig*I) rank-deficient enough that every pairwise row
+        # cross product comes back zero, which _normalise already turns
+        # into None.
+        ordered = sorted((a00, a11, a22))
+        spread = max(a00, a11, a22, 1e-18)
+        if ordered[1] - ordered[0] < 1e-9 * spread:
+            return ordered[0], None
+        if ordered[0] == a00:
+            return a00, (1.0, 0.0, 0.0)
+        if ordered[0] == a11:
+            return a11, (0.0, 1.0, 0.0)
+        return a22, (0.0, 0.0, 1.0)
+
+    q = (a00 + a11 + a22) / 3.0
+    p2 = (a00 - q) ** 2 + (a11 - q) ** 2 + (a22 - q) ** 2 + 2.0 * p1
+    p = math.sqrt(p2 / 6.0)
+    b00, b01, b02 = (a00 - q) / p, a01 / p, a02 / p
+    b11, b12 = (a11 - q) / p, a12 / p
+    b22 = (a22 - q) / p
+    det_b = (
+        b00 * (b11 * b22 - b12 * b12)
+        - b01 * (b01 * b22 - b12 * b02)
+        + b02 * (b01 * b12 - b11 * b02)
+    )
+    # In exact arithmetic for a symmetric matrix -1 <= r <= 1; clamped
+    # because floating point error can leave it a hair outside that range,
+    # which acos would otherwise turn into a NaN.
+    r = max(-1.0, min(1.0, det_b / 2.0))
+    phi = math.acos(r) / 3.0
+    # The three eigenvalues are q + 2p*cos(phi + k*2*pi/3) for k = 0, 1, 2;
+    # cos is strictly decreasing over phi's range of [0, pi/3], so k = 0 is
+    # always the largest root and k = 1 (used below) is always the
+    # smallest -- this ordering is exact, not just the common case.
+    eig_smallest = q + 2.0 * p * math.cos(phi + 2.0 * math.pi / 3.0)
+
+    m00, m11, m22 = a00 - eig_smallest, a11 - eig_smallest, a22 - eig_smallest
+    row0, row1, row2 = (m00, a01, a02), (a01, m11, a12), (a02, a12, m22)
+    candidates = [_cross(row0, row1), _cross(row0, row2), _cross(row1, row2)]
+    best = max(candidates, key=lambda v: v[0] ** 2 + v[1] ** 2 + v[2] ** 2)
+    vector = _normalise(best)
+    return eig_smallest, (tuple(vector) if vector is not None else None)
+
+
+def fit_seat_plane(points: Sequence[Sequence[float]], reference_normal: Sequence[float]):
+    """The least-squares plane through points: centroid plus the unit
+    normal minimising the sum of squared perpendicular distances, oriented
+    to agree with reference_normal (a piece's own outward surface normal,
+    averaged) rather than carrying the eigensolve's arbitrary sign.
+
+    The normal is the eigenvector of the SMALLEST eigenvalue of the
+    points' own covariance matrix about their centroid: that eigenvalue is
+    the variance of the points along its eigenvector, so minimising it is
+    exactly minimising the spread the plane has to explain away, which is
+    the least-squares fit by definition.
+
+    None on fewer than three points, or on a genuinely degenerate spread
+    (every point coincident or collinear, so no direction is uniquely the
+    least-varying one): there is no plane to report, and the caller ships
+    no seat_plane for that piece rather than a meaningless one.
+    """
+
+    n = len(points)
+    if n < 3:
+        return None
+    cx = sum(p[0] for p in points) / n
+    cy = sum(p[1] for p in points) / n
+    cz = sum(p[2] for p in points) / n
+
+    xx = xy = xz = yy = yz = zz = 0.0
+    for p in points:
+        dx, dy, dz = p[0] - cx, p[1] - cy, p[2] - cz
+        xx += dx * dx
+        xy += dx * dy
+        xz += dx * dz
+        yy += dy * dy
+        yz += dy * dz
+        zz += dz * dz
+
+    _, normal = _smallest_symmetric_eigenpair(xx, xy, xz, yy, yz, zz)
+    if normal is None:
+        return None
+    if sum(normal[i] * reference_normal[i] for i in range(3)) < 0.0:
+        normal = (-normal[0], -normal[1], -normal[2])
+    return [cx, cy, cz], list(normal)
+
+
 def segment_pieces(
     tess: Dict,
     surface: cutting.Surface,
@@ -423,6 +580,16 @@ def segment_pieces(
     welded = len(tess["points"])
     per_facet = 2 ** rounds
 
+    # K2: a cut is either segmented into individually cast, jointed pieces
+    # (bonded-courses today) or built as continuous monolithic-bands
+    # (sprayed concrete); the two are structurally different cuts
+    # (generators.py), never mixed within one tessellation, so this is
+    # decided once for the whole cut rather than cell by cell. An
+    # authored/imported cut with no pattern of its own name is treated as
+    # jointed by default: an unnamed cut is not known to be seamless.
+    jointed = tess.get("pattern") != "monolithic-bands"
+    seat_gaps: List[float] = []
+
     # Computed once, globally, ahead of the per-cell loop below: one value
     # per corner rather than folded cell by cell into a single running
     # maximum, so the distribution across every corner survives to the
@@ -431,6 +598,7 @@ def segment_pieces(
     residuals_by_corner = corner_residuals(tess, surface, planes, owners)
 
     clamp_reach: List[float] = []
+    projected_reach: List[float] = []
     missing_planes = 0
     facet_counts: List[int] = []
     boundary_counts: List[int] = []
@@ -444,6 +612,9 @@ def segment_pieces(
         lifted = {index: _lift(surface, points[index]) for index in used}
         clamp_reach.extend(
             lifted[index]["clamp_m"] for index in used if lifted[index]["clamped"]
+        )
+        projected_reach.extend(
+            lifted[index]["projected_m"] for index in used if lifted[index]["projected"]
         )
 
         mid = {index: list(lifted[index]["point"]) for index in used}
@@ -496,6 +667,35 @@ def segment_pieces(
         facet_counts.append(facets_here)
         boundary_counts.append(boundary_here)
         piece_courses.append(cell["course"])
+
+        # K2: the seat plane is fit through the piece's own OUTLINE points
+        # only (the rim, on every one of its chains -- boundary plus any
+        # holes), not the fully interior subdivision points, because the
+        # outline is the piece's actual resting footprint; the seat_gap
+        # that plane is measured against, below, covers every cap point
+        # instead, since an interior point (unconstrained by any facet
+        # joint) is exactly where a doubly curved surface can bulge
+        # furthest from a plane fit only through its rim.
+        seat_plane = None
+        seat_gap = None
+        if jointed:
+            outline_indices = sorted({index for chain in chains for index in chain})
+            fit = fit_seat_plane(
+                [mid[index] for index in outline_indices],
+                _reference_normal(normals[index] for index in used),
+            )
+            if fit is not None:
+                origin, normal = fit
+                seat_gap = max(
+                    abs(sum(
+                        (mid[index][axis] - origin[axis]) * normal[axis]
+                        for axis in range(3)
+                    ))
+                    for index in used
+                )
+                seat_plane = {"origin": origin, "normal": normal}
+                seat_gaps.append(seat_gap)
+
         out.append({
             "key": cell["key"],
             "course": cell["course"],
@@ -504,6 +704,12 @@ def segment_pieces(
             "sources": [lifted[index]["weights"] for index in used],
             "faces": faces,
             "is_support": is_support,
+            # Sprayed (monolithic-bands) pieces, and any jointed piece the
+            # fit above could not find a plane for, ship neither key: the
+            # client keys buildPieceMeshes's prism-vs-curved-shell choice
+            # on whether seat_plane is present, so an absent key is a real
+            # signal, not a null placeholder.
+            **({"seat_plane": seat_plane, "seat_gap": seat_gap} if seat_plane is not None else {}),
         })
 
     residual = max(residuals_by_corner.values()) if residuals_by_corner else 0.0
@@ -544,14 +750,46 @@ def segment_pieces(
         # mesh and were pulled back onto it (see cutting.Surface.lift).
         # clamped_max_m and clamped_median_m say by how far, in metres,
         # over exactly that population: a count with no magnitude cannot be
-        # read, because the same 137 points are either rounding noise or
-        # ten times the 5 mm chord target depending on a number the report
-        # did not carry. On the real Trial 2 export at 0.9 m they come out
-        # at 0.0523 and 0.0246, so it is the second of those.
+        # read, because the same points are either rounding noise or many
+        # times the chord target depending on a number the report did not
+        # carry before this was measured.
+        #
+        # K3 (cutting truth, 2026-08-17): before this task these three
+        # fields counted every off-mesh cap point (137 on the real Trial 2
+        # export at 0.9 m, up to 52.3 mm out), because the only fallback
+        # was the nearest-face clamp. That clamp is now the LAST resort
+        # (no boundary polyline attached, or the projection below still
+        # missed the mesh), so these should read zero or near it on any
+        # cut whose surface carries a boundary; a residual handful is
+        # disclosed here, not hidden, same as before. See projected_*
+        # immediately below for where the population that used to land
+        # here now goes.
         "clamped_points": len(clamp_reach),
         "clamped_max_m": max(clamp_reach) if clamp_reach else 0.0,
         "clamped_median_m": _median(clamp_reach),
+        # K3: the cap points that landed off the render mesh and were
+        # projected to the nearest point of the analysis mesh's own
+        # boundary polyline instead of clamped -- the mechanism that
+        # replaces the old clamp for a real cut (cutting.Surface.lift).
+        # projected_max_m and projected_median_m are the same shape as
+        # clamped_max_m/clamped_median_m, over this population instead: a
+        # projected point sits on the true rim, so this is a much smaller
+        # number than the clamp it replaces, not merely a renamed count.
+        "projected_points": len(projected_reach),
+        "projected_max_m": max(projected_reach) if projected_reach else 0.0,
+        "projected_median_m": _median(projected_reach),
         "missing_planes": missing_planes,
+        # K2: the distribution of seat_gap over every jointed piece --
+        # count 0 for a cut with no jointed pieces at all (a sprayed,
+        # monolithic-bands cut stays curved and moulded, with no flat
+        # seat to gap against), matching clamped_* above's shape for the
+        # outline clamp: a bare count cannot be read, the median says what
+        # a typical piece's flat cut costs it, and the max says the worst.
+        "seat_gap_stats": {
+            "count": len(seat_gaps),
+            "median": _median(seat_gaps),
+            "max": max(seat_gaps) if seat_gaps else 0.0,
+        },
     }
     return out, report
 

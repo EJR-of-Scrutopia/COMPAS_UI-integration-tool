@@ -1506,12 +1506,14 @@ function arrowField(entries, colour, anchor) {
     const dir = v.lengthSq() ? v.clone().normalize() : new THREE.Vector3(0, 0, -1);
     const start = new THREE.Vector3(...at);
     const tipAnchored = anchor === "tip";
-    // The analysis node sits on the mid-surface, half a thickness inside
-    // the drawn shell, so a head composed at the node is buried in opaque
-    // geometry. The tip-anchored arrow stands off by that half thickness
-    // and the cone's own half height, so its point touches the outer
-    // surface at the point of application.
-    const lift = tipAnchored ? state.bundle.provenance.thickness / 2 : 0;
+    // K1: the analysis node sits ON the intrados now (mid, offset 0 in
+    // buildPieceMeshes), and the extrados is a full thickness further out
+    // along the normal, so a head composed at the node is buried in
+    // opaque geometry all the way up. The tip-anchored arrow stands off
+    // by that full thickness (was half, under the old mid-surface
+    // convention) and the cone's own half height, so its point touches
+    // the outer (extrados) surface at the point of application.
+    const lift = tipAnchored ? state.bundle.provenance.thickness : 0;
     const surface = start.clone().addScaledVector(dir, -lift);
     const from = tipAnchored ? surface.clone().addScaledVector(dir, -length) : start;
     const to = tipAnchored ? surface : start.clone().addScaledVector(dir, length);
@@ -1863,14 +1865,51 @@ function renderDataPanel(v) {
       content.appendChild(residualCounts);
     }
 
-    // With denominators and, for the clamp, with the magnitude. The same
-    // 137 clamped points are either rounding noise or ten times the 5 mm
-    // chord target depending on how far they moved, which is why the
-    // report carries clamped_max_m and clamped_median_m at all.
+    // K2 (cutting truth, 2026-08-17): a jointed piece is cut flat -- its
+    // belly and top are both planes, not the true curved surface -- so
+    // every jointed piece leaves a gap between its seat plane and the
+    // surface it actually rests on: the packing or mortar bed a flat cut
+    // on a curved form always implies. Guarded the same way the residual
+    // distribution above is: a bundle cached before this landed has no
+    // seat_gap_stats to read a count off.
+    const seatStats = tess.seat_gap_stats;
+    if (!seatStats) {
+      const seatMissing = document.createElement("p");
+      seatMissing.textContent = "seat gaps: not measured in this cached "
+        + "bundle. Delete the cached bundle, or change any control, to re-cut.";
+      content.appendChild(seatMissing);
+    } else if (seatStats.count === 0) {
+      const seatNone = document.createElement("p");
+      seatNone.textContent = "seat gaps: no jointed pieces in this cut -- "
+        + "sprayed concrete stays a curved, moulded shell with no flat "
+        + "seat to gap at all.";
+      content.appendChild(seatNone);
+    } else {
+      const seatLine = document.createElement("p");
+      seatLine.textContent = "seat gaps (flat cut on curved form): median "
+        + (seatStats.median * 1000).toFixed(1) + " mm, max "
+        + (seatStats.max * 1000).toFixed(1) + " mm, over " + seatStats.count
+        + " jointed piece(s). A flat belly on a curved form always leaves "
+        + "a wedge; this is that wedge, not hidden by the drawing.";
+      content.appendChild(seatLine);
+    }
+
+    // With denominators and, for the clamp, with the magnitude. A clamped
+    // point is either rounding noise or many times the chord target
+    // depending on how far it moved, which is why the report carries
+    // clamped_max_m and clamped_median_m at all.
+    //
+    // K3 (cutting truth, 2026-08-17): the nearest-face clamp below is the
+    // LAST resort now, reached only if a cap point lands off the render
+    // mesh AND the boundary projection just below still somehow misses
+    // it. Before K3 it was the only fallback there was, and on the real
+    // Trial 2 export at 0.9 m it clamped 137 rim points up to 52.3 mm
+    // inward, the crescent notches this fix ends.
     const capPoints = capPointCount();
     const clampedLine = document.createElement("p");
     let clampedText = tess.clamped_points + " of " + capPoints
-      + " cap point(s) clamped to the nearest render mesh face";
+      + " cap point(s) clamped to the nearest render mesh face (the last "
+      + "resort now: see projected cap points below)";
     if (typeof tess.clamped_max_m === "number"
         && typeof tess.clamped_median_m === "number") {
       clampedText += ", reaching " + (tess.clamped_max_m * 1000).toFixed(1)
@@ -1883,6 +1922,31 @@ function renderDataPanel(v) {
       + " boundary facet(s) with no joint plane to project onto";
     clampedLine.textContent = clampedText;
     content.appendChild(clampedLine);
+
+    // K3: a cap point that lands off the render mesh is now projected to
+    // the nearest point of the real rim (the analysis mesh's own boundary
+    // polyline in plan) first, rather than clamped into whichever render
+    // face happens to be nearest by centroid. Guarded the same way the
+    // clamp figures above are: a bundle cached before K3 has no
+    // projected_points to read a count off.
+    const projectedLine = document.createElement("p");
+    if (typeof tess.projected_points !== "number") {
+      projectedLine.textContent = "projected cap points: not measured in "
+        + "this cached bundle. Delete the cached bundle, or change any "
+        + "control, to re-cut.";
+    } else {
+      let projectedText = tess.projected_points + " of " + capPoints
+        + " cap point(s) projected to the nearest point of the real rim "
+        + "instead of clamped";
+      if (typeof tess.projected_max_m === "number"
+          && typeof tess.projected_median_m === "number") {
+        projectedText += ", reaching " + (tess.projected_max_m * 1000).toFixed(1)
+          + " mm at the worst and " + (tess.projected_median_m * 1000).toFixed(1)
+          + " mm at the median";
+      }
+      projectedLine.textContent = projectedText;
+    }
+    content.appendChild(projectedLine);
 
     const coverage = tess.report;
     const analysisFaces = state.bundle.analysis_mesh.faces.length;
@@ -2916,18 +2980,78 @@ function buildPieceMeshes() {
   const built = [];
   for (const piece of state.bundle.pieces) {
     const count = piece.mid.length;
-    const half = state.bundle.provenance.thickness * taperAt(piece.course) / 2;
+    // K1 (cutting truth, 2026-08-17): mid/normals ship the surface the
+    // formwork touches -- provenance.surface === "intrados". Loop order
+    // matches pieces.py's doubled index topology either way below: the
+    // first `count` points are the "top"/extrados cap (faces index
+    // 0..count-1, unreversed winding), the second `count` are the
+    // "bottom"/intrados cap (index count..2*count-1, reversed winding)
+    // -- see the piece.faces comment in pieces.py. Taper still means
+    // "thins toward the crown", scaling the whole thickness, not half.
+    const full = state.bundle.provenance.thickness * taperAt(piece.course);
     const points = [];
-    for (const sign of [1, -1]) {
+    const seatPlane = piece.seat_plane;
+    // Hoisted out of the branch below: the shrink loop further down needs
+    // the plane normal too (I1 fix), not only the belly/top construction.
+    let nx = 0, ny = 0, nz = 0;
+    if (seatPlane) {
+      // K2 (cutting truth, 2026-08-17): a jointed piece with a fitted
+      // seat plane is a true prismatic block, not a curved shell. The
+      // belly is every mid point projected onto the piece's OWN plane
+      // (origin + unit normal, both shipped by pieces.py's least-squares
+      // fit); the top is the same projected points offset by the full
+      // taper-scaled thickness along the PLANE's normal, not each
+      // point's own surface normal, so the two caps stay exactly
+      // parallel and the sides rule dead straight between them.
+      const [ox, oy, oz] = seatPlane.origin;
+      [nx, ny, nz] = seatPlane.normal;
+      const belly = [];
       for (let i = 0; i < count; i++) {
-        const m = piece.mid[i], n = piece.normals[i];
-        points.push([
-          m[0] + n[0] * half * sign,
-          m[1] + n[1] * half * sign,
-          m[2] + n[2] * half * sign,
-        ]);
+        const m = piece.mid[i];
+        const d = (m[0] - ox) * nx + (m[1] - oy) * ny + (m[2] - oz) * nz;
+        belly.push([m[0] - d * nx, m[1] - d * ny, m[2] - d * nz]);
+      }
+      for (const offset of [full, 0]) {
+        for (let i = 0; i < count; i++) {
+          const b = belly[i];
+          points.push([
+            b[0] + nx * offset,
+            b[1] + ny * offset,
+            b[2] + nz * offset,
+          ]);
+        }
+      }
+    } else {
+      // Sprayed concrete, and any jointed piece the server could not fit
+      // a plane for, keep K1's straight extrusion: the bottom cap sits ON
+      // the shipped surface (offset 0) and the top cap is extruded the
+      // full taper-scaled thickness outward along each point's OWN
+      // normal, so the built solid stays as curved as the true surface.
+      for (const offset of [full, 0]) {
+        for (let i = 0; i < count; i++) {
+          const m = piece.mid[i], n = piece.normals[i];
+          points.push([
+            m[0] + n[0] * offset,
+            m[1] + n[1] * offset,
+            m[2] + n[2] * offset,
+          ]);
+        }
       }
     }
+    // F6 fix wave (cutting truth final review, 2026-08-17): the sprayed
+    // growth anchor used to be centre[2] below, the solid's own
+    // mid-thickness centroid -- under K1's intrados-based build that sits
+    // about half a thickness above the formwork, so a casting grown from
+    // it materialised mid-air and only touched the formwork once fully
+    // thickened. The intrados cap is the second `count` points pushed
+    // above (offset 0, per the loop-order comment at the top of this
+    // function) and is what actually rests on the formwork, so its own
+    // average z is where growth must start from to begin as a sheet ON
+    // the formwork and thicken upward, per the sprayed branch's own
+    // comment in applySceneAtTime.
+    let intradosZ = 0;
+    for (let i = count; i < 2 * count; i++) intradosZ += points[i][2];
+    intradosZ /= count;
     // The joint: shrink the whole casting toward its own centroid, so
     // neighbours stand apart by twice the inset and the cut reads.
     let cx = 0, cy = 0, cz = 0;
@@ -2950,6 +3074,24 @@ function buildPieceMeshes() {
           // offsets from mid and normal.
           if (shrink === 1) {
             positions.push(p[0], p[1], p[2]);
+          } else if (seatPlane) {
+            // I1 fix (2026-08-17, fix round 1 on K2): centre sits at the
+            // extrusion's mid thickness, on neither the belly's nor the
+            // top's own plane, so (p - centre) always carries a constant
+            // nonzero component along the plane normal -- shrinking that
+            // raw vector shrinks the normal component too, lifting the
+            // belly off its own seat plane and thinning the block by
+            // however much the joint gap asked for. Decomposing into the
+            // plane-normal component (left exactly alone) and the
+            // in-plane component (the only part actually scaled) keeps
+            // both caps on their own parallel planes at any shrink factor.
+            const dx = p[0] - centre[0], dy = p[1] - centre[1], dz = p[2] - centre[2];
+            const along = dx * nx + dy * ny + dz * nz;
+            const ax = along * nx, ay = along * ny, az = along * nz;
+            positions.push(
+              centre[0] + (dx - ax) * shrink + ax,
+              centre[1] + (dy - ay) * shrink + ay,
+              centre[2] + (dz - az) * shrink + az);
           } else {
             positions.push(
               centre[0] + (p[0] - centre[0]) * shrink,
@@ -2961,17 +3103,20 @@ function buildPieceMeshes() {
         }
       }
     }
-    built.push({ piece, positions, weights, surface, centre });
+    built.push({ piece, positions, weights, surface, centre, intradosZ });
   }
   // Sprayed concrete is one continuous surface: the joint gap is zero,
-  // the shrink factor is exactly 1 and shared boundary points are
-  // bit-identical across pieces at taper 0, so the crease normals are
-  // computed over the WHOLE shell in one call and sliced back per piece.
-  // Course joints then stop stepping in the light. With the crown taper
-  // above zero, adjacent courses are offset by different half
-  // thicknesses and their shared points honestly stop welding. Jointed
-  // materials keep per-piece normals: their pieces are genuinely
-  // separate and the lighting step at a joint is honest.
+  // the shrink factor is exactly 1, and every intrados (bottom, offset 0)
+  // boundary point is bit-identical across pieces at ANY taper -- offset
+  // 0 does not scale with taper -- so the crease normals are computed
+  // over the WHOLE shell in one call and sliced back per piece. Course
+  // joints then stop stepping in the light. With the crown taper above
+  // zero, only the extrados (top) boundary points at a course-to-course
+  // joint diverge: adjacent courses scale the same full thickness by a
+  // different taperAt(course), so their shared top points honestly stop
+  // welding there. Jointed materials keep per-piece normals: their
+  // pieces are genuinely separate and the lighting step at a joint is
+  // honest.
   let welded = null;
   if (sprayedMaterial()) {
     let total = 0;
@@ -2988,7 +3133,7 @@ function buildPieceMeshes() {
   }
   let offset = 0;
   for (const entry of built) {
-    const { piece, positions, weights, surface, centre } = entry;
+    const { piece, positions, weights, surface, centre, intradosZ } = entry;
     const normals = welded
       ? welded.slice(offset, offset + positions.length)
       : creaseNormals(positions);
@@ -3001,11 +3146,13 @@ function buildPieceMeshes() {
     const mesh = new THREE.Mesh(geometry, pieceMaterial(piece.key));
     mesh.castShadow = mesh.receiveShadow = true;
     mesh.userData.key = piece.key;
-    // The casting's own centroid height. Piece geometry is in absolute
-    // world coordinates and the mesh sits at the origin, so the sprayed
-    // growth needs this to scale a piece about itself rather than about
-    // z = 0 (see applySceneAtTime).
-    mesh.userData.centreZ = centre[2];
+    // The casting's own intrados centroid height (F6 fix wave, cutting
+    // truth final review, 2026-08-17 -- see the intradosZ comment above).
+    // Piece geometry is in absolute world coordinates and the mesh sits
+    // at the origin, so the sprayed growth needs this to scale a piece
+    // about the height it actually rests at rather than about z = 0
+    // (see applySceneAtTime).
+    mesh.userData.centreZ = intradosZ;
     mesh.userData.weights = weights;
     mesh.userData.surface = surface;
     mesh.userData.basePositions = new Float32Array(positions);
@@ -3124,6 +3271,22 @@ function applyInflation(u) {
   }
 }
 
+// F1 fix wave (cutting truth final review, 2026-08-17): both net-clearance
+// call sites below (applySceneAtTime's Timeline branch and applyShowMode's
+// Both branch) need the same worst-case seat gap, so it is read once here
+// rather than typed twice where a future edit could let the two drift.
+// K2's flat-cut jointed pieces can rise above their own belly plane at a
+// flat spot between corners -- the true curved surface bulges up past the
+// piece's cut plane -- and a radius-only drop under-cleared exactly that
+// rise: 28.2% of wire locations buried under Trial 2's flattest pieces, up
+// to 98.9 mm. A missing or non-positive max (sprayed concrete, no jointed
+// pieces, or a bundle cached before K2 landed) contributes nothing.
+function seatGapClearanceMax() {
+  const stats = state.bundle && state.bundle.tessellation && state.bundle.tessellation.seat_gap_stats;
+  const max = stats && stats.max;
+  return typeof max === "number" && max > 0 ? max : 0;
+}
+
 // Everything that depends on the build/strike clock but not on the camera:
 // inflation, segment drop/visibility, falsework, wires/nodes strike state,
 // and the integrity pulse. setLayer's wires/falsework toggle and
@@ -3182,7 +3345,12 @@ function applySceneAtTime(t) {
       // true height, which is a piece arriving from elsewhere, not
       // concrete being built up. Compensating the position by
       // centreZ * (1 - grown) pins the centroid in place while the
-      // thickness comes on.
+      // thickness comes on. F6 fix wave (cutting truth final review,
+      // 2026-08-17): centreZ is the piece's INTRADOS centroid, not its
+      // mid-thickness solid centroid (see the intradosZ comment in
+      // buildPieceMeshes) -- growth now begins as a sheet ON the
+      // formwork and thickens upward, rather than materialising mid-air
+      // about half a thickness above it.
       const grown = 0.001 + 0.999 * easeOutCubic(u);
       segment.scale.set(1, 1, grown);
       segment.position.z = segment.userData.centreZ * (1 - grown);
@@ -3204,18 +3372,17 @@ function applySceneAtTime(t) {
   const mode = state.formworkMode;
   falsework.visible = mode === "always" || (mode === "animation" && strikeU < 1);
   falsework.material.opacity = mode === "always" ? 0.3 : 0.3 * inflate * (1 - strikeU);
-  // R3: the ghost is built from the analysis mid-surface mesh
-  // (buildPieceMeshes offsets the real, opaque pieces from that same
-  // surface by half the shell thickness). The old -0.02 constant sat
-  // comfortably inside the opaque shell's own thickness and was never
-  // visible from outside it. Half the thickness clears the intrados
-  // exactly; 5 cm of air on top of that keeps it legible as a ghost
-  // rather than flush against the shell.
-  // The BUNDLE's own thickness, same reason arrowField's lift does at
-  // studio.js:1396: state.thickness is the control's live value and can
-  // drift from what the shell on screen was actually built at.
+  // R3: the ghost is built from the analysis surface mesh. K1 (cutting
+  // truth, 2026-08-17): buildPieceMeshes now extrudes the opaque pieces
+  // UPWARD from that same surface by the full shell thickness -- the
+  // surface IS the intrados, so no half-thickness offset is needed to
+  // clear it any more; 5 cm of air on top of the (now exact) surface
+  // keeps the ghost legible as a ghost rather than flush against the
+  // shell. The -0.02 constant in the animation branch below is unchanged:
+  // it was always a bare clearance constant standing a small gap below
+  // the surface, never a thickness-derived offset, so K1 leaves it be.
   falsework.position.z = mode === "always"
-    ? -(state.bundle.provenance.thickness / 2) - 0.05
+    ? -0.05
     : -0.02 - 1.5 * strikeU;
   // The strike takes the thrust network with it: wires and nodes fade,
   // drop and vanish on the same clock, and scrubbing back restores them
@@ -3240,9 +3407,33 @@ function applySceneAtTime(t) {
   // Node size slider alone could push the white dots back through the
   // shell at any clearance computed from wireRadius. Each object clears by
   // its own radius.
+  // K1 (cutting truth, 2026-08-17): the net (buildWiresAndNodes) is drawn
+  // straight off the raw analysis vertices, the same points piece.mid
+  // ships, so it now sits exactly at the shell's own bottom (intrados)
+  // face rather than at an independent mid-surface a half thickness below
+  // it. No thickness term is needed to clear the belly any more, and the
+  // sign flips from the old formula's: the clearance now pushes DOWN, away
+  // from the shell into the open air below it (the shell only ever
+  // extends UP from the intrados, so a positive push would bury the net
+  // inside the opaque solid instead of clearing it -- caught by the probe,
+  // which showed no net at all under a Both-mode shell until this negative
+  // sign landed). A radius-only drop keeps each object's own surface just
+  // clear of the coincident intrados point, read clean at the crown of
+  // Trial 2. The full thickness would drape the net over the EXTRADOS
+  // instead, putting it above the blocks, the opposite of what this wave
+  // asks the probe to show.
+  // F1 fix wave (cutting truth final review, 2026-08-17): a radius-only
+  // drop still buried the net under K2's flat-cut jointed pieces, whose
+  // true surface can rise as far as seat_gap_stats.max above the flat
+  // belly plane between corners; seatGapClearanceMax() folds that
+  // worst case in. Steep-slope caveat: a world-Z drop like this one is
+  // only worth radius*|n_z| along the local normal, not the full radius,
+  // on a steeply sloped stretch -- the seat-gap term added here covers
+  // the flat-belly rise, not that slope case.
+  const seatGapMax = seatGapClearanceMax();
   const clearance = {
-    wires: state.bundle.provenance.thickness / 2 + state.wireRadius,
-    nodes: state.bundle.provenance.thickness / 2 + state.nodeRadius,
+    wires: -(state.wireRadius + seatGapMax),
+    nodes: -(state.nodeRadius + seatGapMax),
   };
   for (const key of ["wires", "nodes"]) {
     const object = state.objects[key];
@@ -3302,37 +3493,45 @@ function applyShowMode() {
   // studio_probe.mjs against the real "Algebraic TNA method" export in Both
   // mode, camera close on the ridge: buildWiresAndNodes draws the net
   // straight off bundle.analysis_mesh with no display offset (z = 0, right
-  // above), i.e. the raw structural mid-surface; buildPieceMeshes offsets
-  // the opaque shell off that same mid-surface family by half the built
-  // thickness a side. Nothing keeps those two independently-built surfaces
-  // a guaranteed distance apart, and at the crown -- the shallowest, most
-  // tightly curved part of this vault -- they come close enough that the
-  // net's own wire/node radius is enough to break through the shell's
+  // above); under the mid-surface convention this wave replaced,
+  // buildPieceMeshes offset the opaque shell off that same family by half
+  // the built thickness a side, and nothing kept the two independently
+  // built surfaces a guaranteed distance apart, so at the crown -- the
+  // shallowest, most tightly curved part of this vault -- they came close
+  // enough that the net's own wire/node radius broke through the shell's
   // extrados: Param's black line with regularly spaced white dots along
   // the ridge, confirmed in
   // .superpowers/sdd/2026-08-16-studio-finish/crown-seam-both-before.png
-  // and the tight crown-seam-both-closeup-before.png beside it, which shows
-  // one wire segment and one node sphere both breaking the surface.
-  // Pushing the net along +Z by half the built thickness plus its own
-  // radius is a display-only fix, not a re-derivation of the true offset
-  // surface: it approximates "outward along the local normal" and is only
-  // guaranteed to clear the shell where that normal is close to vertical,
-  // which is exactly the shallow crown region where the seam shows; it
-  // would under- or over-clear a steeply sloped stretch nearer the
-  // springing, where the net was already comfortably inside the shell.
-  // Framework mode has no shell to clash with, so it keeps rendering the
-  // net at its true mid-surface position, z = 0, for the form-finding
-  // diagram. Fix round 1: wires and nodes are separate InstancedMeshes at
-  // separate, independently user-adjustable radii (state.wireRadius,
+  // and the tight crown-seam-both-closeup-before.png beside it.
+  // K1 (cutting truth, 2026-08-17): the net's raw position now coincides
+  // with the shell's own bottom (intrados) face -- both come from the same
+  // lifted surface point -- so clearing the crown seam no longer needs a
+  // thickness-derived push at all. The sign flips from the pre-K1 formula
+  // too: the shell only ever extends UP from the intrados now, so the
+  // clearance has to push the net DOWN, into the open air below the
+  // shell, or it buries the net inside the opaque solid instead of
+  // clearing it (the probe caught exactly that: no net visible at all
+  // under a Both-mode shell before this negative sign landed). A
+  // radius-only drop keeps each object's own surface just clear of that
+  // coincident point, read clean at the crown of Trial 2. Framework mode
+  // has no shell to clash with, so it keeps rendering the net at its true
+  // surface position, z = 0, for the form-finding diagram. Fix round 1
+  // (pre-K1): wires and nodes are separate InstancedMeshes at separate,
+  // independently user-adjustable radii (state.wireRadius,
   // state.nodeRadius), so each clears the shell by its OWN radius -- a
   // shared clearance under-cleared whichever one was bigger, and growing
   // the Node size slider alone could push the white dots back through.
-  const wireClearance = state.showMode === "both"
-    ? state.bundle.provenance.thickness / 2 + state.wireRadius
-    : 0;
-  const nodeClearance = state.showMode === "both"
-    ? state.bundle.provenance.thickness / 2 + state.nodeRadius
-    : 0;
+  // F1 fix wave (cutting truth final review, 2026-08-17): a radius-only
+  // drop still buried the net under K2's flat-cut jointed pieces, whose
+  // true surface can rise as far as seat_gap_stats.max above the flat
+  // belly plane between corners; seatGapClearanceMax() folds that
+  // worst case in. Steep-slope caveat: a world-Z drop like this one is
+  // only worth radius*|n_z| along the local normal, not the full radius,
+  // on a steeply sloped stretch -- the seat-gap term added here covers
+  // the flat-belly rise, not that slope case.
+  const seatGapMax = seatGapClearanceMax();
+  const wireClearance = state.showMode === "both" ? -(state.wireRadius + seatGapMax) : 0;
+  const nodeClearance = state.showMode === "both" ? -(state.nodeRadius + seatGapMax) : 0;
   state.objects.wires.position.z = wireClearance;
   state.objects.nodes.position.z = nodeClearance;
   const falsework = state.objects.falsework;
@@ -3342,11 +3541,10 @@ function applyShowMode() {
     if (wanted) {
       falsework.material.opacity = 0.3;
       // Same offset as the always branch in applySceneAtTime above, so
-      // the two never disagree about where the ghost sits at rest. The
-      // BUNDLE's own thickness, same reason arrowField's lift does at
-      // studio.js:1396: state.thickness is the control's live value and
-      // can drift from what the shell on screen was actually built at.
-      falsework.position.z = -(state.bundle.provenance.thickness / 2) - 0.05;
+      // the two never disagree about where the ghost sits at rest. K1:
+      // the surface IS the intrados now, so no half-thickness offset is
+      // needed to clear it; 5 cm of air keeps the ghost legible.
+      falsework.position.z = -0.05;
     }
   }
 }

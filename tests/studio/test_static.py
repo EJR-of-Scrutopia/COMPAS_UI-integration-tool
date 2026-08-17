@@ -705,6 +705,133 @@ def test_pieces_are_built_at_the_bundles_thickness():
     assert "basePositions" in body
 
 
+def test_pieces_extrude_upward_from_the_intrados():
+    """K1 (cutting truth, 2026-08-17): the durable pin on the actual
+    client-side invariant. pieces.py ships no thickness and builds no
+    solid (see test_pieces.py's saddle test for the server-side contract
+    that extrusion depends on); this is what pins the extrusion itself --
+    the bottom cap at offset 0 on the shipped surface, the top cap the
+    full taper-scaled thickness outward -- against a reintroduction of
+    the old symmetric mid-surface split.
+
+    K2 (cutting truth, 2026-08-17) added a second, prismatic path
+    alongside this one rather than replacing it: a jointed piece with a
+    seat_plane takes the flat-belly prism branch (pinned separately in
+    test_jointed_pieces_take_the_prismatic_path below), and this curved
+    extrusion stays exactly as it was for sprayed pieces and any piece the
+    server could not fit a plane for. Both branches literally contain the
+    `for (const offset of [full, 0])` loop text below, which is why this
+    test now counts it rather than merely asserting it is present once.
+    """
+
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    body = _function_body(js, "buildPieceMeshes")
+    assert "const full = state.bundle.provenance.thickness * taperAt(piece.course);" in body
+    assert body.count("for (const offset of [full, 0]) {") == 2, (
+        "one occurrence per branch: the K2 prism path and the K1 curved "
+        "fallback each extrude from full down to 0"
+    )
+    assert "for (const sign of [1, -1])" not in body, (
+        "the symmetric mid-surface split must not come back"
+    )
+    assert "piece.seat_plane" in body, (
+        "buildPieceMeshes must branch on whether the server shipped a "
+        "seat plane for this piece"
+    )
+    # The offset sweep this task's contract named: falsework sits directly
+    # on the surface (always mode), and the load-arrow tip lifts the full
+    # thickness to reach the extrados from a node that is now ON the
+    # intrados.
+    scene_body = _function_body(js, "applySceneAtTime")
+    assert "? -0.05" in scene_body, (
+        "the always-mode falsework ghost must sit directly on the "
+        "intrados, not offset by half the thickness"
+    )
+    arrow_body = _function_body(js, "arrowField")
+    assert "const lift = tipAnchored ? state.bundle.provenance.thickness : 0;" in arrow_body
+
+
+def test_jointed_pieces_take_the_prismatic_path():
+    """K2 (cutting truth, 2026-08-17): a jointed piece with a fitted seat
+    plane must build a true prism -- belly and top both flat, parallel
+    planes -- not K1's curved offset along each point's own normal. Pins
+    the actual projection and offset formulas against the real source,
+    the way test_pieces_extrude_upward_from_the_intrados pins K1's.
+    """
+
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    body = _function_body(js, "buildPieceMeshes")
+    prism_start = body.index("if (seatPlane) {")
+    prism_end = body.index("} else {", prism_start)
+    prism_body = body[prism_start:prism_end]
+    assert "const [ox, oy, oz] = seatPlane.origin;" in prism_body
+    # nx/ny/nz are hoisted above this branch (fix round 1, I1): the shrink
+    # loop further down needs the plane normal too, so this is a plain
+    # reassignment of an outer `let`, not its own `const` declaration.
+    assert "[nx, ny, nz] = seatPlane.normal;" in prism_body
+    # The belly: every mid point projected onto the plane by subtracting
+    # its own signed distance along the plane normal.
+    assert "const d = (m[0] - ox) * nx + (m[1] - oy) * ny + (m[2] - oz) * nz;" in prism_body
+    assert "belly.push([m[0] - d * nx, m[1] - d * ny, m[2] - d * nz]);" in prism_body
+    # The top: the belly offset along the PLANE's normal, not piece.normals
+    # -- the whole point is that both caps stay exactly parallel.
+    assert "b[0] + nx * offset" in prism_body
+    assert "b[1] + ny * offset" in prism_body
+    assert "b[2] + nz * offset" in prism_body
+    assert "piece.normals" not in prism_body, (
+        "the prism branch must build both caps from the seat plane's own "
+        "normal, not the per-point surface normal K1's branch uses"
+    )
+    fallback_body = body[prism_end:]
+    assert "m[0] + n[0] * offset" in fallback_body, (
+        "the else branch must keep K1's curved extrusion verbatim"
+    )
+
+
+def test_prism_shrink_moves_in_plane_only():
+    """I1, fix round 1 on K2 (2026-08-17): the joint-gap shrink toward the
+    piece's own centroid scales (point - centre) in raw XYZ. For a prism,
+    centre sits at the extrusion's mid thickness -- on neither the belly's
+    nor the top's own plane -- so (point - centre) always carries a
+    constant nonzero component along the plane normal, and a uniform
+    scale shrinks that component too: at the default 20 mm gap the belly
+    lifted 1.03 mm off its own seat plane and the block thinned from a
+    nominal 200 mm. The fix decomposes the offset into its plane-normal
+    component (left exactly alone) and its in-plane component (the only
+    part actually scaled) for a piece with a seat plane; the curved
+    (sprayed / no-plane) path keeps the old uniform scale unchanged, since
+    it never had a flat cap to drift off of.
+    """
+
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    body = _function_body(js, "buildPieceMeshes")
+    shrink_start = body.index("if (shrink === 1) {")
+    prism_shrink_start = body.index("} else if (seatPlane) {", shrink_start)
+    curved_shrink_start = body.index("} else {", prism_shrink_start)
+    prism_shrink = body[prism_shrink_start:curved_shrink_start]
+    curved_shrink = body[curved_shrink_start:]
+
+    # The decomposition itself, pinned against the real source.
+    assert "const dx = p[0] - centre[0], dy = p[1] - centre[1], dz = p[2] - centre[2];" in prism_shrink
+    assert "const along = dx * nx + dy * ny + dz * nz;" in prism_shrink
+    assert "const ax = along * nx, ay = along * ny, az = along * nz;" in prism_shrink
+    assert "centre[0] + (dx - ax) * shrink + ax," in prism_shrink
+    assert "centre[1] + (dy - ay) * shrink + ay," in prism_shrink
+    assert "centre[2] + (dz - az) * shrink + az);" in prism_shrink
+
+    # The curved/no-plane branch must keep the old uniform scale verbatim:
+    # it never gets a plane-normal component to protect in the first
+    # place, so decomposing it would be a no-op at best and a needless
+    # divergence from K1's pinned formula at worst.
+    assert "centre[0] + (p[0] - centre[0]) * shrink," in curved_shrink
+    assert "centre[1] + (p[1] - centre[1]) * shrink," in curved_shrink
+    assert "centre[2] + (p[2] - centre[2]) * shrink);" in curved_shrink
+    assert "along" not in curved_shrink, (
+        "the curved/no-plane shrink branch must not decompose by a plane "
+        "normal it does not have"
+    )
+
+
 def test_rebuilding_the_shell_frees_what_it_replaces():
     # The shell is rebuilt on every joint gap and taper commit, and
     # recoloured on every layer toggle, so both paths have to free what they
@@ -976,6 +1103,16 @@ def test_the_data_panel_has_a_cut_section_with_every_measured_disclosure():
         # points are rounding noise or ten times the chord target
         # depending on how far they actually moved.
         "tess.clamped_max_m", "tess.clamped_median_m",
+        # K2 (cutting truth, 2026-08-17): a jointed piece's flat seat
+        # leaves a gap against the true curved surface; a bare count of
+        # jointed pieces says nothing about how big that gap gets.
+        "tess.seat_gap_stats",
+        # K3 (cutting truth, 2026-08-17): the population that used to be
+        # counted only as clamped_points is now mostly projected_points
+        # instead (the nearest-face clamp is the last resort, not the
+        # primary fallback), so the panel has to read this new field or
+        # the rim fix has no disclosure of its own at all.
+        "tess.projected_points",
     ):
         assert field in body, "the Cut section must read {}".format(field)
     # The counts need denominators. "137 cap points clamped" and "137 of
@@ -1025,6 +1162,16 @@ def test_the_data_panel_has_a_cut_section_with_every_measured_disclosure():
         "the panel must say the residual's worst corners cluster in the "
         "rim course, not just list numbers"
     )
+    # K2: the seat-gap disclosure, beside the corner residual it shares a
+    # category with -- both are "how far does this cut's own honesty run".
+    assert "seatStats.median" in body and "seatStats.max" in body, (
+        "the Cut section must read the seat-gap distribution's median and "
+        "max, not only a bare count of jointed pieces"
+    )
+    assert "flat cut on curved form" in body, (
+        "the panel must say plainly that a jointed piece's belly is a "
+        "flat cut, not the true curved surface"
+    )
     # An imported cut has to quote its own provenance verbatim and the
     # measured z offset, not the generated cut's target size.
     assert "tess.provenance" in body
@@ -1072,6 +1219,18 @@ def test_the_data_panel_survives_a_bundle_cached_before_a_field_existed():
             "{} must be guarded the same way: an older cache has neither "
             "the field nor a reason to crash the panel".format(guarded)
         )
+    # K2: seat_gap_stats landed after this fix wave, so it needs the exact
+    # same guard, not just a hopeful read of tess.seat_gap_stats.median.
+    assert "if (!seatStats)" in body, (
+        "the seat-gap distribution must be guarded the same way: an older "
+        "cache has neither the field nor a reason to crash the panel"
+    )
+    # K3 (cutting truth, 2026-08-17): projected_points landed after this
+    # too, and needs the same guard as the clamp magnitudes it sits beside.
+    assert 'typeof tess.projected_points !== "number"' in body, (
+        "the projected-point count must be guarded the same way: an older "
+        "cache has neither the field nor a reason to crash the panel"
+    )
 
 
 def test_the_hud_and_the_size_control_do_not_call_an_authored_size_a_target():
@@ -1547,11 +1706,26 @@ def test_sprayed_concrete_grows_about_its_own_centroid():
     # the ground stretching vertically through the falsework to their true
     # height. Sprayed concrete thickens where it is sprayed, so the growth
     # is taken about the piece's own centroid.
+    #
+    # F6 fix wave (cutting truth final review, 2026-08-17): that centroid
+    # must be the piece's INTRADOS centroid, not its mid-thickness solid
+    # centroid -- under K1's intrados-based build the solid centroid sits
+    # about half a thickness above the formwork, so growing from it made a
+    # casting materialise mid-air instead of beginning as a sheet ON the
+    # formwork and thickening upward.
     js = (STATIC / "studio.js").read_text(encoding="utf-8")
     build_start = js.index("function buildPieceMeshes(")
     build_body = js[build_start:js.index("\n}", build_start)]
     assert "userData.centreZ" in build_body, (
         "each piece must record its own centroid height at build time"
+    )
+    assert "mesh.userData.centreZ = intradosZ;" in build_body, (
+        "centreZ must be the intrados cap's own average z, not the solid's "
+        "mid-thickness centroid, or a sprayed casting starts mid-air"
+    )
+    assert "intradosZ += points[i][2]" in build_body, (
+        "the intrados centroid must be averaged from the offset-0 cap "
+        "points, the ones that actually rest on the formwork"
     )
     start = js.index("function applySceneAtTime(")
     body = js[start:js.index("\n}", start)]
@@ -1752,15 +1926,17 @@ def test_the_show_select_offers_four_exclusive_modes():
     assert "material.opacity = 1" in body
     # Crown seam (2026-08-16-studio-finish task 4): the flat restore to
     # "position.z = 0" pinned since the repairs wave held for every non
-    # Timeline mode alike, but Both mode's net sits directly on the shell's
-    # mid-surface with no clearance from the extrados, and pokes through it
+    # Timeline mode alike, but Both mode's net sat directly on the shell's
+    # mid-surface with no clearance from the extrados, and poked through it
     # at the crown (test_static.py cannot see the picture; the probe
     # captures crown-seam-both-before.png / -closeup-before.png are the
-    # evidence). Framework still restores the true z = 0; Both now clears
-    # the shell by half its thickness plus each object's OWN radius --
-    # fix round 1 gave wires and nodes separate clearances (see
-    # test_both_mode_and_the_pre_strike_timeline_clear_the_net_of_the_crown_seam),
-    # since a shared wireRadius-only clearance under-cleared the nodes.
+    # evidence). Framework still restores the true z = 0. K1 (cutting
+    # truth, 2026-08-17) changed what Both clears: the net's raw position
+    # now coincides with the shell's own bottom (intrados) face, so a
+    # radius-only lift is enough (see
+    # test_both_mode_and_the_pre_strike_timeline_clear_the_net_of_the_crown_seam)
+    # -- fix round 1's separate wire/node clearances still apply, just
+    # without the thickness term.
     assert 'state.showMode === "both"' in body
     assert "position.z = wireClearance" in body
     assert "position.z = nodeClearance" in body
@@ -1770,11 +1946,11 @@ def test_both_mode_and_the_pre_strike_timeline_clear_the_net_of_the_crown_seam()
     # Task 4 of the 2026-08-16-studio-finish wave. Diagnosis: the net
     # (buildWiresAndNodes) is drawn straight off bundle.analysis_mesh, the
     # raw mid-surface, with no display offset; the shell (buildPieceMeshes)
-    # is offset off that same mid-surface family by half the built
-    # thickness a side. Nothing guarantees those two independently-built
-    # surfaces stay clear of one another, and at the crown -- this vault's
+    # was offset off that same mid-surface family by half the built
+    # thickness a side. Nothing guaranteed those two independently-built
+    # surfaces stayed clear of one another, and at the crown -- this vault's
     # shallowest, most tightly curved region -- the net's own wire/node
-    # radius is enough to break through the shell's extrados: a black line
+    # radius was enough to break through the shell's extrados: a black line
     # with regularly spaced white dots along the ridge. Probed against the
     # real "Algebraic TNA method" export, camera close on the crown, in
     # both Show=both and Show=timeline just before the strike hides the
@@ -1782,12 +1958,7 @@ def test_both_mode_and_the_pre_strike_timeline_clear_the_net_of_the_crown_seam()
     #   .superpowers/sdd/2026-08-16-studio-finish/crown-seam-both-before.png
     #   .superpowers/sdd/2026-08-16-studio-finish/crown-seam-both-closeup-before.png
     #   .superpowers/sdd/2026-08-16-studio-finish/crown-seam-timeline-strike-950-before.png
-    # and their -after equivalents once the fix below landed. The fix is a
-    # display-only nudge along +Z by half the built thickness plus each
-    # object's OWN radius -- an approximation of "outward along the local
-    # normal" that only holds where that normal is close to vertical, which
-    # is exactly the shallow crown where the seam showed (see the comments
-    # beside each assertion's source for the caveat spelled out in full).
+    # and their -after equivalents once the fix below landed.
     #
     # Fix round 1 (review finding, Medium): the first cut shared one
     # clearance (thickness/2 + wireRadius) between wires AND nodes, but
@@ -1796,18 +1967,45 @@ def test_both_mode_and_the_pre_strike_timeline_clear_the_net_of_the_crown_seam()
     # Node size slider) -- a node's nearest point sat at
     # clearance - nodeRadius, under-cleared by the radius difference, and
     # growing Node size alone could push the white dots back through the
-    # shell: the exact reported symptom. Each object now clears by its own
+    # shell: the exact reported symptom. Each object clears by its own
     # radius, both sites.
+    #
+    # K1 (cutting truth, 2026-08-17): the net's raw position now coincides
+    # with the shell's own bottom (intrados) face -- both come from the
+    # same lifted surface point -- so the thickness/2 term is gone from
+    # both call sites, AND the sign flips: the shell only ever extends UP
+    # from the intrados now, so the clearance has to push the net DOWN,
+    # away from the shell, or it is buried inside the opaque solid instead
+    # of cleared (a probed regression: no net was visible at all under a
+    # Both-mode shell before this negative sign landed). A radius-only
+    # drop is enough to keep each object's own surface just clear of that
+    # coincident point, read clean at the crown of Trial 2
+    # (.superpowers/sdd/2026-08-17-cutting-truth/).
+    #
+    # F1 (cutting truth final review, 2026-08-17): a radius-only drop still
+    # under-cleared K2's flat-cut jointed pieces -- the true surface can
+    # rise up to seat_gap_stats.max above the flat belly plane between a
+    # piece's corners, burying 28.2% of wire locations on Trial 2 (up to
+    # 98.9 mm). Both call sites now add seatGapClearanceMax() -- the
+    # measured max when the bundle has one and it is positive, else 0 --
+    # to the radius, in lockstep.
     js = (STATIC / "studio.js").read_text(encoding="utf-8")
     show_body = _function_body(js, "applyShowMode")
-    assert "state.bundle.provenance.thickness / 2 + state.wireRadius" in show_body
-    assert "state.bundle.provenance.thickness / 2 + state.nodeRadius" in show_body
+    assert "state.showMode === \"both\" ? -(state.wireRadius + seatGapMax) : 0" in show_body
+    assert "state.showMode === \"both\" ? -(state.nodeRadius + seatGapMax) : 0" in show_body
     scene_body = _function_body(js, "applySceneAtTime")
-    assert "wires: state.bundle.provenance.thickness / 2 + state.wireRadius," in scene_body
-    assert "nodes: state.bundle.provenance.thickness / 2 + state.nodeRadius," in scene_body
+    assert "wires: -(state.wireRadius + seatGapMax)," in scene_body
+    assert "nodes: -(state.nodeRadius + seatGapMax)," in scene_body
     # The strike's own drop is additive with the clearance, so the net still
     # lands 1.5 m clear of the shell once fully struck (strikeU = 1).
     assert "clearance[key] - 1.5 * strikeU" in scene_body
+    # Both call sites read the same helper (byte-identical expressions),
+    # which reads the exact bundle path the Data panel already reads and
+    # falls back to 0 when there is no positive max to add.
+    assert "seatGapClearanceMax()" in show_body and "seatGapClearanceMax()" in scene_body
+    helper_body = _function_body(js, "seatGapClearanceMax")
+    assert "state.bundle.tessellation.seat_gap_stats" in helper_body
+    assert "typeof max === \"number\" && max > 0 ? max : 0" in helper_body
 
 
 def test_the_formwork_default_is_hidden():

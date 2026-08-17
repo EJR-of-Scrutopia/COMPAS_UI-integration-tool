@@ -121,6 +121,11 @@ def test_bundles_are_cached_per_thickness(tmp_path, monkeypatch):
     )
     assert default["provenance"]["thickness"] == 0.2
     assert thin["provenance"]["thickness"] == 0.1
+    # K1 (cutting truth, 2026-08-17): the surface pieces.py ships is now
+    # the intrados, named explicitly so a viewer can tell the convention a
+    # bundle was built under; every thickness variant carries it.
+    assert default["provenance"]["surface"] == "intrados"
+    assert thin["provenance"]["surface"] == "intrados"
     assert (
         studies / "tiny" / "studio"
         / "bundle-concrete-bonded-courses-s900-t200.json"
@@ -163,6 +168,33 @@ def test_the_bundle_ships_drawn_pieces_on_the_render_mesh(tmp_path, monkeypatch)
                     "the analysis mesh"
                 )
         assert piece["faces"], "a piece needs faces"
+
+
+def test_timber_with_monolithic_bands_ships_no_seat_plane(tmp_path, monkeypatch):
+    """I2, fix round 1 on K2 (2026-08-17): a jointed piece's seat_plane is
+    decided by the CUT's pattern (pieces.segment_pieces has no material
+    argument at all -- material and thickness never reach _cut_for, see
+    bundle.py's own comment on that memoisation), not by whether the
+    requested material is nominally a jointed one. The pattern control is
+    independently overridable from the UI per material
+    (studio.js's patternChosen survives a material change), so a user can
+    really request timber (jointed by default, bonded-courses) with
+    monolithic-bands (the sprayed generator): this is a combination
+    reachable today through the real UI, not a hypothetical one. It must
+    build cleanly and ship no seat_plane on any piece; the client falls
+    back to K1's curved extrusion for a cut that has no real joints to
+    begin with, whatever the material label says.
+    """
+
+    bundle, _, _ = fake_export(tmp_path, monkeypatch)
+    document = bundle.build_bundle("Tiny", "timber", "monolithic-bands", 0.9)
+    assert document["pieces"], "the mismatched pairing must still cut and draw"
+    for piece in document["pieces"]:
+        assert "seat_plane" not in piece, piece["key"]
+        assert "seat_gap" not in piece, piece["key"]
+    assert document["tessellation"]["seat_gap_stats"] == {
+        "count": 0, "median": 0.0, "max": 0.0,
+    }
 
 
 def test_stale_cached_bundles_missing_pieces_are_rebuilt(tmp_path, monkeypatch):
@@ -213,6 +245,19 @@ def test_the_bundle_ships_the_tessellation_and_its_report(tmp_path, monkeypatch)
     # real, less regular export. See test_domain.py for the nonzero case.
     assert document["tessellation"]["backward_turn_degrees"] == 0.0
     assert document["tessellation"]["backward_steps"] == 0
+    # K3 (cutting truth, 2026-08-17): both fields must be present, not
+    # crash for want of a boundary polyline ever mattering on this export.
+    # tiny_contract's rim has no backward step and no notch, so nothing
+    # here needs the old nearest-face clamp at all -- but a handful of
+    # boundary-corner outline points still land a float's width outside
+    # the primary containment test (radius_at's own ray cast is a
+    # different computation from the render mesh's stored vertex
+    # coordinates), and the projection mechanism correctly catches those
+    # too: measured here at 1e-16 m, machine epsilon, nowhere near
+    # cutting.CHORD_TARGET.
+    assert document["tessellation"]["clamped_points"] == 0
+    assert document["tessellation"]["projected_points"] > 0
+    assert document["tessellation"]["projected_max_m"] < 1e-9
 
 
 def test_the_cache_key_carries_size_and_pattern(tmp_path):
@@ -249,6 +294,13 @@ def test_a_bundle_cached_before_a_tessellation_field_existed_is_stale(
         "tessellation.clamped_max_m",
         "tessellation.clamped_median_m",
         "tessellation.report.folded",
+        # K2 (cutting truth, 2026-08-17): the seat-gap distribution, read
+        # by the Data panel beside the corner residual stats.
+        "tessellation.seat_gap_stats",
+        # K3 (cutting truth, 2026-08-17): the count of points the new
+        # boundary projection handled, read by the Data panel beside
+        # clamped_max_m/clamped_median_m above.
+        "tessellation.projected_points",
     ):
         assert path in bundle.REQUIRED_BUNDLE_KEYS, (
             "{} is read by the Data panel and must invalidate a cache that "

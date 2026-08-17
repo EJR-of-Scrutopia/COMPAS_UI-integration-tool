@@ -174,6 +174,77 @@ def test_a_clamp_says_how_far_it_reached_in_metres():
     assert on["clamp_m"] == 0.0
 
 
+def test_a_point_off_the_surface_projects_to_the_boundary_when_one_is_attached():
+    """K3 (cutting truth, 2026-08-17): with no boundary attached (every
+    other lift test in this file), Surface keeps the old nearest-face
+    clamp exactly as before -- see test_a_clamp_says_how_far_it_reached_
+    in_metres, unchanged by this task. Attaching one changes the fallback:
+    the point is projected to the nearest point of the boundary instead.
+
+    On this square, mesh footprint and boundary coincide exactly, so old
+    and new agree numerically (both 0.5 m); what this pins is that the
+    NEW mechanism engaged (projected True, clamped False), not merely
+    that the magnitude happens to match.
+    """
+
+    c = studio()
+    vertices = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]]
+    surface = c.Surface(vertices, [[0, 1, 2, 3]])
+    surface.boundary = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+
+    off = surface.lift(1.5, 0.5)
+    assert off["clamped"] is False
+    assert off["clamp_m"] == 0.0
+    assert off["projected"] is True
+    assert off["projected_m"] == pytest.approx(0.5)
+
+    # A point on the mesh is unaffected: still not clamped, and now also
+    # not counted as projected, the same "zero rather than nothing" rule
+    # clamp_m already followed.
+    on = surface.lift(0.5, 0.5)
+    assert on["clamped"] is False
+    assert on["projected"] is False
+    assert on["projected_m"] == 0.0
+
+
+def test_projection_finds_the_true_nearest_boundary_point_past_a_reentrant_corner():
+    """A concave (reentrant) footprint, the shape a real rim notch takes:
+    three unit squares forming an L (missing the top right quadrant), so
+    a point diagonally outside the notch has two equally near candidate
+    boundary points -- (1.3, 1) on the bottom face's own top edge and
+    (1, 1.3) on the side face's own right edge, both exactly 0.3 m away,
+    hand computed. The OLD clamp picked a face by centroid distance alone
+    and blended barycentric weights inside whichever triangle that face's
+    OWN topology happened to fan first, with no guarantee the result was
+    the true nearest point of the mesh's own boundary at all -- this is
+    exactly the shape of error the real rim's notch produced (see
+    cutting.Surface.lift's own K3 docstring paragraph). The new mechanism
+    measures the true nearest boundary point directly, so this is hand
+    verifiable independent of which face the old clamp would have chosen.
+    """
+
+    c = studio()
+    # 0:(0,0) 1:(1,0) 2:(1,1) 3:(0,1) 4:(2,0) 5:(2,1) 6:(1,2) 7:(0,2)
+    vertices = [
+        [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0],
+        [2.0, 0.0, 0.0], [2.0, 1.0, 0.0], [1.0, 2.0, 0.0], [0.0, 2.0, 0.0],
+    ]
+    faces = [
+        [0, 1, 2, 3],   # A
+        [1, 4, 5, 2],   # B
+        [3, 2, 6, 7],   # C
+    ]
+    surface = c.Surface(vertices, faces)
+    surface.boundary = [
+        [0.0, 0.0], [2.0, 0.0], [2.0, 1.0], [1.0, 1.0], [1.0, 2.0], [0.0, 2.0],
+    ]
+
+    found = surface.lift(1.3, 1.3)
+    assert found["projected"] is True
+    assert found["clamped"] is False
+    assert found["projected_m"] == pytest.approx(0.3, abs=1e-9)
+
+
 def test_ear_clip_takes_the_largest_ear_and_avoids_slivers():
     c = studio()
     # The largest ear selection rule avoids slivers. When these caps are
