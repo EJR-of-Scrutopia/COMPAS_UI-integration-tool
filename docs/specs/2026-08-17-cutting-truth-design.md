@@ -102,3 +102,32 @@ engine's home since the split. Suites: tests/studio from the repo root.
   above the net), a stepped-course close-up, the rim before/after.
 - No em dashes, no attribution, commit per task, nothing pushed
   (pushing is Param's).
+
+## Retrospective corrections
+
+Added by the wave's final fix review, 2026-08-17, after the plan above
+had already shipped and been measured against the real export.
+
+(a) K3's "so the cut outline follows the real silhouette without
+crescent bites" clause (above) reads as if the outline POINT itself
+moves onto the rim. What shipped is narrower: `cutting.Surface.lift`
+returns no x or y at all, only z, normal and field weights, so what it
+projects onto the boundary polyline is the SAMPLE location those values
+are read from, not the cap point's own plan position. A point placed
+outside the true rim by `domain.radius_at`'s outermost-crossing rule
+still sits exactly there in plan after this fix, up to 52.3 mm outside
+the true rim, the same worst case the old clamp reached. What changed is
+that its height, normal and weights are now honestly sampled from the
+nearest point of the real boundary instead of blended in from whichever
+render face's centroid happened to be nearest, up to 52 mm away. See
+`docs/BENCH.md`'s K3 section for the corrected wording and the measured
+figures.
+
+(b) "ending the one-piece-per-boundary-vertex fragmentation" (K3, above)
+names the wrong quantity. Course 0's piece COUNT is circumference-driven
+(the same target-size division every course uses) and was 62 both before
+and after this fix; it never tracked the boundary vertex count (240) at
+any point. What the fix actually reduced is OUTLINE POINTS per piece:
+course 0's 62 pieces carried 538 outline points between them before this
+fix and 358 after, on the real Trial 2 export at 0.9 m. "Fragmentation"
+was real, but it was the outline, not the piece count.

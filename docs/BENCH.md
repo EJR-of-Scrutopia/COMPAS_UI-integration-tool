@@ -296,18 +296,20 @@ writes nothing into `studies/`. Run it with
 checks itself against every figure the wave's own controller had already
 measured by hand (the plan's star shape, the default size's coverage, and
 the old coverage regression at 1.5 m, now cleared); every check below passed
-on the run this table is taken from, 2026-08-13:
+on the run this table is taken from, 2026-08-17, re-run after the cutting
+truth wave's own K3 fix (below) changed the rim outline and, with it, the
+whole cap:
 
 | measurement | value |
 | --- | --- |
 | star shaped | yes (238 of 240 rim steps forward, 2 backward, 0.467 degrees total, winding exactly 2 pi) |
 | target size, courses, pieces | 0.9 m, 7 courses, 233 pieces |
-| facets per piece | min 5 / median 6 / max 17 (the max belongs to course 0, the rim) |
-| boundary points per piece | min 40 / median 48 / max 136 |
+| facets per piece | min 4 / median 6 / max 13 (the max belongs to course 0, the rim) |
+| boundary points per piece | min 32 / median 48 / max 104 |
 | subdivision rounds | 3, limited by rounds (the edge length target, not the chord target, is what the round budget cuts off here) |
-| cap chord deviation | 0.960 mm against a 5.0 mm target |
-| corner normal residual, 695 corners | median 0.0196, mean 0.0325, p99 0.2428, max 0.3295 (its own worst corner, in courses 0 and 1) |
-| clamped cap points | 137 of 41265, reaching 0.0523 m at the worst and 0.0246 m at the median (SUPERSEDED, see the rim section below: the cutting truth wave's K3 fix, 2026-08-17, replaced this clamp for a real cut) |
+| cap chord deviation | 1.004 mm against a 5.0 mm target |
+| corner normal residual, 515 corners | median 0.0316, mean 0.0414, p99 0.2548, max 0.3295 (its own worst corner, in courses 0 and 1) |
+| projected cap points | 417 of 34785, reaching 0.0523 m at the worst and 0.0014 m at the median (formerly `clamped cap points`, 137 of 41265, reaching 0.0523 m at the worst and 0.0246 m at the median before the cutting truth wave's K3 fix, 2026-08-17, replaced the clamp with a projection onto the true rim, see the rim section below; `clamped_points` is 0 now) |
 | coverage | 0 orphan faces, 0 double faces (of 2400 analysis faces), 0 open facets, 0 slivers, 0 folded, 0 coverage holes, 0 broken boundary entries, 0 missing planes |
 
 The studio polish wave tried tightening the cap subdivision, CAP_EDGE_TARGET
@@ -402,9 +404,14 @@ outside the true rim) is unchanged and still correct -- what changed is
 what happens to that point afterward. `cutting.Surface.lift` no longer
 clamps such a point into the nearest render face (a poor proxy for "the
 true rim" whenever the render mesh's own faces are not small relative to
-the notch); it projects the point to the nearest point of the analysis
-mesh's own boundary polyline in plan instead, the real silhouette rather
-than an approximation of it. Course 0's outline is also simplified
+the notch); it now samples height, normal and field weights from the
+nearest point of the analysis mesh's own boundary polyline in plan
+instead -- the real silhouette, rather than an arbitrary nearby face's
+blend, is where the SAMPLE now comes from. The cap point's own plan
+position is untouched: `lift` returns no x or y at all, only z, normal
+and weights, so it is the sample that moves to the rim, not the point
+itself, which still sits wherever `domain.radius_at` placed it, up to
+52.3 mm outside the true rim. Course 0's outline is also simplified
 against that same boundary polyline, with a chord tolerance equal to
 `cutting.CHORD_TARGET` (5 mm, the cutter's own existing precision budget
 reused rather than a new number): course 0's 62 pieces carried 538
@@ -415,18 +422,27 @@ Measured on the real export at 0.9 m, forced fresh over HTTP the same way
 the table above was: `clamped_points` drops from 137 to **0**;
 `projected_points` (the new field naming the population the clamp used to
 own) is 417, reaching 52.3 mm at the worst and 1.4 mm at the median -- the
-worst case is the same real displacement the old clamp reached (a point
-genuinely outside the true rim is still exactly that far outside it; what
-changed is that it is now pulled back to the true nearest point of the
-rim, not an arbitrary nearby face), while the median is over ten times
-smaller than the old clamp's 24.6 mm. The mechanism is the Douglas-Peucker
-simplification course 0's outline now runs against the boundary (named
+worst case is the same real displacement the old clamp reached, because
+the cap point keeps its own plan position: a point genuinely outside the
+true rim is still exactly that far outside it in plan, unchanged, up to
+52.3 mm at the worst. What improved is the sample, not the point's own
+position: its z, normal and field weights are now honestly read off the
+true nearest point of the rim, instead of blended in from whichever
+arbitrary render face's centroid happened to be nearest, up to 52 mm
+away. The median is over ten times smaller than the old clamp's 24.6 mm.
+The mechanism is the Douglas-Peucker simplification course 0's outline
+now runs against the boundary (named
 above, tolerance `cutting.CHORD_TARGET`, 5 mm): fewer kept boundary
 vertices means longer straight chords between them, and the cap's own edge
-subdivision inserts intermediate points along those chords, which sit
-slightly inside the true curved rim by construction (that is what a chord
-tolerance means) and land just outside the primary containment test,
-getting projected back onto the boundary polyline in turn. The 1.4 mm
+subdivision inserts intermediate points along those chords. On the rim's
+convex stretches those points sit slightly inside the true curved rim and
+pass the primary containment test unaided; on its reentrant (concave)
+stretches -- the same kind of notch the plus or minus 125.4 degree wobble
+names above, where the boundary steps inward -- the chord instead sits
+slightly outside the true curved rim by construction (that is what a
+chord tolerance means there), so those intermediate points land just
+outside the primary containment test and get projected back onto the
+boundary polyline in turn. The 1.4 mm
 median is that bounded, DP-chord resubdivision gap showing up downstream
 in the cap, not float noise -- an earlier draft of this section attributed
 it to points "a float's width outside the primary containment test",
@@ -435,8 +451,9 @@ own precision at this scale); corrected here rather than left standing.
 The corner residual distribution moves too, since fewer
 welded points changes which corners exist at all: 515 corners (was 695),
 median 0.0316 (was 0.0196), max 0.3295 (unchanged, the same worst corner).
-The K2 seat-gap worst, 158 mm, drops to 118.8 mm on the same export, the
-rim fragmentation having been most of that gap's own cause. Full bundle
+The K2 seat-gap worst, 158 mm, drops to 118.8 mm on the same export, and
+the median drops to 18.2 mm (was 19.7 mm), the rim fragmentation having
+been most of that gap's own cause. Full bundle
 payload 10.10 MB (was 11.70 MB) and wall time 3.83 s (was 5.22 s) --
 smaller and faster, not merely inside the wave's 3x/2x gate, because
 fewer welded points is less to cut, weld and ship. The rim's silhouette
@@ -451,28 +468,28 @@ panel both quote it in full:
 
 | residual | radians (sine of the angle) | degrees | corners over |
 | --- | --- | --- | --- |
-| median | 0.0196 | 1.1 | -- |
-| mean | 0.0325 | 1.9 | -- |
-| p99 | 0.2428 | 14.1 | -- |
+| median | 0.0316 | 1.8 | -- |
+| mean | 0.0414 | 2.4 | -- |
+| p99 | 0.2548 | 14.8 | -- |
 | max | 0.3295 | 19.2 | -- |
-| over 0.01 | -- | over 0.6 | 487 of 695 |
-| over 0.05 | -- | over 2.9 | 134 of 695 |
-| over 0.10 | -- | over 5.7 | 38 of 695 |
-| over 0.20 | -- | over 11.5 | 10 of 695 |
-| over 0.30 | -- | over 17.5 | 2 of 695 |
+| over 0.01 | -- | over 0.6 | 414 of 515 |
+| over 0.05 | -- | over 2.9 | 140 of 515 |
+| over 0.10 | -- | over 5.7 | 42 of 515 |
+| over 0.20 | -- | over 11.5 | 10 of 515 |
+| over 0.30 | -- | over 17.5 | 2 of 515 |
 
 The median is the figure that describes the cut: a typical corner sits at
-0.0196 (1.1 degrees), the same order as `bench/studio/pieces.py`'s own test
+0.0316 (1.8 degrees), the same order as `bench/studio/pieces.py`'s own test
 fixture (a four cell synthetic dome chosen to be a stress case), which
-measures 0.0104 (0.598 degrees) at its single worst corner -- roughly half
-the real median, not a tight match. The max describes only its own
+measures 0.0104 (0.598 degrees) at its single worst corner -- roughly a
+third of the real median, not a tight match. The max describes only its own
 worst corner, not the cut as a whole, and the worst corners cluster in the
 rim course (course 0), where `generators._arc` inserts the mesh's own
 boundary corners so the drawn silhouette follows the real, irregular rim
 rather than a straight chord: more corners inserted there means facets
 meeting at sharper angles, and a sharper angle between two facets
 necessarily pushes a stored normal further out of the one it does not
-belong to. It is the same cause as the facets-per-piece maximum of 17
+belong to. It is the same cause as the facets-per-piece maximum of 13
 above: both are the rim course, not the general cut, so neither number
 should be read as typical against the medians beside them.
 
@@ -481,8 +498,15 @@ corner's stored normal and the plane of the facet that does not own it, so
 at the shipped 0.2 m shell thickness, the corner normal offsets the full
 0.2 m thickness upward from the intrados; a residual of `r` moves that
 corner roughly `200 * r` millimetres from where a perfectly flat joint
-would put it. The median, 0.0196, is about 4 mm; the worst corner, 0.3295,
-is about 66 mm. Nothing in the shipped
+would put it. That translation describes the curved extrusion path only
+-- sprayed pieces, and any jointed piece the server could not fit a seat
+plane for, where each cap point still carries its own normal (K1's
+unchanged straight extrusion). A prismatic (K2) piece offsets its top cap
+along its fitted seat plane's own normal, uniform across the whole piece
+rather than per point, so it consumes the same residual through the
+facet-plane projection that shapes its outline instead of through a cap
+point moving a linear number of millimetres. The median, 0.0316, is about
+6 mm; the worst corner, 0.3295, is about 66 mm. Nothing in the shipped
 acceptance tests bounds either figure on real geometry (the `< 0.02` bound
 in `tests/studio/test_pieces.py` is pinned to the synthetic fixture only),
 so none of this is a failing measurement, but the tail is real and worth a
