@@ -1,0 +1,458 @@
+{
+  "_note": "Cutting Truth wave (docs/specs/2026-08-17-cutting-truth-design.md), Task 1: a small doubly-curved (anticlastic) fixture for geometry tests, added because tests/studio's own cutting/pieces fixtures (tests/studio/conftest_data.py, and the dome in tests/studio/test_pieces.py::dome_z) are all synclastic or flat. z = 0.25 * (x*x - y*y) over a 5x5 grid on [-2, 2] x [-2, 2] (step 1.0): a hyperbolic paraboloid, negative Gaussian curvature everywhere except the flat centre point, so a flat seat plane cut through any interior piece leaves a real, analytically checkable gap to the true surface in both principal directions at once. Same equilibrium/formGraph contract shape as tests/studio/conftest_data.py's tiny_contract: equilibrium.vertices in node id order, formGraph.faces[i].vertices indexing into them, a single 1 kN downward load at the centre vertex, and the four plan corners as supports.",
+  "equilibrium": {
+    "vertices": [
+      {
+        "x": -2.0,
+        "y": -2.0,
+        "z": 0.0
+      },
+      {
+        "x": -1.0,
+        "y": -2.0,
+        "z": -0.75
+      },
+      {
+        "x": 0.0,
+        "y": -2.0,
+        "z": -1.0
+      },
+      {
+        "x": 1.0,
+        "y": -2.0,
+        "z": -0.75
+      },
+      {
+        "x": 2.0,
+        "y": -2.0,
+        "z": 0.0
+      },
+      {
+        "x": -2.0,
+        "y": -1.0,
+        "z": 0.75
+      },
+      {
+        "x": -1.0,
+        "y": -1.0,
+        "z": 0.0
+      },
+      {
+        "x": 0.0,
+        "y": -1.0,
+        "z": -0.25
+      },
+      {
+        "x": 1.0,
+        "y": -1.0,
+        "z": 0.0
+      },
+      {
+        "x": 2.0,
+        "y": -1.0,
+        "z": 0.75
+      },
+      {
+        "x": -2.0,
+        "y": 0.0,
+        "z": 1.0
+      },
+      {
+        "x": -1.0,
+        "y": 0.0,
+        "z": 0.25
+      },
+      {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      {
+        "x": 1.0,
+        "y": 0.0,
+        "z": 0.25
+      },
+      {
+        "x": 2.0,
+        "y": 0.0,
+        "z": 1.0
+      },
+      {
+        "x": -2.0,
+        "y": 1.0,
+        "z": 0.75
+      },
+      {
+        "x": -1.0,
+        "y": 1.0,
+        "z": 0.0
+      },
+      {
+        "x": 0.0,
+        "y": 1.0,
+        "z": -0.25
+      },
+      {
+        "x": 1.0,
+        "y": 1.0,
+        "z": 0.0
+      },
+      {
+        "x": 2.0,
+        "y": 1.0,
+        "z": 0.75
+      },
+      {
+        "x": -2.0,
+        "y": 2.0,
+        "z": 0.0
+      },
+      {
+        "x": -1.0,
+        "y": 2.0,
+        "z": -0.75
+      },
+      {
+        "x": 0.0,
+        "y": 2.0,
+        "z": -1.0
+      },
+      {
+        "x": 1.0,
+        "y": 2.0,
+        "z": -0.75
+      },
+      {
+        "x": 2.0,
+        "y": 2.0,
+        "z": 0.0
+      }
+    ],
+    "edges": [
+      {
+        "u": 0,
+        "v": 1
+      },
+      {
+        "u": 1,
+        "v": 2
+      },
+      {
+        "u": 2,
+        "v": 3
+      },
+      {
+        "u": 3,
+        "v": 4
+      },
+      {
+        "u": 5,
+        "v": 6
+      },
+      {
+        "u": 6,
+        "v": 7
+      },
+      {
+        "u": 7,
+        "v": 8
+      },
+      {
+        "u": 8,
+        "v": 9
+      },
+      {
+        "u": 10,
+        "v": 11
+      },
+      {
+        "u": 11,
+        "v": 12
+      },
+      {
+        "u": 12,
+        "v": 13
+      },
+      {
+        "u": 13,
+        "v": 14
+      },
+      {
+        "u": 15,
+        "v": 16
+      },
+      {
+        "u": 16,
+        "v": 17
+      },
+      {
+        "u": 17,
+        "v": 18
+      },
+      {
+        "u": 18,
+        "v": 19
+      },
+      {
+        "u": 20,
+        "v": 21
+      },
+      {
+        "u": 21,
+        "v": 22
+      },
+      {
+        "u": 22,
+        "v": 23
+      },
+      {
+        "u": 23,
+        "v": 24
+      },
+      {
+        "u": 0,
+        "v": 5
+      },
+      {
+        "u": 5,
+        "v": 10
+      },
+      {
+        "u": 10,
+        "v": 15
+      },
+      {
+        "u": 15,
+        "v": 20
+      },
+      {
+        "u": 1,
+        "v": 6
+      },
+      {
+        "u": 6,
+        "v": 11
+      },
+      {
+        "u": 11,
+        "v": 16
+      },
+      {
+        "u": 16,
+        "v": 21
+      },
+      {
+        "u": 2,
+        "v": 7
+      },
+      {
+        "u": 7,
+        "v": 12
+      },
+      {
+        "u": 12,
+        "v": 17
+      },
+      {
+        "u": 17,
+        "v": 22
+      },
+      {
+        "u": 3,
+        "v": 8
+      },
+      {
+        "u": 8,
+        "v": 13
+      },
+      {
+        "u": 13,
+        "v": 18
+      },
+      {
+        "u": 18,
+        "v": 23
+      },
+      {
+        "u": 4,
+        "v": 9
+      },
+      {
+        "u": 9,
+        "v": 14
+      },
+      {
+        "u": 14,
+        "v": 19
+      },
+      {
+        "u": 19,
+        "v": 24
+      }
+    ],
+    "loads": [
+      {
+        "nodeId": 12,
+        "vector": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": -1.0
+        }
+      }
+    ],
+    "resolvedSupportNodeIds": [
+      0,
+      4,
+      20,
+      24
+    ]
+  },
+  "formGraph": {
+    "faces": [
+      {
+        "id": 0,
+        "vertices": [
+          0,
+          1,
+          6,
+          5
+        ]
+      },
+      {
+        "id": 1,
+        "vertices": [
+          1,
+          2,
+          7,
+          6
+        ]
+      },
+      {
+        "id": 2,
+        "vertices": [
+          2,
+          3,
+          8,
+          7
+        ]
+      },
+      {
+        "id": 3,
+        "vertices": [
+          3,
+          4,
+          9,
+          8
+        ]
+      },
+      {
+        "id": 4,
+        "vertices": [
+          5,
+          6,
+          11,
+          10
+        ]
+      },
+      {
+        "id": 5,
+        "vertices": [
+          6,
+          7,
+          12,
+          11
+        ]
+      },
+      {
+        "id": 6,
+        "vertices": [
+          7,
+          8,
+          13,
+          12
+        ]
+      },
+      {
+        "id": 7,
+        "vertices": [
+          8,
+          9,
+          14,
+          13
+        ]
+      },
+      {
+        "id": 8,
+        "vertices": [
+          10,
+          11,
+          16,
+          15
+        ]
+      },
+      {
+        "id": 9,
+        "vertices": [
+          11,
+          12,
+          17,
+          16
+        ]
+      },
+      {
+        "id": 10,
+        "vertices": [
+          12,
+          13,
+          18,
+          17
+        ]
+      },
+      {
+        "id": 11,
+        "vertices": [
+          13,
+          14,
+          19,
+          18
+        ]
+      },
+      {
+        "id": 12,
+        "vertices": [
+          15,
+          16,
+          21,
+          20
+        ]
+      },
+      {
+        "id": 13,
+        "vertices": [
+          16,
+          17,
+          22,
+          21
+        ]
+      },
+      {
+        "id": 14,
+        "vertices": [
+          17,
+          18,
+          23,
+          22
+        ]
+      },
+      {
+        "id": 15,
+        "vertices": [
+          18,
+          19,
+          24,
+          23
+        ]
+      }
+    ]
+  }
+}
