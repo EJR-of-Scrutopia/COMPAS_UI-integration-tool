@@ -43,7 +43,10 @@ RUNS: dict = {}
 RUNS_LOCK = threading.Lock()
 
 MATERIALS = sorted(staging.DENSITIES)
-SIZE_MIN = 0.3
+# 0.15 floor (Param, 2026-08-18): coarse cuts read as weird spiky shapes,
+# real block work wants sub-300 mm targets; the smaller cut takes longer
+# and that is accepted.
+SIZE_MIN = 0.15
 SIZE_MAX = 3.0
 PATTERNS = sorted(generators.GENERATORS)
 
@@ -355,17 +358,22 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
         return {"stored": filename}
 
     def frames_dir(run_id: str) -> Path:
+        # Validation stays against STUDIES_DIR (the slug must be a real
+        # study), but the frames themselves land under RECORDINGS_DIR:
+        # machine-local state, outside the repo and outside OneDrive's
+        # sync scope, whose churn throttled a live recording to a crawl
+        # (2026-08-18).
         if run_id.startswith("study-"):
             slug = run_id[len("study-"):]
             if "/" in slug or "\\" in slug or ".." in slug:
                 raise HTTPException(400, "bad study slug")
             if not (bundle.STUDIES_DIR / slug).is_dir():
                 raise HTTPException(404, "no study {}".format(slug))
-            return bundle.STUDIES_DIR / slug / "studio" / "frames"
+            return bundle.RECORDINGS_DIR / slug / "frames"
         run = RUNS.get(run_id)
         if run is None:
             raise HTTPException(404, "no run {}".format(run_id))
-        return bundle.STUDIES_DIR / run["slug"] / "studio" / "frames"
+        return bundle.RECORDINGS_DIR / run["slug"] / "frames"
 
     @app.post("/api/frames/{run_id}")
     async def post_frame(run_id: str, request: Request, frame: int = Query(...)):

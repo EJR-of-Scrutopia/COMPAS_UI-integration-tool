@@ -33,6 +33,10 @@ def make_client(tmp_path, monkeypatch, runner=None):
     (upload / "Tiny-compas.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(bundle, "UPLOAD_DIR", upload)
     monkeypatch.setattr(bundle, "STUDIES_DIR", studies)
+    # Frames and stitched videos land outside the studies tree (and, in
+    # production, outside the repo and OneDrive entirely) -- see
+    # bundle.RECORDINGS_DIR's rationale.
+    monkeypatch.setattr(bundle, "RECORDINGS_DIR", tmp_path / "recordings")
     app_module.RUNS.clear()
     if runner is None:
         runner = lambda request: {"converged": True, "message": ""}
@@ -318,7 +322,10 @@ def test_frames_and_stitch_guardrails(tmp_path, monkeypatch):
         headers={"content-type": "application/octet-stream"},
     )
     assert posted.status_code == 200
-    assert (studies / "tiny" / "studio" / "frames" / "frame-000001.png").is_file()
+    assert (tmp_path / "recordings" / "tiny" / "frames" / "frame-000001.png").is_file()
+    assert not (studies / "tiny" / "studio" / "frames").exists(), (
+        "frames must not land inside the studies tree (OneDrive sync scope)"
+    )
     assert client.post("/api/frames/nonsense?frame=1", content=b"x").status_code == 404
 
 
@@ -335,7 +342,7 @@ def test_posting_frame_one_clears_stale_frames_from_a_previous_recording(tmp_pat
                                     "pattern": "bonded-courses", "size": 0.9})
     run_id = started.json()["run"]
     wait_for(client, run_id)
-    frames = studies / "tiny" / "studio" / "frames"
+    frames = tmp_path / "recordings" / "tiny" / "frames"
 
     for frame in (1, 2, 3):
         response = client.post(
@@ -371,7 +378,7 @@ def test_frames_accept_a_study_slug_without_a_run(tmp_path, monkeypatch):
         headers={"content-type": "application/octet-stream"},
     )
     assert posted.status_code == 200
-    assert (studies / "tiny" / "studio" / "frames" / "frame-000003.png").is_file()
+    assert (tmp_path / "recordings" / "tiny" / "frames" / "frame-000003.png").is_file()
     assert client.post("/api/frames/study-nope?frame=1", content=b"x").status_code == 404
     # Path traversal in the slug must never resolve outside STUDIES_DIR. Either
     # the router rejects the encoded slash before frames_dir ever runs, or
@@ -555,7 +562,7 @@ def test_size_out_of_range_is_rejected_by_name(tmp_path, monkeypatch):
                 "size": 9.0, "thickness": 0.2},
     )
     assert response.status_code == 400
-    assert "0.3" in response.json()["detail"]
+    assert "0.15" in response.json()["detail"]
 
 
 def test_an_unknown_pattern_is_rejected_by_name(tmp_path, monkeypatch):

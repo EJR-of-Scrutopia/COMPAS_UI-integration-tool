@@ -54,9 +54,9 @@ const state = {
   recording: false,    // Task 15: true while recordAnimation() drives the render loop
   centre: null,        // Task 13: cached orbit centroid, set in rebuildTimeline
   pattern: "bonded-courses",
-  size: 0.9,
+  size: 0.4,
   thickness: 0.2,
-  jointGap: 0.02,
+  jointGap: 0.0005,
   taper: 0,
   segmentIndex: null,  // Task 11
   nodeRadius: 0.03,    // Task 6
@@ -1123,7 +1123,7 @@ function buildScene(bundle, preserve) {
 // a server value blindly is exactly how a poisoned value like the old
 // authored-cut sentinel reaches the screen; this is the defence in depth
 // for that class of bug, not the fix for it.
-const SIZE_MIN = 0.3, SIZE_MAX = 3.0;
+const SIZE_MIN = 0.15, SIZE_MAX = 3.0;
 
 function applyCut(preserve) {
   // The cut always follows the LOADED bundle's own size, never the
@@ -2626,7 +2626,9 @@ document.getElementById("thickness-input").addEventListener("change", (e) => {
   scheduleReload();
 });
 document.getElementById("joint-gap").addEventListener("input", (e) => {
-  document.getElementById("joint-gap-value").textContent = Math.round(+e.target.value * 1000);
+  // Sub-millimetre range (0.01-1 mm): two decimals, or every position
+  // on the slider would display as 0 or 1.
+  document.getElementById("joint-gap-value").textContent = (+e.target.value * 1000).toFixed(2);
 });
 document.getElementById("joint-gap").addEventListener("change", (e) => {
   state.jointGap = +e.target.value;

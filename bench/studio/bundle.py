@@ -13,6 +13,8 @@ import collections
 import datetime
 import json
 import math
+import os
+import tempfile
 import threading
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -28,6 +30,16 @@ import tessellation
 REPO = Path(__file__).resolve().parents[2]
 UPLOAD_DIR = REPO / "bench" / "demo" / "upload from grasshopper"
 STUDIES_DIR = REPO / "bench" / "studies"
+
+# Recording frames and stitched videos are big transient binaries (a 1080p
+# take runs to gigabytes of PNG). Under the repo they land inside OneDrive's
+# sync scope, whose per-file hashing and upload churn throttled a live
+# recording to a crawl (2026-08-18, 935 frames / 1.5 GB before the user gave
+# up). They live under the machine-local state dir instead: %LOCALAPPDATA%
+# on Windows (never synced), the temp dir elsewhere.
+RECORDINGS_DIR = Path(
+    os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+) / "BenchStudio" / "recordings"
 
 # The bundle document shape: if a cached document lacks any of these keys,
 # it is stale and must be rebuilt. This is how the cache invalidates itself
