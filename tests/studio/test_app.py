@@ -505,6 +505,21 @@ def test_compas_only_upload_derives_a_contract_and_the_study_builds(tmp_path, mo
     assert "no analysis in this export" in document["provenance"]["derived_geometry_only"]
 
 
+def test_the_index_stamps_the_studio_script_url(tmp_path, monkeypatch):
+    """Revalidation headers alone were not enough: Chromium's heuristic
+    cache served a stale module script across plain refreshes (2026-08-18,
+    live, twice). The index rewrites the script URL with studio.js's own
+    mtime, so fresh HTML always names a URL the browser never cached."""
+
+    import re as re_module
+    client, _ = make_client(tmp_path, monkeypatch)
+    html = client.get("/").text
+    assert "/static/studio.js?v=dev" not in html, (
+        "the dev placeholder must be stamped, never served"
+    )
+    assert re_module.search(r"/static/studio\.js\?v=\d+", html)
+
+
 def test_static_files_and_the_index_ask_the_browser_to_revalidate(tmp_path, monkeypatch):
     """A plain refresh after a server update once served the new
     index.html with the OLD cached studio.js (2026-08-18, live). no-cache

@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 import bundle
@@ -486,7 +486,18 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
 
     @app.get("/")
     def index():
-        return FileResponse(STATIC_DIR / "index.html")
+        # The script URL carries studio.js's own mtime, so a fresh page
+        # always names a URL the browser has never cached: Cache-Control
+        # revalidation (below) turned out not to be enough on its own --
+        # Chromium's heuristic cache served a stale module script across
+        # plain refreshes even after the HTML itself came back fresh
+        # (2026-08-18, live: the import banner spoke a message the new
+        # client no longer contains, twice).
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        stamp = str(int((STATIC_DIR / "studio.js").stat().st_mtime))
+        html = html.replace(
+            "/static/studio.js?v=dev", "/static/studio.js?v=" + stamp)
+        return HTMLResponse(html)
 
     if STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
