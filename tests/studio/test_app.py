@@ -505,6 +505,73 @@ def test_compas_only_upload_derives_a_contract_and_the_study_builds(tmp_path, mo
     assert "no analysis in this export" in document["provenance"]["derived_geometry_only"]
 
 
+def _tiny_tessellation_document():
+    return {
+        "schema": "bench.tessellation/1",
+        "units": "m",
+        "domain": "plan",
+        "pattern": "authored",
+        "cells": [
+            {"key": "a", "course": 0,
+             "outline": [[0, 0], [2, 0], [2, 2], [0, 2]]},
+        ],
+    }
+
+
+def test_a_tessellation_upload_gives_the_study_an_authored_cut(tmp_path, monkeypatch):
+    """2026-08-18: the plugin Export component writes the
+    bench.tessellation/1 sidecar, and the studio's import accepts it as a
+    third kind. Uploading it for an existing export stores the sidecar
+    under exactly the name bundle.tessellation_sidecar pairs on, and the
+    next bundle cuts from the authored cells instead of a generated
+    pattern."""
+
+    client, _ = make_client(tmp_path, monkeypatch)
+    response = client.put(
+        "/api/uploads/exports/Tiny/tessellation",
+        content=json.dumps(_tiny_tessellation_document()).encode(),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["stored"] == "Tiny-tessellation.json"
+    assert body["authored_tessellation"] == "Tiny-tessellation.json"
+    assert (tmp_path / "upload" / "Tiny-tessellation.json").is_file()
+
+    bundle_response = client.get(
+        "/api/studies/Tiny/bundle",
+        params={"material": "concrete", "pattern": "bonded-courses", "size": 0.9},
+    )
+    assert bundle_response.status_code == 200
+    document = bundle_response.json()
+    assert len(document["pieces"]) == 1, (
+        "one authored cell must mean exactly one piece: the generated "
+        "pattern would have cut more"
+    )
+    assert document["pieces"][0]["key"] == "a"
+
+
+def test_a_tessellation_upload_for_a_missing_export_is_a_400(tmp_path, monkeypatch):
+    client, _ = make_client(tmp_path, monkeypatch)
+    response = client.put(
+        "/api/uploads/exports/Nope/tessellation",
+        content=json.dumps(_tiny_tessellation_document()).encode(),
+    )
+    assert response.status_code == 400
+    assert "upload its form export first" in response.json()["detail"]
+
+
+def test_a_tessellation_upload_without_cells_is_a_400(tmp_path, monkeypatch):
+    client, _ = make_client(tmp_path, monkeypatch)
+    for bad in ({"schema": "bench.tessellation/1"},
+                {"schema": "bench.tessellation/1", "cells": []},
+                {"schema": "wrong/1", "cells": [{"key": "a"}]}):
+        response = client.put(
+            "/api/uploads/exports/Tiny/tessellation",
+            content=json.dumps(bad).encode(),
+        )
+        assert response.status_code == 400
+
+
 def test_compas_upload_never_shadows_an_existing_contract(tmp_path, monkeypatch):
     """The derived-contract write must never run while a contract already
     exists for this name -- real or a prior derivation -- or a compas

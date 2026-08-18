@@ -171,6 +171,9 @@ def test_import_accepts_one_file_and_detects_kind_from_the_suffix():
     assert "function importFileKind(filename)" in js
     kind_body = _function_body(js, "importFileKind")
     assert '"-contract.json"' in kind_body and '"-compas.json"' in kind_body
+    # 2026-08-18, later the same day: the plugin Export component's
+    # authored cutting sidecar uploads through the same picker.
+    assert '"-tessellation.json"' in kind_body
     assert "return null" in kind_body, "an unrecognised suffix must be nameable, not guessed at"
 
     import_body = _function_body(js, "importExportPair")
@@ -178,9 +181,13 @@ def test_import_accepts_one_file_and_detects_kind_from_the_suffix():
         "the pair requirement must be gone: one file is enough"
     )
     assert "importFileKind(file.name)" in import_body
-    assert "picked.length === 2 && picked[0].kind === picked[1].kind" in import_body, (
+    assert ("new Set(picked.map((entry) => entry.kind)).size !== picked.length"
+            in import_body), (
         "two files of the SAME kind must still be rejected -- only the pair requirement dropped"
     )
+    # The sidecar's server-side partner check needs the halves first.
+    assert "kindOrder" in import_body
+    assert '{ contract: 0, compas: 1, tessellation: 2 }' in import_body
 
 
 def test_import_failures_all_reach_the_banner():

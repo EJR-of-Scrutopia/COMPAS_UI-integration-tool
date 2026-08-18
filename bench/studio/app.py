@@ -290,8 +290,9 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
     async def upload_export(name: str, kind: str, request: Request):
         if "/" in name or "\\" in name or ".." in name:
             raise HTTPException(400, "bad export name")
-        if kind not in ("contract", "compas"):
-            raise HTTPException(400, "kind must be 'contract' or 'compas'")
+        if kind not in ("contract", "compas", "tessellation"):
+            raise HTTPException(
+                400, "kind must be 'contract', 'compas' or 'tessellation'")
         slug = geometry.slugify(name)
         with RUNS_LOCK:
             for run in RUNS.values():
@@ -309,8 +310,37 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
                 geometry.member_forces_newtons(document)
             except Exception as error:
                 raise HTTPException(400, str(error))
-        elif not isinstance(document, dict) or "thrustMesh" not in document:
-            raise HTTPException(400, "a compas export must contain a thrustMesh key")
+        elif kind == "compas":
+            if not isinstance(document, dict) or "thrustMesh" not in document:
+                raise HTTPException(
+                    400, "a compas export must contain a thrustMesh key")
+        else:
+            # An authored cutting sidecar (the plugin Export component's
+            # Tessellation format). Shape-checked here; the deep per-cell
+            # validation stays where it always was, tessellation.
+            # from_document at cut time, where a malformed cell is a 400
+            # naming the cell (see bundle.CutRefused's docstring).
+            if (not isinstance(document, dict)
+                    or not isinstance(document.get("cells"), list)
+                    or not document["cells"]):
+                raise HTTPException(
+                    400,
+                    "a tessellation export must carry a non-empty cells "
+                    "list")
+            if not str(document.get("schema", "")).startswith(
+                    "bench.tessellation"):
+                raise HTTPException(
+                    400,
+                    "a tessellation export must declare a "
+                    "bench.tessellation schema")
+            has_partner = any(
+                (bundle.UPLOAD_DIR / "{}-{}.json".format(name, half)).is_file()
+                for half in ("contract", "compas"))
+            if not has_partner:
+                raise HTTPException(
+                    400,
+                    "no export named {} exists yet; upload its form "
+                    "export first, then the tessellation".format(name))
 
         # bundle.UPLOAD_DIR, not a module-level copy, so make_client's
         # monkeypatch of bundle.UPLOAD_DIR lands here too.

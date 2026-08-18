@@ -2820,10 +2820,12 @@ async function putFile(url, file) {
   return response.json();
 }
 
-// P4 (presentation batch, 2026-08-18): "*-contract.json" or "*-compas.json"
-// only -- anything else cannot be routed to /api/uploads/exports/{name}/
-// {kind}, which only ever accepts those two kinds (app.py).
+// P4 (presentation batch, 2026-08-18): the suffix names the upload kind
+// routed to /api/uploads/exports/{name}/{kind} (app.py). 2026-08-18,
+// later the same day: "-tessellation.json" joined -- the plugin Export
+// component's authored cutting sidecar uploads through the same picker.
 function importFileKind(filename) {
+  if (filename.endsWith("-tessellation.json")) return "tessellation";
   if (filename.endsWith("-contract.json")) return "contract";
   if (filename.endsWith("-compas.json")) return "compas";
   return null;
@@ -2845,12 +2847,16 @@ async function importExportPair() {
   const input = document.getElementById("import-export-input");
   const files = Array.from(input.files || []);
   if (!files.length) {
-    importValidationError(status, "pick a *-contract.json or *-compas.json file");
+    importValidationError(
+      status,
+      "pick a *-contract.json, *-compas.json or *-tessellation.json file");
     return;
   }
-  if (files.length > 2) {
+  if (files.length > 3) {
     importValidationError(
-      status, "pick at most two files: one *-contract.json and one *-compas.json");
+      status,
+      "pick at most three files: one *-contract.json, one *-compas.json "
+      + "and one *-tessellation.json");
     return;
   }
   // P4: the pair is no longer required -- a single *-compas.json becomes a
@@ -2862,14 +2868,16 @@ async function importExportPair() {
     const kind = importFileKind(file.name);
     if (!kind) {
       importValidationError(
-        status, file.name + " is neither a *-contract.json nor a *-compas.json file");
+        status,
+        file.name + " is not a *-contract.json, *-compas.json or "
+        + "*-tessellation.json file");
       return;
     }
     picked.push({ file, kind });
   }
-  if (picked.length === 2 && picked[0].kind === picked[1].kind) {
+  if (new Set(picked.map((entry) => entry.kind)).size !== picked.length) {
     importValidationError(
-      status, "pick one *-contract.json and one *-compas.json, not two of the same kind");
+      status, "pick at most one file of each kind, not two of the same");
     return;
   }
   const prefixOf = (entry) => entry.file.name.slice(0, -("-" + entry.kind + ".json").length);
@@ -2883,10 +2891,11 @@ async function importExportPair() {
     importValidationError(status, "the export name cannot be empty");
     return;
   }
-  // Contract before compas when both are given: the order the pair-only
-  // flow this replaces always used, and the only one either upload's own
-  // pair_complete answer can actually depend on.
-  picked.sort((a, b) => (a.kind === "contract" ? 0 : 1) - (b.kind === "contract" ? 0 : 1));
+  // Contract, then compas, then tessellation: the halves the sidecar's
+  // own partner check (app.py) requires must land before it, and
+  // contract-first is the order the pair-only flow always used.
+  const kindOrder = { contract: 0, compas: 1, tessellation: 2 };
+  picked.sort((a, b) => kindOrder[a.kind] - kindOrder[b.kind]);
   status.textContent = "uploading " + prefix + "...";
   try {
     let result = null;
@@ -2894,12 +2903,19 @@ async function importExportPair() {
       result = await putFile(
         "/api/uploads/exports/" + encodeURIComponent(prefix) + "/" + entry.kind, entry.file);
     }
-    status.textContent = result.pair_complete
+    const hadTessellation = picked.some(
+      (entry) => entry.kind === "tessellation");
+    const importedLine = (result.pair_complete
       ? "imported " + prefix
-      : "stored " + prefix + "; pair incomplete";
-    logStudio(result.pair_complete
-      ? "imported " + prefix
-      : "stored " + prefix + "; pair incomplete");
+      : "stored " + prefix + "; pair incomplete")
+      + (hadTessellation ? " with an authored cut" : "");
+    status.textContent = importedLine;
+    logStudio(importedLine);
+    if (hadTessellation) {
+      showBanner(
+        prefix + ": authored tessellation stored, the study cuts from "
+        + "your cells.", "info");
+    }
     // A one-line note the moment a compas-only upload lands: item 3's
     // "analysis layers are unavailable for it", visible even before the
     // study finishes loading (renderDataPanel carries the same note for
