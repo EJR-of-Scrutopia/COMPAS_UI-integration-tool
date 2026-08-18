@@ -245,6 +245,62 @@ def test_projection_finds_the_true_nearest_boundary_point_past_a_reentrant_corne
     assert found["projected_m"] == pytest.approx(0.3, abs=1e-9)
 
 
+def test_lift_reports_x_y_unchanged_when_the_point_needs_no_move():
+    """Rim-rectangular fix (2026-08-18): lift() now always carries the
+    plan position the sample was actually taken at ("x"/"y" in the
+    returned dict), the same "no absent keys" rule clamp_m and
+    projected_m already follow. A point that lands on the mesh unaided
+    needs no move at all: x/y echo the original request exactly."""
+
+    c = studio()
+    vertices = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]]
+    surface = c.Surface(vertices, [[0, 1, 2, 3]])
+    found = surface.lift(0.5, 0.5)
+    assert (found["x"], found["y"]) == (0.5, 0.5)
+
+
+def test_lift_moves_x_y_to_the_projected_boundary_point():
+    """Rim-rectangular fix (2026-08-18): before this fix, only the SAMPLE
+    (z, normal, weights) moved to the boundary-projected point; the point's
+    own plan position was left at the caller's original request (see
+    docs/specs/2026-08-17-cutting-truth-design.md's retrospective
+    correction: "it is the sample that moves to the rim, not the point
+    itself"). Now lift()'s own returned "x"/"y" carry the PROJECTED
+    position whenever the boundary-polyline projection is what found this
+    sample, so a caller that ships the point verbatim (pieces._lift) draws
+    the corner ON the rim, not merely samples it there.
+    """
+
+    c = studio()
+    vertices = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]]
+    surface = c.Surface(vertices, [[0, 1, 2, 3]])
+    surface.boundary = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+
+    found = surface.lift(1.5, 0.5)
+    assert found["projected"] is True
+    assert (found["x"], found["y"]) == pytest.approx((1.0, 0.5))
+    # Never the caller's own original, unprojected request.
+    assert (found["x"], found["y"]) != (1.5, 0.5)
+
+
+def test_lift_leaves_x_y_at_the_original_request_for_the_last_resort_clamp():
+    """The last-resort nearest-face clamp (no boundary attached, or the
+    projection itself still missed the mesh) is explicitly NOT extended by
+    the rim-rectangular fix: its own reach is already disclosed through
+    clamp_m, and the fix contract's "snap to the nearest point of the
+    boundary polyline" names the K3 projection machinery specifically, not
+    this older fallback. x/y stay at the caller's own original request
+    here, same as before this fix.
+    """
+
+    c = studio()
+    vertices = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]]
+    surface = c.Surface(vertices, [[0, 1, 2, 3]])
+    found = surface.lift(1.5, 0.5)
+    assert found["clamped"] is True
+    assert (found["x"], found["y"]) == (1.5, 0.5)
+
+
 def test_ear_clip_takes_the_largest_ear_and_avoids_slivers():
     c = studio()
     # The largest ear selection rule avoids slivers. When these caps are

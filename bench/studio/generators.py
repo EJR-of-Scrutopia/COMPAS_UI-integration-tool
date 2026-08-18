@@ -222,15 +222,118 @@ def _arc(
     )
 
 
+def _arc_length_samples(domain: Dict, f: float) -> Tuple[List[float], List[float]]:
+    """Theta and cumulative plan arc length at radius f, sampled at
+    ANGLE_SAMPLES steps around one full turn and closed (thetas[-1] is
+    exactly TWO_PI, cumulative[-1] is the course's own circumference at
+    this radius -- the same sampling _circumference uses, kept here
+    instead so the running total can be inverted back to an angle, which
+    a plain running total alone cannot do).
+    """
+
+    thetas = [TWO_PI * i / ANGLE_SAMPLES for i in range(ANGLE_SAMPLES + 1)]
+    points = [domain_module.plan_point(domain, f, t) for t in thetas]
+    cumulative = [0.0]
+    for i in range(1, len(points)):
+        cumulative.append(cumulative[-1] + math.hypot(
+            points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]))
+    return thetas, cumulative
+
+
+def _theta_at_length(thetas: List[float], cumulative: List[float], s: float) -> float:
+    """The theta whose cumulative plan arc length, measured from theta =
+    0 around _arc_length_samples's own polyline, is s; s wraps into
+    [0, total). Linear interpolation within the bracketing sample pair,
+    which is exact wherever the true boundary is straight there and a
+    close approximation everywhere else at ANGLE_SAMPLES resolution (0.5
+    degree steps) -- more than fine enough for placing a masonry head
+    joint.
+    """
+
+    total = cumulative[-1]
+    s = s % total
+    lo, hi = 0, len(cumulative) - 1
+    while lo + 1 < hi:
+        mid = (lo + hi) // 2
+        if cumulative[mid] <= s:
+            lo = mid
+        else:
+            hi = mid
+    span = cumulative[hi] - cumulative[lo]
+    fraction = (s - cumulative[lo]) / span if span > 1e-15 else 0.0
+    return thetas[lo] + fraction * (thetas[hi] - thetas[lo])
+
+
+def _uniform_arc_divisions(length: float, target: float) -> int:
+    """How many equal length pieces to cut a course's own full-loop arc
+    into, near target size (2026-08-18, row-uniform courses fix).
+
+    ceil(length / target): every piece comes out at or under target,
+    never over -- "slightly under target", the fix contract's own words,
+    not an accident of rounding. max(1, ...) is also, for what this
+    generator actually ever calls this with, the whole of the fix
+    contract's "an arc shorter than half the target merges into its
+    neighbour's division" rule: bonded_courses only ever hands this
+    function a course's own full 2*pi loop (measured directly: no
+    opening/interruption mechanism exists anywhere in domain.py,
+    generators.py or tessellation.py, see
+    .superpowers/sdd/2026-08-18-rim-spikes/diagnosis.md), so there is
+    never a second, neighbouring arc within the same course to merge a
+    short one into. A course shorter than half the target simply becomes
+    the one piece it already would under max(1, ...), rather than being
+    forced into a multi-way split with no piece anywhere near the size
+    actually asked for -- the one-arc special case of the general rule,
+    named here rather than left implicit.
+    """
+
+    if length <= 1e-9:
+        return 1
+    return max(1, math.ceil(length / target - 1e-9))
+
+
 def _divisions(
     domain: Dict, size: float, courses: int, course: int
 ) -> Tuple[int, float, List[float]]:
-    """One course's piece count, its stagger offset, and its head joint angles."""
+    """One course's piece count and its own head joint angles, spaced at
+    UNIFORM ARC LENGTH (2026-08-18, row-uniform courses fix) rather than
+    uniform angle.
+
+    Equal angular steps only give equal PLAN length on a true circle: a
+    real vault plan is not one, and dividing it into equal angles instead
+    of equal lengths is exactly what let pieces within one course come out
+    anywhere from far short of the target to several times over it.
+    Measured on the real Trial 2 export at 0.4 m under the OLD angle-
+    uniform rule: course 0 alone ran 0.163 m to 2.239 m within a single
+    course, a 13.8x max/min ratio (full table:
+    .superpowers/sdd/2026-08-18-rim-spikes/diagnosis.md). Sampling arc
+    length at this course's own mid radius (the same reference radius the
+    piece COUNT was already computed from, below) and placing head joints
+    at equal steps of that length, then converting each step back to its
+    own angle, fixes it: every piece in the course comes out the same
+    length at the sampled radius, by construction.
+
+    The returned "offset" is now angles[0] itself (the first head joint's
+    own angle) rather than a separately meaningful half-angle stagger:
+    callers that used to reconstruct a piece's own start/end from
+    `offset + TWO_PI * k / count` must instead read angles[k] and
+    angles[k + 1] directly, since the steps are no longer uniform in
+    angle. The stagger itself is now a genuine half-PIECE-LENGTH offset on
+    alternating courses (length_offset below) -- an actual half-brick
+    stagger, the physical point of running bond, in place of the old
+    half-angle one.
+    """
+
     mid_f = 1.0 - (course + 0.5) / courses
-    count = max(1, int(math.floor(_circumference(domain, mid_f) / size + 0.5)))
-    offset = (course % 2) * math.pi / count
-    angles = [offset + TWO_PI * k / count for k in range(count)]
-    return count, offset, angles
+    thetas, cumulative = _arc_length_samples(domain, mid_f)
+    total = cumulative[-1]
+    count = _uniform_arc_divisions(total, size)
+    piece_length = total / count
+    length_offset = (course % 2) * (piece_length / 2.0)
+    angles = [
+        _theta_at_length(thetas, cumulative, length_offset + k * piece_length)
+        for k in range(count)
+    ]
+    return count, angles[0], angles
 
 
 def _ring(domain: Dict, f: float) -> List[List[float]]:
@@ -275,11 +378,16 @@ def bonded_courses(domain: Dict, size: float) -> List[Dict]:
     for course in range(courses):
         outer_f = 1.0 - course / courses
         inner_f = 1.0 - (course + 1) / courses
-        count, offset, _ = all_divisions[course]
+        count, _offset, angles = all_divisions[course]
 
         for k in range(count):
-            start = offset + TWO_PI * k / count
-            end = offset + TWO_PI * (k + 1) / count
+            # Row-uniform courses fix (2026-08-18): angles[k]..angles[k+1]
+            # is this piece's own span, at UNIFORM ARC LENGTH rather than
+            # uniform angle -- see _divisions. The last piece wraps back to
+            # angles[0] plus one full turn, the same convention the old
+            # offset + TWO_PI * (k + 1) / count expression used at k = count - 1.
+            start = angles[k]
+            end = angles[k + 1] if k + 1 < count else angles[0] + TWO_PI
 
             outline = _arc(domain, outer_f, start, end, shared[course])
             if inner_f > 1e-12:

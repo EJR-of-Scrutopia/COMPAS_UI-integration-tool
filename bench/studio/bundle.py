@@ -73,6 +73,14 @@ REQUIRED_BUNDLE_KEYS = (
     # this field's presence implies about the rest of the report; treating
     # it as stale forces a re-cut rather than a mismatched read.
     "tessellation.projected_points",
+    # Rim-rectangular fix (2026-08-18): landed after projected_points. A
+    # bundle cut before this task shipped every off-mesh cap point at its
+    # own unprojected plan position (only the sample moved, see
+    # cutting.Surface.lift and pieces._lift); its piece outlines are
+    # exactly the shape this fix corrects, so a bundle missing this field
+    # is stale in the same way one missing clamped_max_m or seat_gap_stats
+    # already is.
+    "tessellation.degenerate_dropped",
 )
 
 

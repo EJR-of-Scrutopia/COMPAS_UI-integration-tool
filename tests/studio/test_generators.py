@@ -45,6 +45,142 @@ def disc_domain(radius=5.0, sides=48):
     }
 
 
+def saddle_domain():
+    """The real saddle fixture's own plan domain
+    (tests/fixtures/saddle_contract.json): a plain, convex square rim (no
+    rim wobble at all, backward_steps == 0). Used by the row-uniform
+    courses fix (2026-08-18) to test piece-length uniformity on geometry
+    with no notch to confound the measurement: the real Trial 2 domain's
+    own worst outliers are dominated by a separate, out-of-scope defect
+    (.superpowers/sdd/2026-08-18-rim-spikes/diagnosis.md names it
+    mechanism A), which this convex fixture cannot exercise at all.
+    """
+    g = studio("geometry")
+    d = studio("domain")
+    contract = g.load_contract(REPO / "tests" / "fixtures" / "saddle_contract.json")
+    arrays = g.mesh_arrays(contract)
+    centroids = g.face_centroids(arrays["vertices"], arrays["faces"])
+    return d.plan_domain(arrays["vertices"], arrays["faces"], centroids)
+
+
+def _length_at_theta(thetas, cumulative, theta):
+    """Forward lookup, the inverse direction of generators._theta_at_length,
+    reimplemented independently here (not calling into generators.py) so
+    a round trip through both actually checks something."""
+
+    two_pi = 2.0 * math.pi
+    theta = theta % two_pi
+    lo, hi = 0, len(thetas) - 1
+    while lo + 1 < hi:
+        mid = (lo + hi) // 2
+        if thetas[mid] <= theta:
+            lo = mid
+        else:
+            hi = mid
+    span = thetas[hi] - thetas[lo]
+    fraction = (theta - thetas[lo]) / span if span > 1e-15 else 0.0
+    return cumulative[lo] + fraction * (cumulative[hi] - cumulative[lo])
+
+
+def test_uniform_arc_divisions_states_the_sliver_merge_rule():
+    """generators._uniform_arc_divisions pins the fix contract's own
+    division-count rule: ceil(length / target), so every piece comes out
+    at or under target (never over), and a length under the target
+    already collapses to the single piece max(1, ...) guarantees -- the
+    one-arc special case of "an arc shorter than half the target merges
+    into its neighbour's division" this generator ever reaches.
+    bonded_courses never hands a course anything but its own full 2*pi
+    loop (no opening/interruption mechanism exists anywhere in domain.py,
+    generators.py or tessellation.py -- see
+    .superpowers/sdd/2026-08-18-rim-spikes/diagnosis.md), so there is
+    never a second, neighbouring arc within one course to merge a short
+    one into; this is the whole of that rule reachable through the
+    generator, pinned directly against the helper rather than through an
+    unreachable multi-arc scenario.
+    """
+
+    g = studio("generators")
+    # Exactly divisible: no remainder to speak of.
+    assert g._uniform_arc_divisions(4.0, 1.0) == 4
+    # Just under a whole multiple: still rounds up, not down.
+    assert g._uniform_arc_divisions(3.99, 1.0) == 4
+    # Just over: one more division, every piece slightly under target.
+    assert g._uniform_arc_divisions(4.01, 1.0) == 5
+    # A short arc -- well under half the target -- becomes the ONE piece
+    # it already would under max(1, ...), not a forced multi-way split
+    # with no piece anywhere near the size actually asked for.
+    assert g._uniform_arc_divisions(0.3, 1.0) == 1
+    assert g._uniform_arc_divisions(0.5, 1.0) == 1
+    # A degenerate (zero) arc is still one piece, never zero.
+    assert g._uniform_arc_divisions(0.0, 1.0) == 1
+
+
+def test_within_course_pieces_are_exact_equal_arc_length():
+    """The primary invariant the row-uniform courses fix promises: every
+    piece within one course's own contiguous arc is the SAME arc length,
+    to within floating point precision. Checked with an independent
+    forward length lookup (_length_at_theta above, not generators.py's
+    own _theta_at_length) against generators._arc_length_samples's table,
+    on both the near-circular disc_domain and the real, non-circular,
+    convex saddle domain -- the round trip through two independent
+    implementations is what makes this a real check rather than reading
+    the same computation back at itself.
+    """
+
+    g = studio("generators")
+    for label, domain, size in (
+        ("disc", disc_domain(), 1.0), ("saddle", saddle_domain(), 0.5),
+    ):
+        courses = g._course_count(domain, size)
+        for course in range(courses):
+            count, offset, angles = g._divisions(domain, size, courses, course)
+            mid_f = 1.0 - (course + 0.5) / courses
+            thetas, cumulative = g._arc_length_samples(domain, mid_f)
+            total = cumulative[-1]
+            piece_length = total / count
+
+            lengths = [_length_at_theta(thetas, cumulative, a) for a in angles]
+            lengths.append(_length_at_theta(thetas, cumulative, angles[0]) + total)
+            steps = [lengths[i + 1] - lengths[i] for i in range(count)]
+            for step in steps:
+                assert step == pytest.approx(piece_length, rel=1e-9, abs=1e-9), (
+                    label, course, steps)
+
+
+def test_within_course_piece_lengths_stay_within_a_bound_on_the_saddle_fixture():
+    """The drawn geometry's own chord length, not merely the arc-length
+    table's internal invariant above: on the real, convex saddle domain
+    (no rim wobble, no notch), within a course, the ratio between the
+    longest and shortest piece stays within 1.5 -- comfortably above the
+    only source of variation a convex fixture like this can show, the
+    sqrt(2) ratio between a square's own edge-midpoint and corner radii
+    (measured directly: 1.4141, the piece straddling each of the square's
+    4 real corners, where a straight bed-joint chord genuinely undercuts
+    the arc length it was allocated). Course-to-course variation is
+    expected and out of scope; this bounds only WITHIN one course's own
+    arc, per the fix contract.
+    """
+
+    g = studio("generators")
+    d = studio("domain")
+    domain = saddle_domain()
+    size = 0.5
+    courses = g._course_count(domain, size)
+    two_pi = 2.0 * math.pi
+    for course in range(courses):
+        count, offset, angles = g._divisions(domain, size, courses, course)
+        mid_f = 1.0 - (course + 0.5) / courses
+        lengths = []
+        for k in range(count):
+            start = angles[k]
+            end = angles[k + 1] if k + 1 < count else angles[0] + two_pi
+            a = d.plan_point(domain, mid_f, start)
+            b = d.plan_point(domain, mid_f, end)
+            lengths.append(math.hypot(a[0] - b[0], a[1] - b[1]))
+        ratio = max(lengths) / min(lengths) if min(lengths) > 0 else float("inf")
+        assert ratio <= 1.5, (course, lengths)
+
+
 def test_courses_come_from_the_target_size():
     g = studio("generators")
     tess = g.generate("bonded-courses", disc_domain(), 1.0)
@@ -61,39 +197,35 @@ def test_a_bigger_target_size_makes_fewer_pieces():
 
 
 def test_bonded_offset_rule_is_exact():
+    """Row-uniform courses fix (2026-08-18): the stagger that used to be a
+    half-ANGLE offset (course % 2) * pi / count is now a half-PIECE-LENGTH
+    offset (generators._divisions), the actual physical point of running
+    bond -- shifting alternate courses by half a brick, not half a degree.
+    There is no closed form angle expression for that any more on a
+    general (non-circular) domain, so this is checked against the
+    module's own arc-length machinery directly: even courses are
+    unstaggered (their first head joint sits at theta = 0 exactly), and
+    an odd course's own offset is exactly the angle
+    generators._theta_at_length places half a piece-length along the
+    course's own mid-radius circumference -- the offset IS that
+    inversion, not merely close to it.
+    """
     g = studio("generators")
-    tess = g.generate("bonded-courses", disc_domain(), 1.0)
-    points = tess["points"]
+    domain = disc_domain()
+    size = 1.0
+    courses = g._course_count(domain, size)
 
-    # Group cells by course
-    by_course = {}
-    for cell in tess["cells"]:
-        by_course.setdefault(cell["course"], []).append(cell)
-
-    TWO_PI = 2.0 * math.pi
-
-    # For each course, check that the first piece's start angle equals the expected offset
-    for course in sorted(by_course.keys()):
-        cells_in_course = sorted(by_course[course], key=lambda c: int(c["key"].split("p")[1]))
-        count = len(cells_in_course)
-
-        # Get the first piece and its first point (start of outer arc)
-        first_cell = cells_in_course[0]
-        outline = first_cell["outline"]
-        first_point = points[outline[0]]
-
-        # Compute the angle of the first point
-        angle = math.atan2(first_point[1], first_point[0])
-
-        # Expected offset: (c % 2) * pi / count
-        expected = (course % 2) * math.pi / count
-
-        # Handle wrap-around: angles are equivalent if they differ by 2*pi
-        angle_diff = abs(angle - expected)
-        angle_diff = min(angle_diff, TWO_PI - angle_diff)
-
-        assert angle_diff < 1e-12, \
-            f"Course {course}: first piece at angle {angle}, expected {expected}"
+    for course in range(courses):
+        count, offset, angles = g._divisions(domain, size, courses, course)
+        assert offset == angles[0]
+        mid_f = 1.0 - (course + 0.5) / courses
+        thetas, cumulative = g._arc_length_samples(domain, mid_f)
+        piece_length = cumulative[-1] / count
+        expected_offset = g._theta_at_length(
+            thetas, cumulative, (course % 2) * (piece_length / 2.0))
+        assert offset == expected_offset
+        if course % 2 == 0:
+            assert offset == 0.0
 
 
 def test_adjacent_courses_have_different_divisions():
@@ -215,36 +347,80 @@ SWEEP_SIZES = (0.30, 0.35, 0.45, 0.50, 0.90, 1.50, 3.00)
 # plus or minus 125.4 degree notch while their inner boundary is a straight
 # chord that passes outside it. At every other swept size, on both
 # generators, nothing folds. See domain.WOBBLE_TOLERANCE's own note.
+#
+# Row-uniform courses fix (2026-08-18): _divisions now places head joints
+# at equal ARC LENGTH rather than equal angle (generators._divisions), so
+# which exact theta values land inside the same plus/minus 125.4 degree
+# notch -- and therefore which specific cells fold there -- moved. Re-swept
+# on the same committed domain: 0.50 m is now clean (was 2 folded cells
+# before this fix); 0.30, 0.35 and 0.45 m still fold, at different cells
+# than before. Full 55-size sweep (both generators, 0.30 to 3.00 m in
+# 0.05 m steps) confirms these three sizes are the only ones affected on
+# bonded-courses, and monolithic-bands is clean at every size on the
+# slider -- it never calls _divisions at all (see monolithic_bands's own
+# code), so ask 2's division-uniformity fix cannot move anything about it,
+# and measurement confirms it does not.
 TRIAL_2_FOLDS = {
-    (0.30, "bonded-courses"): ["c10p34", "c10p65", "c4p102", "c4p54",
-                               "c5p51", "c5p95"],
-    (0.35, "bonded-courses"): ["c0p108", "c0p58", "c9p27", "c9p52"],
-    (0.45, "bonded-courses"): ["c5p27", "c5p52"],
-    (0.50, "bonded-courses"): ["c0p40", "c0p74"],
+    (0.30, "bonded-courses"): ["c4p57", "c4p100"],
+    (0.35, "bonded-courses"): ["c6p39", "c6p70"],
+    (0.45, "bonded-courses"): ["c2p39", "c2p70"],
+}
+
+# Row-uniform courses fix (2026-08-18): at 0.30 m (the slider's finest
+# position, 21 courses on this domain) two cells land near enough to the
+# same plus/minus 125.4 degree notch, from two independently-computed
+# courses' own nearby-but-different division angles, that their welded
+# outline crosses itself with two lobes close enough in area to read as a
+# near-zero ALGEBRAIC area rather than a comfortable positive one --
+# build_tessellation's own if/elif (a cell is either a sliver or folded,
+# never both, the sliver check running first) claims them as slivers, not
+# folds. Not present anywhere on the OLD angle-uniform rule's own 0.30 m
+# cut (which instead folded a different six cells, all without tripping
+# the sliver check); not present at any of the other 54 sizes on the
+# slider under the new rule either.
+TRIAL_2_SLIVERS = {
+    (0.30, "bonded-courses"): ["c1p67", "c1p118"],
 }
 
 
 def _folded_by_measurement(tess):
-    """Every cell whose own welded rings cross themselves, measured here
-    rather than taken from the report, so the report's folded list is
-    checked against geometry instead of against itself."""
+    """Every cell whose own welded rings cross themselves and were not
+    already claimed as a sliver, measured here rather than taken from the
+    report, so the report's folded list is checked against geometry
+    instead of against itself.
+
+    A cell is either a sliver or folded, never both
+    (tessellation.build_tessellation's own if/elif: the sliver check, on
+    algebraic area, runs first): a bow tie whose two lobes happen to be
+    near equal size measures a near-zero algebraic area too, so the
+    sliver check claims it before the fold check ever runs. Excluding
+    report["slivers"] here matches that same precedence rather than
+    relaxing this check; the row-uniform courses fix (2026-08-18) is what
+    first produced a real case of it, at 0.30 m (see TRIAL_2_SLIVERS).
+    """
 
     t = studio("tessellation")
     points = tess["points"]
+    slivers = set(tess["report"]["slivers"])
     return sorted(
         cell["key"]
         for cell in tess["cells"]
-        if any(
+        if cell["key"] not in slivers
+        and any(
             not t._is_simple([points[i] for i in ring])
             for ring in [cell["outline"]] + list(cell["holes"])
         )
     )
 
 
-def _assert_conforms(tess, where):
+def _assert_conforms(tess, where, expected_slivers=()):
     report = tess["report"]
-    for key in ("coverage_holes", "open_facets", "slivers", "broken_boundary"):
+    for key in ("coverage_holes", "open_facets", "broken_boundary"):
         assert report[key] == [], "{}: {} is not empty".format(where, key)
+    assert sorted(report["slivers"]) == sorted(expected_slivers), (
+        "{}: slivers {} do not match the expected {}".format(
+            where, report["slivers"], expected_slivers)
+    )
 
 
 @pytest.mark.parametrize("size", SWEEP_SIZES)
@@ -270,7 +446,7 @@ def test_a_generated_cut_conforms_at_every_size_on_the_real_domain(pattern, size
     tess = g.generate(pattern, fixture["domain"], size)
     where = "{} at {}".format(pattern, size)
 
-    _assert_conforms(tess, where)
+    _assert_conforms(tess, where, TRIAL_2_SLIVERS.get((size, pattern), ()))
     measured = _folded_by_measurement(tess)
     assert sorted(tess["report"]["folded"]) == measured, (
         "{}: the folded list and the geometry disagree".format(where)
@@ -332,23 +508,23 @@ def test_course_zero_outline_simplifies_against_the_boundary():
     joints, one drawn boundary point per mesh vertex -- the
     one-piece-per-boundary-vertex fragmentation the cutting truth spec
     names. Measured on the real Trial 2 domain at the studio's own
-    default size (0.9 m): before this fix, course 0's 62 pieces carried
-    538 outline points between them (8.68 per piece, git history: this
-    exact figure, from the trial-2-tessellation.json fixture this test
-    reads, before the boundary-simplification commit); simplifying the
+    default size (0.9 m): before that fix, course 0's 62 pieces carried
+    538 outline points between them (8.68 per piece); simplifying the
     rim-following stretch of each piece's own outline against
-    cutting.CHORD_TARGET drops that to 358 (5.77 per piece), a genuine
+    cutting.CHORD_TARGET dropped that to 358 (5.77 per piece), a genuine
     35 percent cut, not a rounding accident.
 
-    Piece COUNT itself does not, and structurally cannot, change from this
-    fix: _course_count/_divisions size every course from the plan's own
-    measured circumference and the target size alone (720 angle samples,
-    fixed), never from how many boundary vertices the underlying mesh
-    happens to carry. What the spec's "ending the one-piece-per-boundary-
-    vertex fragmentation" language names, and what this test actually
-    pins, is each piece's own outline complexity -- the fragmentation a
-    reader sees in a single rim casting's own facet count -- not the
-    number of castings in the course.
+    Piece count and outline totals moved again with the row-uniform
+    courses fix (2026-08-18): _divisions now sizes every course by equal
+    ARC LENGTH rather than equal angle (see generators._divisions and
+    .superpowers/sdd/2026-08-18-rim-spikes/diagnosis.md), and
+    _uniform_arc_divisions's ceil (rather than the old round-to-nearest)
+    means a course's own piece count is no longer identical to before
+    either. Re-measured on the same committed domain and size: course 0
+    now carries 63 pieces and 370 outline points between them (5.87 per
+    piece) -- still well under the pre-simplification 538/8.68 baseline,
+    confirming the boundary simplification this test is really about is
+    still doing its job under the new division rule.
     """
 
     g = studio("generators")
@@ -357,9 +533,9 @@ def test_course_zero_outline_simplifies_against_the_boundary():
     )
     tess = g.generate(fixture["pattern"], fixture["domain"], fixture["size"])
     course0 = [cell for cell in tess["cells"] if cell["course"] == 0]
-    assert len(course0) == 62
+    assert len(course0) == 63
     total = sum(len(cell["outline"]) for cell in course0)
-    assert total == 358
+    assert total == 370
     assert total < 538 * 0.8, "a real reduction in rim outline density, not a rounding accident"
 
 

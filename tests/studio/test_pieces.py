@@ -476,6 +476,86 @@ def test_clamped_points_are_disclosed_in_metres_not_only_counted():
     assert 0.0 < report["clamped_median_m"] <= report["clamped_max_m"]
 
 
+def test_rim_corners_snap_onto_the_boundary_in_plan_on_the_saddle_surface():
+    """Rim-rectangular fix (2026-08-18), ask 1: an outline point whose plan
+    position falls outside the surface's support now moves ONTO the
+    boundary polyline in plan, not merely samples its z/normal/weights
+    there (cutting.Surface.lift, pieces._lift). Same overhang pattern as
+    test_clamped_points_are_disclosed_in_metres_not_only_counted, on the
+    saddle surface (doubly curved, the Cutting Truth wave's own Task 1
+    fixture, tests/fixtures/saddle_contract.json's exact z formula) with a
+    boundary attached this time, so the K3 projection engages instead of
+    the last-resort clamp: the far edge, which used to sit overhang metres
+    past the surface, now sits ON it.
+    """
+
+    p = studio("pieces")
+    t = studio("tessellation")
+    surface, _, _ = saddle_surface()           # [-2, 2] squared
+    surface.boundary = [[-2.0, -2.0], [2.0, -2.0], [2.0, 2.0], [-2.0, 2.0]]
+    overhang = 0.05
+    tess = t.build_tessellation(
+        [{
+            "key": "over", "course": 0,
+            "outline": [[-2.0, -2.0], [2.0 + overhang, -2.0],
+                        [2.0 + overhang, 2.0], [-2.0, 2.0]],
+            "holes": [],
+        }],
+        "test", "generated", 4.0, 1,
+    )
+    made, report = p.segment_pieces(tess, surface, [])
+    assert made
+    assert report["clamped_points"] == 0
+    assert report["projected_points"] > 0
+
+    for piece in made:
+        for point in piece["mid"]:
+            assert -2.0 - 1e-6 <= point[0] <= 2.0 + 1e-6, piece["key"]
+            assert -2.0 - 1e-6 <= point[1] <= 2.0 + 1e-6, piece["key"]
+
+
+def test_a_piece_that_collapses_below_three_corners_is_dropped_and_disclosed():
+    """Rim-rectangular fix (2026-08-18): guard degeneracy. This cell's own
+    four raw corners form a real 0.02 m square (a genuine shape, not
+    already a sliver), sitting entirely past the top right corner of the
+    surface's own unit-square footprint in both x and y. Every one of the
+    four is nearer to that single corner (1, 1) than to either adjacent
+    edge, so all four project onto the identical nearest boundary point.
+    After the move, this "cell" has exactly one distinct corner left --
+    nowhere near the 3 a polygon needs -- so it is dropped entirely rather
+    than shipped as a degenerate or self-overlapping casting, and its key
+    is disclosed in report["degenerate_dropped"], not silently omitted.
+    """
+
+    p = studio("pieces")
+    t = studio("tessellation")
+    surface = flat_surface(width=1.0, height=1.0, nx=4, ny=4)
+    surface.boundary = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+
+    tess = t.build_tessellation(
+        [{
+            "key": "collapsing", "course": 0,
+            "outline": [
+                [1.05, 1.05], [1.03, 1.05], [1.03, 1.03], [1.05, 1.03],
+            ],
+            "holes": [],
+        }],
+        "test", "generated", 1.0, 1,
+    )
+    made, report = p.segment_pieces(tess, surface, [])
+    assert made == []
+    assert report["degenerate_dropped"] == ["collapsing"]
+
+
+def test_a_normal_piece_ships_with_no_degenerate_drops():
+    """The guard degeneracy fix must not fire on ordinary geometry: the
+    four cell fixture's own report carries an empty, present (not absent)
+    degenerate_dropped list."""
+
+    _, report = build()
+    assert report["degenerate_dropped"] == []
+
+
 def test_fit_seat_plane_is_none_on_a_genuinely_degenerate_line():
     """Minor, fix round 1 on K2 (2026-08-17): four collinear points have a
     diagonal covariance matrix with TWO tied zero-variance axes (y and z
@@ -804,8 +884,122 @@ def test_rim_points_project_to_the_boundary_on_the_real_trial_2_plan():
     # was ever off the mesh to begin with (contrast
     # test_a_clamp_free_cut_reports_no_magnitude_at_all).
     assert report["projected_points"] > 0
-    # The same worst displacement Task 1 measured on the real export: this
-    # fixture's surface tiles the real plan exactly, so radius_at's own
-    # outermost-crossing rule reproduces the true worst-case distance from
-    # the real rim here, not merely something of the same order.
-    assert report["projected_max_m"] == pytest.approx(0.052321, abs=1e-4)
+    # Row-uniform courses fix (2026-08-18): generators._divisions now
+    # places head joints at equal ARC LENGTH rather than equal angle, so
+    # course 0's own piece boundaries (and with them, which exact points
+    # need the boundary-polyline projection at all) moved from the K3
+    # baseline this test used to pin (0.052321 m). Re-measured on this
+    # same fixture, same size, after that fix: 0.046405 m. Still the same
+    # order as the K3 baseline (both are governed by the same real rim
+    # notch), not a coincidental match to the old number.
+    assert report["projected_max_m"] == pytest.approx(0.046405, abs=1e-4)
+
+
+def _point_in_loop(loop, x, y):
+    inside = False
+    n = len(loop)
+    for i in range(n):
+        ax, ay = loop[i]
+        bx, by = loop[(i + 1) % n]
+        if (ay > y) != (by > y):
+            crossing = ax + (y - ay) * (bx - ax) / (by - ay)
+            if crossing > x:
+                inside = not inside
+    return inside
+
+
+def _nearest_point_on_loop(loop, x, y):
+    import math
+    best_d = None
+    best_p = None
+    n = len(loop)
+    for i in range(n):
+        a, b = loop[i], loop[(i + 1) % n]
+        ex, ey = b[0] - a[0], b[1] - a[1]
+        length2 = ex * ex + ey * ey
+        if length2 < 1e-24:
+            near = (a[0], a[1])
+        else:
+            t = min(1.0, max(0.0, ((x - a[0]) * ex + (y - a[1]) * ey) / length2))
+            near = (a[0] + t * ex, a[1] + t * ey)
+        d = (x - near[0]) ** 2 + (y - near[1]) ** 2
+        if best_d is None or d < best_d:
+            best_d = d
+            best_p = near
+    return best_p
+
+
+def test_no_drawn_cap_point_sits_outside_the_true_rim_on_the_real_trial_2_plan():
+    """The real-export spot check the rim-rectangular fix's own testing
+    contract asks for: every cap point cutting.Surface.lift actually
+    PROJECTS (found["projected"] is True -- the population this fix
+    moves) must land on the true plan boundary polygon, within 1e-6 m, on
+    this real, notched, 240-vertex rim.
+
+    Deliberately narrower than "every point piece["mid"] ships": a point
+    that lands on the render mesh unaided (never projected at all) can
+    still sit up to CHORD_TARGET away from the true curved rim by
+    construction -- that is what course 0's own boundary simplification
+    tolerance means (see generators._simplify_boundary_run and
+    docs/BENCH.md's K3 section) -- and this fix does not touch that
+    population or its own, already-disclosed tolerance. What this fix
+    promises, and what this test checks, is narrower and unconditional:
+    whatever DID need the boundary-polyline projection sits ON the true
+    boundary afterward.
+    """
+
+    g = studio("generators")
+    p = studio("pieces")
+    cutting = studio("cutting")
+    domain = trial2_domain()
+    surface = trial2_surface(domain)
+    loop = domain["loop"]
+    tess = g.generate("bonded-courses", domain, 0.9)
+
+    chosen = p.choose_rounds(tess, surface)
+    rounds = chosen["rounds"]
+    checked = 0
+    for cell in tess["cells"]:
+        points, triangles, _chains = p._cap(tess, cell, rounds)
+        used = sorted({index for triangle in triangles for index in triangle})
+        for index in used:
+            plan = points[index]
+            found = surface.lift(plan[0], plan[1])
+            if not found["projected"]:
+                continue
+            checked += 1
+            near = _nearest_point_on_loop(loop, found["x"], found["y"])
+            distance = math.hypot(found["x"] - near[0], found["y"] - near[1])
+            assert distance <= 1e-6, (cell["key"], plan, found["x"], found["y"], distance)
+    # The fixture must actually exercise points that needed the move (see
+    # trial2_surface's own docstring): a check that only ever sees points
+    # already on the mesh proves nothing about the fix.
+    assert checked > 0
+
+
+def test_an_untriangulatable_cell_is_dropped_not_crashed():
+    """Rim-rectangular fix (2026-08-18): row-uniform courses (equal arc
+    length division) moves which real mesh geometry lands inside which
+    piece. On the real Trial 2 domain at 0.30 m (the piece-size slider's
+    finest position), two course-1 cells near the same rim notch
+    domain.WOBBLE_TOLERANCE already names (c1p67, c1p118) come out both
+    near-zero area AND topologically self-crossing -- degenerate enough
+    that cutting.ear_clip finds no ear at all, not merely a self-crossing
+    ring it can still triangulate inside out (the ordinary "folded" case
+    tessellation.py's own report already names and draws). Before this
+    fix, that raised out of pieces.segment_pieces and crashed the whole
+    cut; now it is caught, the piece is dropped, and its key is disclosed
+    in report["degenerate_dropped"] -- the same guard-degeneracy
+    machinery, one step earlier, before any outline point has even been
+    lifted.
+    """
+
+    g = studio("generators")
+    p = studio("pieces")
+    domain = trial2_domain()
+    surface = trial2_surface(domain)
+    tess = g.generate("bonded-courses", domain, 0.30)
+    made, report = p.segment_pieces(tess, surface, [])
+    assert made
+    assert set(report["degenerate_dropped"]) >= {"c1p67", "c1p118"}
+    assert all(piece["key"] not in report["degenerate_dropped"] for piece in made)

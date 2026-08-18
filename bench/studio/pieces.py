@@ -205,7 +205,19 @@ def _chord_deviation(tess: Dict, surface: cutting.Surface, rounds: int) -> float
 def _lift(surface: cutting.Surface, plan) -> Dict:
     found = surface.lift(plan[0], plan[1])
     return {
-        "point": [plan[0], plan[1], found["z"]],
+        # Rim-rectangular fix (2026-08-18): found["x"]/found["y"] are the
+        # surface's own account of where this sample actually sits in plan
+        # -- the ORIGINAL plan[0]/plan[1] when the point landed on the mesh
+        # unaided or was clamped, or the boundary-projected position when
+        # the point was off the mesh and a boundary polyline was attached.
+        # Before this fix this used plan[0]/plan[1] unconditionally, so a
+        # cap point genuinely off the render mesh sampled its z/normal/
+        # weights on the true rim but still shipped at its own unprojected
+        # (x, y): the corner sat where domain.radius_at's outermost-
+        # crossing rule placed it, not where it was actually sampled. See
+        # cutting.Surface.lift and .superpowers/sdd/2026-08-18-rim-spikes/
+        # diagnosis.md.
+        "point": [found["x"], found["y"], found["z"]],
         "normal": found["normal"],
         "weights": found["weights"],
         "clamped": found["clamped"],
@@ -558,6 +570,28 @@ def fit_seat_plane(points: Sequence[Sequence[float]], reference_normal: Sequence
     return [cx, cy, cz], list(normal)
 
 
+def _distinct_ring(points: Sequence[Sequence[float]], tol: float = tessellation.TOL) -> List[List[float]]:
+    """points with consecutive near-duplicates collapsed, and the closing
+    duplicate (if the ring comes back to its own start) dropped too.
+
+    A minimum EDGE LENGTH, not a point count: the rim-rectangular fix
+    (2026-08-18) can move an off-mesh corner onto the boundary polyline
+    (cutting.Surface.lift's projection, consumed by _lift above), and in a
+    tight notch two corners that started metres apart in angle can land on
+    the identical boundary point. tessellation.TOL is reused rather than a
+    new number: it is this codebase's own existing "the same point" weld
+    tolerance, the one PointWeld already welds plan corners within.
+    """
+
+    out: List[List[float]] = []
+    for point in points:
+        if not out or math.hypot(point[0] - out[-1][0], point[1] - out[-1][1]) > tol:
+            out.append(list(point))
+    if len(out) > 1 and math.hypot(out[0][0] - out[-1][0], out[0][1] - out[-1][1]) <= tol:
+        out.pop()
+    return out
+
+
 def segment_pieces(
     tess: Dict,
     surface: cutting.Surface,
@@ -603,10 +637,29 @@ def segment_pieces(
     facet_counts: List[int] = []
     boundary_counts: List[int] = []
     piece_courses: List[int] = []
+    degenerate_dropped: List[str] = []
     out: List[Dict] = []
 
     for cell in tess["cells"]:
-        points, triangles, chains = _cap(tess, cell, rounds)
+        try:
+            points, triangles, chains = _cap(tess, cell, rounds)
+        except ValueError:
+            # Rim-rectangular fix (2026-08-18): a cell degenerate enough
+            # that cutting.ear_clip finds no ear at all (not merely a
+            # self-crossing ring it can still triangulate inside out, the
+            # existing "folded" case tessellation.py's own report already
+            # names) is the same shape of defect the outline-corner
+            # collapse below guards, just caught one step earlier, before
+            # any outline point of this cell has even been lifted. Same
+            # remedy: drop the piece, disclose the key, do not crash the
+            # whole cut over one degenerate corner of a real, irregular
+            # mesh. Measured: at 0.30 m (the piece-size slider's finest
+            # position) on the real Trial 2 export, two cells near the
+            # same rim notch domain.WOBBLE_TOLERANCE already names
+            # (c1p67, c1p118) are both this degenerate; see
+            # .superpowers/sdd/2026-08-18-rim-spikes/diagnosis.md.
+            degenerate_dropped.append(cell["key"])
+            continue
         used = sorted({index for triangle in triangles for index in triangle})
         position = {index: i for i, index in enumerate(used)}
         lifted = {index: _lift(surface, points[index]) for index in used}
@@ -619,6 +672,21 @@ def segment_pieces(
 
         mid = {index: list(lifted[index]["point"]) for index in used}
         normals = {index: list(lifted[index]["normal"]) for index in used}
+
+        # Rim-rectangular fix (2026-08-18): guard degeneracy. _lift can
+        # move a corner that landed off the render mesh onto the boundary
+        # polyline; in a tight notch two or more of this cell's own
+        # corners can collapse onto the very same boundary point. A ring
+        # is a real shape only with at least 3 distinct corners left after
+        # that collapse. A cell that degenerates below that is dropped
+        # entirely -- not shipped as a self-overlapping or zero-area
+        # casting -- and named, not silently omitted, in
+        # report["degenerate_dropped"] below.
+        outline_shape = _distinct_ring([mid[i][:2] for i in cell["outline"]])
+        hole_shapes = [_distinct_ring([mid[i][:2] for i in hole]) for hole in cell["holes"]]
+        if len(outline_shape) < 3 or any(len(hole) < 3 for hole in hole_shapes):
+            degenerate_dropped.append(cell["key"])
+            continue
 
         facets_here = 0
         boundary_here = 0
@@ -790,6 +858,13 @@ def segment_pieces(
             "median": _median(seat_gaps),
             "max": max(seat_gaps) if seat_gaps else 0.0,
         },
+        # Rim-rectangular fix (2026-08-18): cell keys dropped because the
+        # rim-projection move above (_lift, cutting.Surface.lift) collapsed
+        # that cell's own outline (or a hole) below 3 distinct corners --
+        # see _distinct_ring's own call above. Empty on every real export
+        # measured for this fix; kept as a disclosed count rather than a
+        # silent drop, per the fix's own guard-degeneracy requirement.
+        "degenerate_dropped": degenerate_dropped,
     }
     return out, report
 

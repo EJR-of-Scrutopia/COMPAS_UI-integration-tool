@@ -348,7 +348,7 @@ class Surface:
             for a, b, c in self._triangles(self.faces[index]):
                 weights = self._barycentric(x, y, a, b, c)
                 if weights is not None and min(w for _, w in weights) >= -1e-9:
-                    return self._sample(weights, False, 0.0)
+                    return self._sample(weights, False, 0.0, x, y)
         return None
 
     def lift(self, x: float, y: float) -> Dict:
@@ -383,6 +383,25 @@ class Surface:
         # point of the boundary" wherever the render mesh's faces are not
         # small relative to the notch that put the point off the mesh in
         # the first place.
+        #
+        # Rim-rectangular fix (2026-08-18): before this fix, only the
+        # SAMPLE (z, normal, weights) moved to (px, py); the caller kept
+        # asking for the ORIGINAL (x, y) as the point's own drawn plan
+        # position (see pieces._lift), so a cap point genuinely off the
+        # render mesh still shipped at its own unprojected position. That
+        # is the gap the cutting truth wave's own retrospective correction
+        # named (docs/specs/2026-08-17-cutting-truth-design.md): "it is the
+        # sample that moves to the rim, not the point itself". _on_mesh's
+        # own _sample call below now carries (px, py) through as the
+        # returned dict's own "x"/"y", so a caller that wants the point ON
+        # the rim, not merely sampled there, can have it. Measured on the
+        # real Trial 2 export: this population (417-658 points depending on
+        # size, all in course 0) is the one this fix moves; it is not the
+        # same defect as a wrongly chosen ray crossing landing exactly on
+        # some OTHER real part of the true rim (a rarer, more severe, and
+        # separately diagnosed case -- see
+        # .superpowers/sdd/2026-08-18-rim-spikes/diagnosis.md -- which is
+        # invisible to this containment test and is not fixed here).
         if self.boundary:
             px, py = self._nearest_boundary_point(x, y)
             found = self._on_mesh(px, py)
@@ -413,8 +432,15 @@ class Surface:
         weights = self._barycentric(x, y, a, b, c) or [(a, 1.0)]
         clamped = [(index, min(1.0, max(0.0, weight))) for index, weight in weights]
         total = sum(weight for _, weight in clamped) or 1.0
+        # The last resort keeps the OLD convention: the point's own plan
+        # position is not moved, only its sample is blended from the
+        # nearest face. Rim-rectangular fix (2026-08-18) only extends the
+        # boundary-polyline projection above to move (x, y); this fallback
+        # is reached rarely (no boundary attached, or the projection above
+        # still missed the mesh) and its own reach is already disclosed via
+        # clamp_m, so it is left as it was.
         return self._sample(
-            [(i, w / total) for i, w in clamped], True, self._reach(x, y, best)
+            [(i, w / total) for i, w in clamped], True, self._reach(x, y, best), x, y
         )
 
     def _nearest_boundary_point(self, x: float, y: float) -> Tuple[float, float]:
@@ -488,7 +514,7 @@ class Surface:
             (c, _area2(pa, pb, p) / total),
         ]
 
-    def _sample(self, weights, clamped: bool, clamp_m: float) -> Dict:
+    def _sample(self, weights, clamped: bool, clamp_m: float, x: float, y: float) -> Dict:
         z = sum(self.vertices[i][2] * w for i, w in weights)
         normal = [
             sum(self.normals[i][axis] * w for i, w in weights) for axis in range(3)
@@ -509,6 +535,17 @@ class Surface:
             # even present" before reading it.
             "projected": False,
             "projected_m": 0.0,
+            # Rim-rectangular fix (2026-08-18): the plan position this
+            # sample was actually taken at -- the ORIGINAL (x, y) lift() was
+            # asked about when it landed on the mesh unaided or was clamped
+            # by the last-resort face clamp, or the PROJECTED (x, y) when
+            # the boundary-polyline projection is what found this sample.
+            # Always present (the same "no absent keys" rule clamp_m and
+            # projected_m already follow), so a caller can always ship this
+            # point's actual plan position rather than assuming its own
+            # unprojected request was correct.
+            "x": x,
+            "y": y,
         }
 
 

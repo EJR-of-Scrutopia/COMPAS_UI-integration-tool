@@ -49,9 +49,14 @@ def wide_contract():
 
     At pattern="bonded-courses", size=1.2, this yields exactly two courses:
     course 0 (rim, the outer 3-quad-wide band) binds 12 of the 16 analysis
-    faces and 8 voussoir blocks; course 1 (the inner 2x2 block) binds the
-    remaining 4 faces and 3 more blocks. Verified against the real pipeline
-    at authoring time, not asserted from the generator's arithmetic alone.
+    faces and 10 voussoir blocks; course 1 (the inner 2x2 block) binds the
+    remaining 4 faces and 3 more blocks, 13 cumulative by stage 2. Verified
+    against the real pipeline at authoring time, not asserted from the
+    generator's arithmetic alone. (Piece counts per course moved with the
+    2026-08-18 row-uniform courses fix -- generators._divisions now spaces
+    head joints by equal arc length rather than equal angle -- from 8 and
+    3 to 10 and 3; the face-binding counts, a property of the course
+    RADII rather than the piece division within them, did not move.)
     """
 
     n, span = 4, 4.0
@@ -697,10 +702,11 @@ def test_cra_subprocess_runner_reports_a_timeout_instead_of_hanging(monkeypatch)
 def test_run_staging_refuses_over_budget_stages_honestly(tmp_path, monkeypatch):
     """A stage whose block count exceeds the budget gets a null verdict.
 
-    wide_contract at pattern="bonded-courses", size=1.2 places 8 blocks in
-    stage 1 (course 0 alone) and 11 in stage 2 (course 0 plus course 1),
-    one block per occupied cell (see the wide_contract docstring).
-    Monkeypatching CRA_BLOCK_BUDGET to 9 (well below the real default; see
+    wide_contract at pattern="bonded-courses", size=1.2 places 10 blocks in
+    stage 1 (course 0 alone) and 13 in stage 2 (course 0 plus course 1),
+    one block per occupied cell (see the wide_contract docstring; row-
+    uniform courses fix, 2026-08-18, moved this from 8/11 to 10/13).
+    Monkeypatching CRA_BLOCK_BUDGET to 11 (well below the real default; see
     CRA_BLOCK_BUDGET in staging.py for the measured value) lets stage 1
     through and puts stage 2 over budget. Refusing here is honest and
     instant; letting it run would cost real solve time to reach the same
@@ -712,9 +718,9 @@ def test_run_staging_refuses_over_budget_stages_honestly(tmp_path, monkeypatch):
     geometry_path = tmp_path / "Wide-compas.json"
     geometry_path.write_text("{}", encoding="utf-8")
 
-    # Monkeypatch CRA_BLOCK_BUDGET between stage 1's 8 blocks and stage 2's
-    # 11 to trigger the over-budget check on stage 2 only.
-    monkeypatch.setattr(staging, "CRA_BLOCK_BUDGET", 9)
+    # Monkeypatch CRA_BLOCK_BUDGET between stage 1's 10 blocks and stage 2's
+    # 13 to trigger the over-budget check on stage 2 only.
+    monkeypatch.setattr(staging, "CRA_BLOCK_BUDGET", 11)
 
     cra_runner_calls = []
 
@@ -731,7 +737,7 @@ def test_run_staging_refuses_over_budget_stages_honestly(tmp_path, monkeypatch):
         runner=lambda request: {"converged": True, "message": ""},
         cra_runner=counting_cra_runner, include_cra=True,
     )
-    # The second stage has 11 blocks (> budget of 9), so it should get the
+    # The second stage has 13 blocks (> budget of 11), so it should get the
     # over-budget verdict without calling cra_runner
     stage_2_cra = document["stages"][1]["cra"]
     assert stage_2_cra["stands"] is None
@@ -742,8 +748,8 @@ def test_run_staging_refuses_over_budget_stages_honestly(tmp_path, monkeypatch):
     # study (Trial 2, measured across the whole size slider app.py allows)
     # no size reaches the budget, so "choose a larger size" would send the
     # reader to drag a slider to its end and get the same refusal.
-    assert "11 blocks exceeds" in stage_2_cra["message"]
-    assert "budget of 9" in stage_2_cra["message"]
+    assert "13 blocks exceeds" in stage_2_cra["message"]
+    assert "budget of 11" in stage_2_cra["message"]
     assert "larger" not in stage_2_cra["message"]
     # cra_runner should only have been called once (for stage 1)
     assert len(cra_runner_calls) == 1

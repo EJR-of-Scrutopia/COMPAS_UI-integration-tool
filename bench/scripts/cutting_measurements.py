@@ -64,7 +64,11 @@ EXPECTED = {
     "rim_steps_backward": 2,
     "rim_steps_total": 240,
     "backward_turn_degrees": 0.467,
-    "default_cells": 233,
+    # Rim-rectangular fix (2026-08-18): _uniform_arc_divisions's ceil
+    # (replacing the old round-to-nearest) and equal-arc-length division
+    # both move a course's own piece count; re-measured on the real Trial 2
+    # export at 0.9 m, post-fix (was 233).
+    "default_cells": 237,
     "default_courses": 7,
     "default_analysis_faces": 2400,
     # Was 2 coverage holes, 1 broken boundary entry and 1 orphan face. The
@@ -90,17 +94,22 @@ EXPECTED = {
     # (course 0's outline simplified against the boundary polyline, 538
     # points down to 358) changes which corners are welded at all, so the
     # population these figures describe moved from 695 corners to 515.
-    # Re-measured on the same real Trial 2 export at 0.9 m, post-K3.
-    "residual_count": 515,
-    "residual_median": 0.0316,
-    "residual_mean": 0.0414,
-    "residual_p99": 0.2548,
-    "residual_max": 0.3295,
-    "residual_over_0.01": 414,
-    "residual_over_0.05": 140,
-    "residual_over_0.1": 42,
-    "residual_over_0.2": 10,
-    "residual_over_0.3": 2,
+    #
+    # Rim-rectangular fix (2026-08-18): both K1's row-uniform courses (piece
+    # count and division moved, 233 to 237 cells) and K3's rim corners
+    # snapping onto the boundary in plan (not merely their sample) moved
+    # which corners exist and how flat their own joints are. Re-measured on
+    # the same real Trial 2 export at 0.9 m, post-fix.
+    "residual_count": 530,
+    "residual_median": 0.0397,
+    "residual_mean": 0.0455,
+    "residual_p99": 0.2193,
+    "residual_max": 0.2912,
+    "residual_over_0.01": 456,
+    "residual_over_0.05": 172,
+    "residual_over_0.1": 41,
+    "residual_over_0.2": 8,
+    "residual_over_0.3": 0,
 }
 
 
