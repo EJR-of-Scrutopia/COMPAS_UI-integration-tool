@@ -321,20 +321,20 @@ writes nothing into `studies/`. Run it with
 checks itself against every figure the wave's own controller had already
 measured by hand (the plan's star shape, the default size's coverage, and
 the old coverage regression at 1.5 m, now cleared); every check below passed
-on the run this table is taken from, 2026-08-17, re-run after the cutting
-truth wave's own K3 fix (below) changed the rim outline and, with it, the
-whole cap:
+on the run this table is taken from, 2026-08-18, re-run after the
+rim-rectangular fix (below) moved rim corners onto the rim in plan and
+changed how every course divides:
 
 | measurement | value |
 | --- | --- |
 | star shaped | yes (238 of 240 rim steps forward, 2 backward, 0.467 degrees total, winding exactly 2 pi) |
-| target size, courses, pieces | 0.9 m, 7 courses, 233 pieces |
-| facets per piece | min 4 / median 6 / max 13 (the max belongs to course 0, the rim) |
-| boundary points per piece | min 32 / median 48 / max 104 |
-| subdivision rounds | 3, limited by rounds (the edge length target, not the chord target, is what the round budget cuts off here) |
-| cap chord deviation | 1.004 mm against a 5.0 mm target |
-| corner normal residual, 515 corners | median 0.0316, mean 0.0414, p99 0.2548, max 0.3295 (its own worst corner, in courses 0 and 1) |
-| projected cap points | 417 of 34785, reaching 0.0523 m at the worst and 0.0014 m at the median (formerly `clamped cap points`, 137 of 41265, reaching 0.0523 m at the worst and 0.0246 m at the median before the cutting truth wave's K3 fix, 2026-08-17, replaced the clamp with a projection onto the true rim, see the rim section below; `clamped_points` is 0 now) |
+| target size, courses, pieces | 0.9 m, 7 courses, 237 pieces |
+| facets per piece | min 5 / median 6 / max 8 (the max belongs to course 0, the rim) |
+| boundary points per piece | min 40 / median 48 / max 64 |
+| subdivision rounds | 3, limited by edge (the edge length target, not the chord target, is what the round budget cuts off here) |
+| cap chord deviation | 0.973 mm against a 5.0 mm target |
+| corner normal residual, 530 corners | median 0.0397, mean 0.0455, p99 0.2193, max 0.2912 (its own worst corner, in courses 0 and 1) |
+| projected cap points | 481 of 35613, reaching 0.0464 m at the worst and 0.0013 m at the median (`clamped_points` is 0). Rim-rectangular fix (2026-08-18): `projected_max_m` is now the true worst DISPLACEMENT of a projected cap point's own plan position, not merely the sample-reach figure it replaced -- see the rim section below |
 | coverage | 0 orphan faces, 0 double faces (of 2400 analysis faces), 0 open facets, 0 slivers, 0 folded, 0 coverage holes, 0 broken boundary entries, 0 missing planes |
 
 The studio polish wave tried tightening the cap subdivision, CAP_EDGE_TARGET
@@ -486,6 +486,75 @@ and crescent notches are retired as a known limit: `docs/plans/2026-08-17-cuttin
 and `.superpowers/sdd/2026-08-17-cutting-truth/task-4-report.md` carry the
 fix and its own full measurement.
 
+**Updated 2026-08-18 (rim-rectangular fix).** The paragraph above ends
+"it is the sample that moves to the rim, not the point itself" -- a real
+retrospective correction, not a stale claim: K3, as shipped, left every
+projected cap point's own PLAN position exactly where `domain.radius_at`
+placed it, up to 52.3 mm outside the true rim, and only its z, normal and
+field weights moved. Param's own complaint ("blocks that seem to jettison
+off in areas of it... typically by the edges") is that gap made visible:
+a corner sampled honestly on the true rim but still drawn tens of
+millimetres away from it, on a straight edge to its correctly-placed
+neighbour, is a spike. `cutting.Surface.lift` now carries the projected
+(x, y) through in its own returned dict (not only z/normal/weights), and
+`pieces._lift` ships it as the point's own drawn position, so a corner
+that needed the boundary-polyline projection now sits ON the rim, not
+merely samples it there. Guard degeneracy: a cell whose own corners
+collapse below 3 distinct points after the move (or that `cutting.ear_clip`
+cannot triangulate at all once the underlying geometry has moved) is
+dropped entirely and named in `report["degenerate_dropped"]`, not shipped
+broken or left to crash the cut -- empty on the real Trial 2 export at
+every size measured except 0.30 m, the piece-size slider's finest
+position, where two cells near the same rim notch this section already
+names (`c1p67`, `c1p118`) are dropped this way.
+
+Diagnosis first, and it refined the hypothesis rather than confirming it
+outright (full numbers: `.superpowers/sdd/2026-08-18-rim-spikes/
+diagnosis.md`). The single worst case measured on this real export --
+505.7 mm -- is NOT a point landing outside the true rim at all:
+`domain.radius_at`'s outermost-crossing rule can place a corner exactly
+onto a real, but unrelated, part of the true rim (literally a neighbouring
+boundary vertex's own position, at one of 4 of the real mesh's 240
+boundary vertices where two edges sit nearly radial from the axis at
+once), which passes every containment test this codebase has -- point in
+polygon and render-mesh containment alike -- because it genuinely is on
+the mesh, just the wrong part of it. That case is left out of scope here,
+same as the wave before it left `domain.radius_at`'s own crossing rule
+alone: fixing it means changing which crossing the rim itself resolves to,
+not where a cap point already known to be off the mesh gets sampled or
+drawn. What IS fixed is the population `cutting.Surface.lift` already
+detects as genuinely off the render mesh (subdivision-level cap points
+straddling a DP-simplified chord across a concave stretch of the notch):
+measured on the real export at 0.9 m, 481 of 35613 cap points needed the
+move, reaching 46.4 mm at the worst and 1.3 mm at the median (`clamped_
+points` stays 0). Full bundle payload 11.29 MB and wall time 2.06 s at
+0.9 m -- inside the 3x/2x budget gate against the pre-fix figures above,
+and faster in practice on this run. The K2 seat-gap worst drops further,
+from 118.8 mm to 80.5 mm on the same export (median 22.5 mm, was 18.2 mm).
+
+The same wave also fixed row uniformity: `generators._divisions` divided
+each course into equal ANGULAR steps, which only gives equal piece
+LENGTH on a true circle. The real Trial 2 plan is not one -- its rim
+radius alone ranges roughly 6 to 11 m depending on direction -- so equal
+angles produced pieces from a few centimetres to several metres within
+one course (measured: course 0 at 0.4 m ran 0.163 m to 2.239 m, a 13.8x
+max/min ratio). `_divisions` now samples arc length at the course's own
+mid radius (`generators._arc_length_samples`/`_theta_at_length`) and
+places head joints at equal steps of THAT, with `ceil(circumference /
+size)` divisions so every piece comes out at or under target, matching
+the fix contract's own "an arc shorter than half the target merges into
+its neighbour" rule at its one reachable case: no opening or interruption
+mechanism exists anywhere in this codebase (domain.py, generators.py,
+tessellation.py), so a course is always its own full loop, and `max(1,
+ceil(...))` already keeps a short course-arc a single piece rather than
+forcing a multi-way split. `monolithic-bands` (sprayed concrete) has no
+per-piece division at all and is untouched. Measured effect: the fraction
+of pieces in a course landing beyond 1.5x their own course's median
+drawn length drops from 42-53% before this fix to 0-6% after it, across
+the courses measured on the real export; piece count at 0.9 m moves 233
+to 237 as a result of both the division rule and `ceil` replacing
+round-to-nearest for the piece count itself.
+
 A single worst-corner number for the residual badly misrepresents the cut,
 so `pieces.residual_stats` reports the whole distribution across every
 corner rather than only its maximum, and `docs/BENCH.md` and the Data
@@ -493,30 +562,37 @@ panel both quote it in full:
 
 | residual | radians (sine of the angle) | degrees | corners over |
 | --- | --- | --- | --- |
-| median | 0.0316 | 1.8 | -- |
-| mean | 0.0414 | 2.4 | -- |
-| p99 | 0.2548 | 14.8 | -- |
-| max | 0.3295 | 19.2 | -- |
-| over 0.01 | -- | over 0.6 | 414 of 515 |
-| over 0.05 | -- | over 2.9 | 140 of 515 |
-| over 0.10 | -- | over 5.7 | 42 of 515 |
-| over 0.20 | -- | over 11.5 | 10 of 515 |
-| over 0.30 | -- | over 17.5 | 2 of 515 |
+| median | 0.0397 | 2.3 | -- |
+| mean | 0.0455 | 2.6 | -- |
+| p99 | 0.2193 | 12.7 | -- |
+| max | 0.2912 | 16.9 | -- |
+| over 0.01 | -- | over 0.6 | 456 of 530 |
+| over 0.05 | -- | over 2.9 | 172 of 530 |
+| over 0.10 | -- | over 5.7 | 41 of 530 |
+| over 0.20 | -- | over 11.5 | 8 of 530 |
+| over 0.30 | -- | over 17.5 | 0 of 530 |
+
+Re-measured 2026-08-18 after the rim-rectangular fix above (was 515
+corners, median 0.0316/1.8 degrees, max 0.3295/19.2 degrees): both the
+rim-corner move and the row-uniform division change which corners are
+welded at all, the same way K3's own fix moved this table from 695
+corners before it.
 
 The median is the figure that describes the cut: a typical corner sits at
-0.0316 (1.8 degrees), the same order as `bench/studio/pieces.py`'s own test
+0.0397 (2.3 degrees), the same order as `bench/studio/pieces.py`'s own test
 fixture (a four cell synthetic dome chosen to be a stress case), which
 measures 0.0104 (0.598 degrees) at its single worst corner -- roughly a
-third of the real median, not a tight match. The max describes only its own
+quarter of the real median, not a tight match. The max describes only its own
 worst corner, not the cut as a whole, and the worst corners cluster in the
 rim course (course 0), where `generators._arc` inserts the mesh's own
 boundary corners so the drawn silhouette follows the real, irregular rim
 rather than a straight chord: more corners inserted there means facets
 meeting at sharper angles, and a sharper angle between two facets
 necessarily pushes a stored normal further out of the one it does not
-belong to. It is the same cause as the facets-per-piece maximum of 13
-above: both are the rim course, not the general cut, so neither number
-should be read as typical against the medians beside them.
+belong to. It is the same cause as the facets-per-piece maximum (course 0
+again, see the Task 10 table above): both are the rim course, not the
+general cut, so neither number should be read as typical against the
+medians beside them.
 
 In plain physical terms: the residual is the sine of the angle between a
 corner's stored normal and the plane of the facet that does not own it, so
@@ -530,8 +606,8 @@ unchanged straight extrusion). A prismatic (K2) piece offsets its top cap
 along its fitted seat plane's own normal, uniform across the whole piece
 rather than per point, so it consumes the same residual through the
 facet-plane projection that shapes its outline instead of through a cap
-point moving a linear number of millimetres. The median, 0.0316, is about
-6 mm; the worst corner, 0.3295, is about 66 mm. Nothing in the shipped
+point moving a linear number of millimetres. The median, 0.0397, is about
+8 mm; the worst corner, 0.2912, is about 58 mm. Nothing in the shipped
 acceptance tests bounds either figure on real geometry (the `< 0.02` bound
 in `tests/studio/test_pieces.py` is pinned to the synthetic fixture only),
 so none of this is a failing measurement, but the tail is real and worth a
