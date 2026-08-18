@@ -80,6 +80,11 @@ def test_face_centroid_and_area_on_a_flat_unit_quad():
 
 
 def test_the_real_export_parses_to_the_known_shape():
+    if not TRIAL_2.is_file():
+        pytest.skip(
+            "the Trial 2 demo export is not on disk (tracked demo data, "
+            "removable during import testing); re-import or git restore "
+            "it to run this shape check")
     g = studio()
     contract = g.load_contract(TRIAL_2)
     arrays = g.mesh_arrays(contract)
