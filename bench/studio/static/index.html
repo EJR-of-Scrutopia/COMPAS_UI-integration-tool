@@ -51,8 +51,9 @@
     </select>
     <label>Tint <input id="material-tint" type="color" value="#ffffff"></label>
     <label>Gloss to matt <input id="material-finish" type="range" min="0.3" max="1" step="0.01" value="0.5"> <span id="material-finish-value">50</span></label>
+    <label>Variation <input id="material-variation" type="range" min="0" max="1" step="0.05" value="1"> <span id="material-variation-value">100</span></label>
     <button id="material-reset">Reset appearance</button>
-    <div id="appearance-note">Tint and finish are render tint only, analysis unchanged: none of it reaches the server.</div>
+    <div id="appearance-note">Tint, finish and variation are render tint only, analysis unchanged: none of it reaches the server.</div>
     <select id="pattern-select"></select>
     <div id="pattern-note"></div>
     <label>Piece size <input id="size-slider" type="range" min="0.15" max="3" step="0.05" value="0.4">

@@ -2553,20 +2553,109 @@ def test_w2_stored_skin_appearance_migrates_to_tint_and_finish_only():
     can still carry a skin key (e.g. {"tint": "#ffffff", "finish": 0.6,
     "skin": "basalt-dark"}). restoreAppearance's tolerant parse must load
     such an entry as tint/finish only -- the skin key is read by nothing and
-    written by nothing, so it simply falls away on the next persist."""
+    written by nothing, so it simply falls away on the next persist.
+
+    P2 (presentation batch, 2026-08-18) widened the shape by one key,
+    variation, which behaves differently from tint/finish (see
+    test_material_variation_slider_composes_and_migrates_to_one below) --
+    updated here to the current three-key shape rather than left describing
+    a fallback that no longer exists.
+    """
 
     js = (STATIC / "studio.js").read_text(encoding="utf-8")
     body = _function_body(js, "restoreAppearance")
     assert "skin" not in body
-    # The pre-parse default and the parsed result must both be exactly the
-    # two-key shape -- no skin field surviving anywhere in the fallback.
-    assert "{ tint: null, finish: null }" in body
+    # The pre-parse default must be exactly the three-key shape -- no skin
+    # field surviving anywhere in the fallback.
+    assert "{ tint: null, finish: null, variation: 1 }" in body
     assert "typeof parsed.finish === \"number\"" in body
-    # Reset must clear the same two-key shape, not the old three-key one.
+    # Reset must clear the same three-key shape, not skin's old one.
     reset_start = js.index('getElementById("material-reset")')
     reset_body = js[reset_start:js.index("\n});", reset_start)]
-    assert "state.appearance = { tint: null, finish: null };" in reset_body
+    assert "state.appearance = { tint: null, finish: null, variation: 1 };" in reset_body
     assert "skin" not in reset_body
+
+
+def test_material_variation_slider_composes_and_migrates_to_one():
+    # P2 (presentation batch, 2026-08-18). Diagnosis: the patchy per-surface
+    # look bakes into noiseTexture/grainTexture's own RANDOM amplitude
+    # (studio.js ~560-605), with no user control at all. Implementation
+    # choice: regenerate (never shader-patch) at the slider's own 0.05
+    # steps, cached per material+slot+step so a rebuild's per-piece
+    # pieceMaterial().clone() calls all share one regenerated texture
+    # instead of paying for the canvas work per piece.
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    assert 'id="material-variation"' in html
+    variation_start = html.index('id="material-variation"')
+    variation_tag = html[variation_start:html.index(">", variation_start)]
+    assert 'min="0"' in variation_tag and 'max="1"' in variation_tag and 'step="0.05"' in variation_tag
+    assert 'value="1"' in variation_tag, "today's full patch amplitude is the shipped default"
+
+    # noiseTexture/grainTexture take the amplitude as an optional trailing
+    # argument defaulting to 1, so every pre-existing call site (the
+    # registry's own construction, GROUNDS' unrelated concrete-slab
+    # texture) is untouched -- bit-identical output, same reseeded random
+    # sequence, at the default.
+    assert "function noiseTexture(size, base, variation, amplitude = 1)" in js
+    assert "function grainTexture(size, amplitude = 1)" in js
+    noise_body = _function_body(js, "noiseTexture")
+    assert "* amplitude" in noise_body, (
+        "amplitude must scale the random term only, never the base tone"
+    )
+    grain_body = _function_body(js, "grainTexture")
+    assert "* amplitude" in grain_body
+
+    # The recipe registry names every registry material's own map (and
+    # roughnessMap, where it has one) recipe, so applyMaterialVariation can
+    # regenerate them without a second, silently-drifting copy of the
+    # noiseTexture(...) calls the registry itself already carries.
+    recipe_start = js.index("const MATERIAL_NOISE_RECIPES = {")
+    recipe_body = js[recipe_start:js.index("\n};", recipe_start)]
+    for material in (
+        "concrete", "concrete-c50", "concrete-sprayed", "timber",
+        "brick", "tile", "stone",
+    ):
+        assert '"{}"'.format(material) in recipe_body, (
+            "MATERIAL_NOISE_RECIPES has no entry for {}".format(material)
+        )
+    assert '"timber": {\n    map: { grain: true, size: 512 },' in recipe_body
+    for excluded in ("steel", "falsework"):
+        assert '"{}"'.format(excluded) not in recipe_body, (
+            "{} is not a user-selectable material and carries no noise map"
+            .format(excluded)
+        )
+
+    # Caching: regenerating per material+slot+step, not per piece clone.
+    assert "const variationTextureCache = {};" in js
+    variation_fn_body = _function_body(js, "applyMaterialVariation")
+    assert "materials[key]" in variation_fn_body
+    assert "state.appearance.variation" in variation_fn_body
+
+    # Composition and persistence: the slider writes into the SAME
+    # bench-studio-appearance entry tint and finish already use (no second
+    # storage key), and both restoreAppearance and the reset handler must
+    # regenerate the registry's own textures (applyMaterialVariation)
+    # BEFORE the pieces that read them get built.
+    variation_change_start = js.index('getElementById("material-variation").addEventListener("change"')
+    variation_change_body = js[variation_change_start:js.index("\n});", variation_change_start)]
+    assert "state.appearance.variation = +e.target.value" in variation_change_body
+    assert "persistAppearance()" in variation_change_body
+    apply_at = variation_change_body.index("applyMaterialVariation()")
+    rebuild_at = variation_change_body.index("rebuildAppearance()")
+    assert apply_at < rebuild_at, (
+        "the registry's textures must be regenerated before the pieces "
+        "that read them are rebuilt"
+    )
+    restore_body = _function_body(js, "restoreAppearance")
+    restore_apply_at = restore_body.index("applyMaterialVariation()")
+    restore_sync_at = restore_body.index("syncAppearanceControls()")
+    assert restore_apply_at < restore_sync_at
+
+    # Migration: an entry persisted before this task carries no variation
+    # key, so typeof parsed.variation !== "number" and it loads as 1 --
+    # today's look, not a silent, unrequested homogenisation.
+    assert 'typeof parsed.variation === "number" ? parsed.variation : 1' in restore_body
 
 
 def test_wire_net_vertex_colours_are_off_at_rest():

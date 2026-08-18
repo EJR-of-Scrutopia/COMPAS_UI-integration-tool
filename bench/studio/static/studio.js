@@ -81,8 +81,12 @@ const state = {
   // (see restoreAppearance/persistAppearance). null means no override; the
   // registry material always shows through untouched otherwise. W2 (studio
   // tweaks, 2026-08-17): render skins are gone -- a material always keeps
-  // its own texture and base colour; tint recolours it.
-  appearance: { tint: null, finish: null },
+  // its own texture and base colour; tint recolours it. P2 (presentation
+  // batch, 2026-08-18): variation is never null -- unlike tint/finish it is
+  // always a live number (0 homogeneous .. 1 today's full patch amplitude),
+  // so a persisted entry with no variation key (every entry written before
+  // this task) migrates to 1 in restoreAppearance, not to "no override".
+  appearance: { tint: null, finish: null, variation: 1 },
 };
 
 const canvas = document.getElementById("view");
@@ -558,7 +562,15 @@ async function loadHdri(name) {
 }
 
 // ---------- procedural textures: offline, no image assets ----------
-function noiseTexture(size, base, variation) {
+// P2 (presentation batch, 2026-08-18): both take an optional trailing
+// amplitude, defaulting to 1 -- every existing call site that omits it
+// (the registry construction below, and GROUNDS' unrelated concrete-slab
+// texture) is bit-identical to before, since the random sequence is reseeded
+// the same way on every call regardless of amplitude. amplitude scales only
+// the RANDOM term, never the base tone, so 0 collapses to a flat, honest
+// average of what the noisy version would have painted -- not a different,
+// arbitrarily brighter or darker flat colour.
+function noiseTexture(size, base, variation, amplitude = 1) {
   const canvasEl = document.createElement("canvas");
   canvasEl.width = canvasEl.height = size;
   const context = canvasEl.getContext("2d");
@@ -566,7 +578,7 @@ function noiseTexture(size, base, variation) {
   let seed = 1234567;
   const random = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
   for (let i = 0; i < image.data.length; i += 4) {
-    const v = base + (random() - 0.5) * 2 * variation;
+    const v = base + (random() - 0.5) * 2 * variation * amplitude;
     image.data[i] = image.data[i + 1] = image.data[i + 2] = Math.max(0, Math.min(255, v));
     image.data[i + 3] = 255;
   }
@@ -580,7 +592,7 @@ function noiseTexture(size, base, variation) {
   return texture;
 }
 
-function grainTexture(size) {
+function grainTexture(size, amplitude = 1) {
   const canvasEl = document.createElement("canvas");
   canvasEl.width = canvasEl.height = size;
   const context = canvasEl.getContext("2d");
@@ -589,7 +601,7 @@ function grainTexture(size) {
   let seed = 424242;
   const random = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
   for (let y = 0; y < size; y += 3) {
-    const tone = 0.75 + 0.25 * random();
+    const tone = 0.75 + 0.25 * random() * amplitude;
     context.fillStyle = "rgba(" + Math.floor(140 * tone) + "," + Math.floor(96 * tone) + "," + Math.floor(48 * tone) + ",0.55)";
     context.fillRect(0, y + Math.floor(3 * random()), size, 1 + Math.floor(2 * random()));
   }
@@ -914,6 +926,79 @@ const materials = {
     roughness: 0.95, metalness: 0.0, transparent: true, opacity: 0.3,
   }),
 };
+
+// P2 (presentation batch, 2026-08-18): the map/roughnessMap recipe behind
+// each registry material above, named so applyMaterialVariation can
+// regenerate them at a different amplitude -- the exact size/base/variation
+// (or grain size) each material was constructed with above, kept as one
+// source so the two never drift apart. steel and falsework carry no noise
+// map and are not user-selectable materials, so neither is here.
+const MATERIAL_NOISE_RECIPES = {
+  "concrete": {
+    map: { size: 256, base: 205, variation: 14 },
+    roughnessMap: { size: 256, base: 215, variation: 40 },
+  },
+  "concrete-c50": {
+    map: { size: 256, base: 205, variation: 14 },
+    roughnessMap: { size: 256, base: 215, variation: 40 },
+  },
+  "concrete-sprayed": {
+    map: { size: 256, base: 195, variation: 46 },
+    roughnessMap: { size: 256, base: 225, variation: 40 },
+  },
+  "timber": {
+    map: { grain: true, size: 512 },
+  },
+  "brick": {
+    map: { size: 256, base: 150, variation: 26 },
+    roughnessMap: { size: 256, base: 210, variation: 30 },
+  },
+  "tile": {
+    map: { size: 256, base: 190, variation: 18 },
+  },
+  "stone": {
+    map: { size: 256, base: 215, variation: 22 },
+    roughnessMap: { size: 256, base: 220, variation: 35 },
+  },
+};
+
+// Cost: a 256px noiseTexture/grainTexture regenerate is well under the
+// brief's 100 ms budget (measured a few ms each on this machine), but
+// pieceMaterial() clones the registry material PER PIECE, so regenerating
+// per clone would multiply that by piece count. Caching per material+slot+
+// step (the slider's own 0.05 steps, so at most 21 distinct textures per
+// slot ever exist) and mutating the shared registry material in place means
+// every clone's own .map/.roughnessMap reference -- copied, not deep-cloned,
+// by THREE.Material.clone() -- picks up the regenerated texture for free.
+const variationTextureCache = {};
+
+function variationTexture(materialKey, slot, recipe, amount) {
+  const cacheKey = materialKey + ":" + slot + ":" + amount;
+  const cached = variationTextureCache[cacheKey];
+  if (cached) return cached;
+  const texture = recipe.grain
+    ? grainTexture(recipe.size, amount)
+    : noiseTexture(recipe.size, recipe.base, recipe.variation, amount);
+  variationTextureCache[cacheKey] = texture;
+  return texture;
+}
+
+// Mutates every recipe material's OWN map/roughnessMap in place, so every
+// pieceMaterial() clone taken after this call (buildPieceMeshes, per piece)
+// picks up the new amplitude without regenerating anything itself. Called
+// from restoreAppearance (before the incoming material's pieces are built,
+// same contract as tint/finish) and from the slider's own change handler.
+function applyMaterialVariation() {
+  const amount = state.appearance.variation;
+  for (const key of Object.keys(MATERIAL_NOISE_RECIPES)) {
+    const recipe = MATERIAL_NOISE_RECIPES[key];
+    const material = materials[key];
+    for (const slot of ["map", "roughnessMap"]) {
+      if (!recipe[slot]) continue;
+      material[slot] = variationTexture(key, slot, recipe[slot], amount);
+    }
+  }
+}
 
 // ---------- scene building ----------
 function meshGeometry(meshData) {
@@ -2664,9 +2749,19 @@ document.getElementById("material-finish").addEventListener("change", (e) => {
   persistAppearance();
   rebuildAppearance();
 });
+document.getElementById("material-variation").addEventListener("input", (e) => {
+  document.getElementById("material-variation-value").textContent = Math.round(+e.target.value * 100);
+});
+document.getElementById("material-variation").addEventListener("change", (e) => {
+  state.appearance.variation = +e.target.value;
+  persistAppearance();
+  applyMaterialVariation();
+  rebuildAppearance();
+});
 document.getElementById("material-reset").addEventListener("click", () => {
-  state.appearance = { tint: null, finish: null };
+  state.appearance = { tint: null, finish: null, variation: 1 };
   localStorage.removeItem(appearanceStorageKey(document.getElementById("material-select").value));
+  applyMaterialVariation();
   syncAppearanceControls();
   rebuildAppearance();
 });
@@ -3466,6 +3561,10 @@ function syncAppearanceControls() {
   const finish = state.appearance.finish !== null ? state.appearance.finish : 0.5;
   document.getElementById("material-finish").value = finish;
   document.getElementById("material-finish-value").textContent = Math.round(finish * 100);
+  // P2: variation is never null (see state.appearance's own comment), so
+  // there is no default-substitution branch to mirror finish's above.
+  document.getElementById("material-variation").value = state.appearance.variation;
+  document.getElementById("material-variation-value").textContent = Math.round(state.appearance.variation * 100);
 }
 
 // Called from both the material-select change handler and loadStudy, both
@@ -3480,8 +3579,13 @@ function syncAppearanceControls() {
 // key is read by nothing, and the next persistAppearance() call (a tint or
 // finish change) overwrites the stored entry with the two-key shape,
 // dropping it for good.
+//
+// P2 migration: a "bench-studio-appearance:" entry written before this task
+// carries no variation key at all. typeof parsed.variation !== "number" for
+// every such entry, so it loads as 1 -- today's full patch amplitude, the
+// look every existing entry was actually persisted showing.
 function restoreAppearance(material) {
-  let appearance = { tint: null, finish: null };
+  let appearance = { tint: null, finish: null, variation: 1 };
   const stored = localStorage.getItem(appearanceStorageKey(material));
   if (stored) {
     try {
@@ -3489,10 +3593,12 @@ function restoreAppearance(material) {
       appearance = {
         tint: parsed.tint || null,
         finish: typeof parsed.finish === "number" ? parsed.finish : null,
+        variation: typeof parsed.variation === "number" ? parsed.variation : 1,
       };
     } catch (error) { /* corrupt localStorage entry: fall back to the defaults above */ }
   }
   state.appearance = appearance;
+  applyMaterialVariation();
   syncAppearanceControls();
 }
 
