@@ -491,4 +491,18 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
     if STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+    # The studio ships fixes faster than browsers expire their heuristic
+    # cache: a plain refresh after a server update served the NEW
+    # index.html with the OLD studio.js (2026-08-18, live: the import
+    # banner spoke a message the new client no longer contains).
+    # no-cache does not mean no caching, it means revalidate: StaticFiles
+    # answers If-Modified-Since with a cheap 304 while the file is
+    # unchanged, and a plain refresh is always enough after a deploy.
+    @app.middleware("http")
+    async def static_revalidates(request, call_next):
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
     return app

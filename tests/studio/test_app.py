@@ -505,6 +505,20 @@ def test_compas_only_upload_derives_a_contract_and_the_study_builds(tmp_path, mo
     assert "no analysis in this export" in document["provenance"]["derived_geometry_only"]
 
 
+def test_static_files_and_the_index_ask_the_browser_to_revalidate(tmp_path, monkeypatch):
+    """A plain refresh after a server update once served the new
+    index.html with the OLD cached studio.js (2026-08-18, live). no-cache
+    means revalidate, not no caching: unchanged files still answer 304."""
+
+    client, _ = make_client(tmp_path, monkeypatch)
+    for path in ("/", "/static/studio.js"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.headers.get("cache-control") == "no-cache"
+    api = client.get("/api/studies")
+    assert api.headers.get("cache-control") != "no-cache"
+
+
 def _tiny_tessellation_document():
     return {
         "schema": "bench.tessellation/1",
