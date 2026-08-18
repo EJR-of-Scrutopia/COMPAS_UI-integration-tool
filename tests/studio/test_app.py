@@ -436,6 +436,91 @@ def test_export_upload_stores_a_valid_pair_and_lists_it(tmp_path, monkeypatch):
     assert "Fresh" in exports
 
 
+def _pyramid_compas_document():
+    fixture = Path(__file__).resolve().parent / "fixtures" / "tiny-pyramid-compas.json"
+    return json.loads(fixture.read_text(encoding="utf-8"))
+
+
+def test_compas_only_upload_derives_a_contract_and_the_study_builds(tmp_path, monkeypatch):
+    """P4 (presentation batch, 2026-08-18): Param's ask -- upload just the
+    compas half, no hand-authored contract, and the study still works end
+    to end, forces/loads/reactions honestly empty rather than fabricated."""
+
+    client, _ = make_client(tmp_path, monkeypatch)
+    response = client.put(
+        "/api/uploads/exports/Pyramid/compas",
+        content=json.dumps(_pyramid_compas_document()).encode(),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["pair_complete"] is True
+    assert body["derived_contract"] is True
+    assert body["derived_support_count"] == 4
+    assert body["derivation_error"] is None
+
+    exports = [s["export"] for s in client.get("/api/studies").json()["studies"]]
+    assert "Pyramid" in exports
+
+    bundle_response = client.get(
+        "/api/studies/Pyramid/bundle",
+        params={"material": "concrete", "pattern": "bonded-courses", "size": 0.5},
+    )
+    assert bundle_response.status_code == 200
+    document = bundle_response.json()
+    assert len(document["pieces"]) > 0
+    # Honest degradation: no contract carried analysis, so none is
+    # fabricated -- the existing layer-availability machinery (studio.js)
+    # already reads exactly these empty shapes to disable the forces/
+    # reactions layers, unchanged by this task.
+    assert document["member_forces"] == []
+    assert document["loads"] == {}
+    assert document["reactions"] == {}
+    assert document["provenance"]["derived_geometry_only"] is not None
+    assert "no analysis in this export" in document["provenance"]["derived_geometry_only"]
+
+
+def test_compas_upload_never_shadows_an_existing_contract(tmp_path, monkeypatch):
+    """The derived-contract write must never run while a contract already
+    exists for this name -- real or a prior derivation -- or a compas
+    re-upload could silently clobber a hand-authored analysis contract."""
+
+    client, _ = make_client(tmp_path, monkeypatch)
+    upload_dir = tmp_path / "upload"
+    before = (upload_dir / "Tiny-contract.json").read_text(encoding="utf-8")
+
+    response = client.put(
+        "/api/uploads/exports/Tiny/compas",
+        content=json.dumps(_pyramid_compas_document()).encode(),
+    )
+    assert response.status_code == 200
+    assert response.json()["derived_contract"] is False
+    assert response.json()["derived_support_count"] is None
+
+    after = (upload_dir / "Tiny-contract.json").read_text(encoding="utf-8")
+    assert before == after, "Tiny's real contract must survive a later compas upload untouched"
+
+
+def test_compas_upload_with_unreadable_thrust_mesh_stores_but_does_not_derive(tmp_path, monkeypatch):
+    """A malformed thrustMesh must not fail the compas upload outright (the
+    file is stored exactly as it always was, pre-P4) -- only the derivation
+    step is skipped, and named in the response rather than silently
+    dropped."""
+
+    client, _ = make_client(tmp_path, monkeypatch)
+    response = client.put(
+        "/api/uploads/exports/Broken/compas",
+        content=b'{"thrustMesh": "not json"}',
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["derived_contract"] is False
+    assert body["derivation_error"] is not None
+    assert "not valid JSON" in body["derivation_error"]
+    assert body["pair_complete"] is False
+    exports = [s["export"] for s in client.get("/api/studies").json()["studies"]]
+    assert "Broken" not in exports
+
+
 def test_export_upload_rejects_garbage_and_traversal(tmp_path, monkeypatch):
     client, _ = make_client(tmp_path, monkeypatch)
     assert client.put("/api/uploads/exports/Bad/contract",

@@ -157,6 +157,93 @@ def test_import_controls_exist_and_wire_the_uploads_endpoint():
     assert "uploads/exports" in js
 
 
+def test_import_accepts_one_file_and_detects_kind_from_the_suffix():
+    # P4 (presentation batch, 2026-08-18). Param's ask: "i just need to
+    # upload the one import only. the one form not the columns" -- a
+    # single *-compas.json now becomes a geometry-only study on its own
+    # (app.py derives the missing contract server-side); a single
+    # *-contract.json, or a real pair, still work exactly as before.
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    assert "one file is enough" in html
+    assert "analysis" in html
+
+    assert "function importFileKind(filename)" in js
+    kind_body = _function_body(js, "importFileKind")
+    assert '"-contract.json"' in kind_body and '"-compas.json"' in kind_body
+    assert "return null" in kind_body, "an unrecognised suffix must be nameable, not guessed at"
+
+    import_body = _function_body(js, "importExportPair")
+    assert "files.length !== 2" not in import_body, (
+        "the pair requirement must be gone: one file is enough"
+    )
+    assert "importFileKind(file.name)" in import_body
+    assert "picked.length === 2 && picked[0].kind === picked[1].kind" in import_body, (
+        "two files of the SAME kind must still be rejected -- only the pair requirement dropped"
+    )
+
+
+def test_import_failures_all_reach_the_banner():
+    # P4 amendment. The reviewer traced Param's actual symptom to every
+    # validation short-circuit in the old importExportPair writing ONLY
+    # #import-status (12px dim grey, styles.css) inside a collapsed-by-
+    # default panel -- no showBanner, no network request, easy to miss
+    # entirely. Every failure path -- unknown suffix, same-kind pair,
+    # prefix mismatch, empty prefix, the network catch -- must now also
+    # banner, matching the sibling hdri-upload handler's own catch block
+    # (getElementById("hdri-upload").addEventListener("change", ...)).
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    assert "function importValidationError(status, message)" in js
+    validation_body = _function_body(js, "importValidationError")
+    assert 'showBanner("Import failed: " + message, "error")' in validation_body
+
+    import_body = _function_body(js, "importExportPair")
+    # Every branch ahead of the "uploading..." status line (the point
+    # every validation check has passed) is a validation failure; each one
+    # must route through importValidationError, not write status directly.
+    validation_section = import_body[:import_body.index('status.textContent = "uploading "')]
+    assert "status.textContent =" not in validation_section, (
+        "every validation branch ahead of the upload itself must go "
+        "through importValidationError, not write #import-status directly"
+    )
+    assert import_body.count("importValidationError(") >= 5, (
+        "one call per validation branch: no files picked, more than two "
+        "files, an unrecognised suffix, two files of the same kind, a "
+        "prefix mismatch, an empty prefix"
+    )
+    # The network/server-error catch path bangers too, surfacing the
+    # server's own detail text (putFile already carries it in
+    # error.message -- see test_import_controls_exist_and_wire_the_
+    # uploads_endpoint's own "uploads/exports" pin for putFile's route).
+    catch_start = import_body.index("} catch (error) {")
+    catch_body = import_body[catch_start:]
+    assert 'showBanner("Import failed: " + error.message, "error")' in catch_body
+
+    # The geometry-only success case gets its own, non-error banner --
+    # informational, not a failure, but still a visible one-line note
+    # (item 3's own contract) rather than only the dim status line.
+    assert "result.derived_contract" in import_body
+    assert "layers are unavailable for this export" in import_body
+
+
+def test_geometry_only_studies_disclose_it_in_the_data_panel():
+    # P4 item 2: "the Data panel says no analysis is present in this
+    # export". bundle.py threads the derived contract's own
+    # provenance.derived marker through to bundle.provenance.
+    # derived_geometry_only; renderDataPanel reads it first, ahead of
+    # the Cut section, so it is the first thing a reader of a one-file
+    # study sees there.
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    body = _function_body(js, "renderDataPanel")
+    assert "state.bundle.provenance.derived_geometry_only" in body
+    assert "No analysis is present in this export" in body
+    cut_heading_at = body.index('cutHeading.textContent = "Cut"')
+    derived_at = body.index("derived_geometry_only")
+    assert derived_at < cut_heading_at, (
+        "the geometry-only disclosure must render ahead of the Cut section"
+    )
+
+
 def test_thickness_control_is_wired_and_honest():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     js = (STATIC / "studio.js").read_text(encoding="utf-8")
@@ -337,6 +424,10 @@ def test_boot_and_import_columns_share_the_dispose_before_reload_helper():
 def test_export_import_selects_and_loads_the_imported_study():
     # M2: after a successful export-pair import, the studio must select and
     # load the export that was just imported, not fall back to studies[0].
+    # P4 (presentation batch, 2026-08-18) renamed the import's own variable
+    # from contractPrefix to prefix (a pair is no longer guaranteed to
+    # include a contract file at all), so the literal call this pins moved
+    # with it.
     js = (STATIC / "studio.js").read_text(encoding="utf-8")
     boot_start = js.index("async function boot(preferredExport)")
     boot_end = js.index("\n}", boot_start)
@@ -344,7 +435,7 @@ def test_export_import_selects_and_loads_the_imported_study():
     assert "select.value = toLoad" in boot_body
     import_start = js.index("async function importExportPair(")
     import_end = js.index("\n}", import_start)
-    assert "boot(contractPrefix)" in js[import_start:import_end]
+    assert "boot(prefix)" in js[import_start:import_end]
 
 
 def test_a_reload_restores_the_last_loaded_study_not_studies_zero():
@@ -1954,10 +2045,16 @@ def test_the_panel_groups_into_six_collapsible_sections():
     # collapsed. Record's controls moved inside Animation, and the
     # Styling sub-section was flattened into Analysis, so neither
     # "record-section" nor a Styling summary exists any more.
+    #
+    # P4 amendment (presentation batch, 2026-08-18): Import now opens too.
+    # A collapsed-by-default panel hid every import failure behind a 12px
+    # status line inside it (see the amendment's own diagnosis) -- opening
+    # it is the one-word half of that fix; showBanner on every failure
+    # path is the other (test_import_failures_all_reach_the_banner).
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     positions = []
     for section_id, is_open in (
-        ("import-section", False), ("study-section", True),
+        ("import-section", True), ("study-section", True),
         ("analysis-section", False), ("view-section", True),
         ("animation-section", True), ("scene-section", False),
     ):
@@ -2702,6 +2799,44 @@ def test_wire_net_vertex_colours_are_off_at_rest():
     # the probe finding that the node spheres were never part of the
     # defect -- nothing to fix there, but pin that it stays that way.
     assert "nodeMaterial.vertexColors" not in build_body
+
+
+def test_a_zero_edge_thrust_net_does_not_crash_the_load():
+    """P4 (presentation batch, 2026-08-18): the actual break the P4
+    acceptance probe surfaced. A derived, geometry-only contract carries
+    no equilibrium.edges (derive_contract.py), so
+    buildWiresAndNodes(bundle) constructs `new THREE.InstancedMesh(cylinder,
+    wireMaterial, 0)` -- and three's own InstancedMesh only ever allocates
+    instanceColor lazily, the first time setColorAt is called, which never
+    happens over zero edges. Every one of the three
+    "wires.instanceColor.needsUpdate = true" sites (buildWiresAndNodes,
+    and applyWireForces' inactive and active branches) crashed outright
+    with "Cannot set properties of null" the instant a geometry-only
+    study tried to load -- verified live: the first run of the P4
+    acceptance probe against a real, geometry-compatible compas-only
+    upload hit exactly this, caught by loadStudy's own try/catch and
+    bannered as a confusing raw TypeError, not the honest degradation the
+    brief actually asked for. instanceMatrix needs no such guard: three
+    allocates it eagerly from the constructor's own count argument, even
+    at zero.
+    """
+
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    guarded = "if (wires.instanceColor) wires.instanceColor.needsUpdate = true;"
+    bare = "wires.instanceColor.needsUpdate = true;"
+
+    build_body = _function_body(js, "buildWiresAndNodes")
+    assert build_body.count(guarded) == 1
+    # Every occurrence of the bare assignment must be the guarded one --
+    # counting both and requiring equality catches an unguarded copy left
+    # behind anywhere else in the same function, not just this exact spot.
+    assert build_body.count(bare) == build_body.count(guarded)
+
+    force_body = _function_body(js, "applyWireForces")
+    assert force_body.count(guarded) == 2, (
+        "both the inactive and the active branch need their own guard"
+    )
+    assert force_body.count(bare) == force_body.count(guarded)
 
 
 def test_net_nodes_are_black_and_the_net_receives_shadow():

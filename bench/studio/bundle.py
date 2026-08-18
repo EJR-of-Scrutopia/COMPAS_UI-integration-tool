@@ -264,6 +264,43 @@ def _cut_for(export_name, contract, arrays, render, pattern, size):
     return result
 
 
+def _render_mesh(vertices: List[list], faces: List[list]) -> Dict[str, list]:
+    """The render mesh: subdivision.subdivide_quads when the geometry is
+    quads (every real GH TNA export shipped so far), otherwise the analysis
+    mesh itself, unsubdivided.
+
+    P4 (presentation batch, 2026-08-18): a compas-only import's mesh can be
+    triangulated (subdivide_quads raises ValueError on anything but a
+    4-vertex face -- see its own docstring: "this pass subdivides quads
+    only"), and that check is deliberately not loosened here: it is shared,
+    tested code a real quad export still depends on, and a Catmull-Clark
+    pass has no honest triangle analogue to fall back to instead of just
+    skipping it.
+
+    Skipping it costs only render/heatmap resolution, never correctness:
+    the cut itself (cutting.Surface, domain.plan_domain, pieces.segment_
+    pieces) fan-triangulates internally and is already face-count agnostic
+    (verified against a real 2521-vertex, 2400-quad export run through
+    this exact fallback path in P4's own report), and render_mesh's other
+    consumer -- studio.js's fieldPerRenderVertex, which smooths a staged
+    per-node field onto render_mesh.vertex_sources -- only ever runs when
+    a staged analysis exists to smooth, which a geometry-only import never
+    has. The identity parent_face/vertex_sources below (each render entry
+    maps onto its own analysis entry, 1:1) keep both dict shapes exactly
+    what subdivide_quads' own callers already expect.
+    """
+
+    try:
+        return subdivision.subdivide_quads(vertices, faces)
+    except ValueError:
+        return {
+            "vertices": [list(v) for v in vertices],
+            "faces": [list(f) for f in faces],
+            "parent_face": list(range(len(faces))),
+            "vertex_sources": [[i] for i in range(len(vertices))],
+        }
+
+
 def build_bundle(
     export_name: str, material: str, pattern: str, size: float, thickness: float = 0.2
 ) -> Dict:
@@ -277,7 +314,7 @@ def build_bundle(
     slug = geometry.slugify(export_name)
     contract = geometry.load_contract(pairs[export_name]["contract"])
     arrays = geometry.mesh_arrays(contract)
-    render = subdivision.subdivide_quads(arrays["vertices"], arrays["faces"])
+    render = _render_mesh(arrays["vertices"], arrays["faces"])
 
     tess, binding, supports, made, report = _cut_for(
         export_name, contract, arrays, render, pattern, size)
@@ -375,6 +412,18 @@ def build_bundle(
             "surface": "intrados",
             "combination": "ULS",
             "combination_factor": 1.35,
+            # P4: derive_contract.derive_contract stamps its own output
+            # with a top level provenance.derived marker (never inside
+            # equilibrium/formGraph, which geometry.py's parsers own); a
+            # real, human- or GH-authored contract has no such key, so
+            # this is None for every export except a geometry-only one.
+            # Threaded through here, not read fresh by the client, so the
+            # Data panel's "no analysis in this export" note (studio.js)
+            # has one source of truth: this bundle document.
+            "derived_geometry_only": (
+                contract.get("provenance", {}).get("derived")
+                if isinstance(contract.get("provenance"), dict) else None
+            ),
             "note": "staging and verification are null until their runs "
                     "exist; staging is also dropped, not embedded, when its "
                     "stage plan names cells this cut does not draw",

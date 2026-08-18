@@ -1058,7 +1058,16 @@ function buildWiresAndNodes(bundle) {
     wires.setColorAt(i, white);
     baseMatrices.push(m.clone());
   });
-  wires.instanceColor.needsUpdate = true;
+  // P4 (presentation batch, 2026-08-18): a derived, geometry-only contract
+  // carries no equilibrium.edges (see derive_contract.py), so edges.length
+  // is 0 here and the forEach above never runs. InstancedMesh.setColorAt
+  // is what lazily allocates instanceColor in the first place (three's own
+  // implementation, not this file's choice); with zero instances it is
+  // never called, so instanceColor stays null and setting .needsUpdate on
+  // it crashed loadStudy outright ("Cannot set properties of null") --
+  // this was the actual break the P4 acceptance probe surfaced against
+  // the real Armadillo-shaped upload path, not a hypothetical.
+  if (wires.instanceColor) wires.instanceColor.needsUpdate = true;
   // Task 6: the forces layer rebuilds instance matrices (thicker wire =
   // bigger force) and restores them on toggle-off; the base endpoints/
   // orientation/length live here so that restore is exact.
@@ -1513,7 +1522,9 @@ function applyWireForces() {
       wires.setColorAt(i, white);
     }
     wires.instanceMatrix.needsUpdate = true;
-    wires.instanceColor.needsUpdate = true;
+    // P4: instanceColor stays null on a zero-edge (geometry-only) net --
+    // see buildWiresAndNodes's own comment on the exact same guard.
+    if (wires.instanceColor) wires.instanceColor.needsUpdate = true;
     wires.material.color.copy(materials.steel.color);
     wires.material.vertexColors = false;
     wires.material.needsUpdate = true;
@@ -1535,7 +1546,10 @@ function applyWireForces() {
     wires.setColorAt(i, STRESS_SCALE(force, magnitude));
   });
   wires.instanceMatrix.needsUpdate = true;
-  wires.instanceColor.needsUpdate = true;
+  // P4: unreachable with an empty forces array in practice (layerAvailability
+  // never lets `active` land here when it is), but the same defensive guard
+  // as the other two instanceColor sites, at no cost.
+  if (wires.instanceColor) wires.instanceColor.needsUpdate = true;
 }
 
 function stressValue(pair, surface, magnitude) {
@@ -2022,6 +2036,25 @@ function capPointCount() {
 function renderDataPanel(v) {
   const content = document.getElementById("data-content");
   content.innerHTML = "";
+
+  // ---------- P4: geometry-only disclosure ----------
+  // bundle.py threads the derived contract's own provenance.derived marker
+  // through to bundle.provenance.derived_geometry_only (null for a real,
+  // authored contract). Rendered first, ahead of the Cut section, so it is
+  // the first thing read on a study built from one file instead of a pair.
+  const derived = state.bundle && state.bundle.provenance
+    && state.bundle.provenance.derived_geometry_only;
+  if (derived) {
+    const derivedHeading = document.createElement("h3");
+    derivedHeading.textContent = "Geometry only";
+    content.appendChild(derivedHeading);
+    const derivedLine = document.createElement("p");
+    derivedLine.textContent = "No analysis is present in this export: " + derived
+      + ". Forces, loads and reactions read as empty, and the force-driven "
+      + "layers stay disabled -- upload a *-contract.json for this export "
+      + "to add real analysis.";
+    content.appendChild(derivedLine);
+  }
 
   // ---------- Cut section ----------
   // A cut that dropped analysis faces, missed a joint plane, or clamped a
@@ -2667,39 +2700,103 @@ async function putFile(url, file) {
   return response.json();
 }
 
+// P4 (presentation batch, 2026-08-18): "*-contract.json" or "*-compas.json"
+// only -- anything else cannot be routed to /api/uploads/exports/{name}/
+// {kind}, which only ever accepts those two kinds (app.py).
+function importFileKind(filename) {
+  if (filename.endsWith("-contract.json")) return "contract";
+  if (filename.endsWith("-compas.json")) return "compas";
+  return null;
+}
+
+// Every validation failure below goes through here: the inline status line
+// alone (12px, dim grey, styles.css) sat inside a collapsed-by-default
+// Import panel and was easy to miss entirely -- a failure that never
+// reaches a network request looked identical to one that silently
+// succeeded. showBanner is now the second, harder-to-miss half of every
+// one of them, matching the sibling hdri-upload handler's own catch block.
+function importValidationError(status, message) {
+  status.textContent = message;
+  showBanner("Import failed: " + message, "error");
+}
+
 async function importExportPair() {
   const status = document.getElementById("import-status");
   const input = document.getElementById("import-export-input");
   const files = Array.from(input.files || []);
-  const contractFile = files.find((f) => f.name.endsWith("-contract.json"));
-  const compasFile = files.find((f) => f.name.endsWith("-compas.json"));
-  if (files.length !== 2 || !contractFile || !compasFile) {
-    status.textContent = "pick exactly a *-contract.json and *-compas.json pair";
+  if (!files.length) {
+    importValidationError(status, "pick a *-contract.json or *-compas.json file");
     return;
   }
-  const contractPrefix = contractFile.name.slice(0, -"-contract.json".length);
-  const compasPrefix = compasFile.name.slice(0, -"-compas.json".length);
-  if (!contractPrefix || contractPrefix !== compasPrefix) {
-    status.textContent = "the two files must share the same export name prefix";
+  if (files.length > 2) {
+    importValidationError(
+      status, "pick at most two files: one *-contract.json and one *-compas.json");
     return;
   }
-  status.textContent = "uploading " + contractPrefix + "...";
+  // P4: the pair is no longer required -- a single *-compas.json becomes a
+  // geometry-only study on its own (app.py derives the missing contract).
+  // A single *-contract.json, or a real pair, still work exactly as
+  // before; only the "must be exactly two files" gate is gone.
+  const picked = [];
+  for (const file of files) {
+    const kind = importFileKind(file.name);
+    if (!kind) {
+      importValidationError(
+        status, file.name + " is neither a *-contract.json nor a *-compas.json file");
+      return;
+    }
+    picked.push({ file, kind });
+  }
+  if (picked.length === 2 && picked[0].kind === picked[1].kind) {
+    importValidationError(
+      status, "pick one *-contract.json and one *-compas.json, not two of the same kind");
+    return;
+  }
+  const prefixOf = (entry) => entry.file.name.slice(0, -("-" + entry.kind + ".json").length);
+  const prefixes = picked.map(prefixOf);
+  if (picked.length === 2 && prefixes[0] !== prefixes[1]) {
+    importValidationError(status, "the two files must share the same export name prefix");
+    return;
+  }
+  const prefix = prefixes[0];
+  if (!prefix) {
+    importValidationError(status, "the export name cannot be empty");
+    return;
+  }
+  // Contract before compas when both are given: the order the pair-only
+  // flow this replaces always used, and the only one either upload's own
+  // pair_complete answer can actually depend on.
+  picked.sort((a, b) => (a.kind === "contract" ? 0 : 1) - (b.kind === "contract" ? 0 : 1));
+  status.textContent = "uploading " + prefix + "...";
   try {
-    await putFile("/api/uploads/exports/" + encodeURIComponent(contractPrefix) + "/contract", contractFile);
-    const result = await putFile("/api/uploads/exports/" + encodeURIComponent(contractPrefix) + "/compas", compasFile);
+    let result = null;
+    for (const entry of picked) {
+      result = await putFile(
+        "/api/uploads/exports/" + encodeURIComponent(prefix) + "/" + entry.kind, entry.file);
+    }
     status.textContent = result.pair_complete
-      ? "imported " + contractPrefix
-      : "stored " + contractPrefix + "; pair incomplete";
+      ? "imported " + prefix
+      : "stored " + prefix + "; pair incomplete";
     logStudio(result.pair_complete
-      ? "imported export pair " + contractPrefix
-      : "stored " + contractPrefix + "; pair incomplete");
+      ? "imported " + prefix
+      : "stored " + prefix + "; pair incomplete");
+    // A one-line note the moment a compas-only upload lands: item 3's
+    // "analysis layers are unavailable for it", visible even before the
+    // study finishes loading (renderDataPanel carries the same note for
+    // as long as the study stays loaded -- see its own P4 section).
+    if (result.derived_contract) {
+      showBanner(
+        prefix + ": geometry only (no *-contract.json uploaded), analysis "
+        + "layers are unavailable for this export.", "info");
+    }
     input.value = "";
-    // M2 fix: select and load the export that was just imported, instead
-    // of leaving boot() to fall back to studies[0].
-    await boot(contractPrefix);
+    // M2/P3: select and load the export that was just imported, instead
+    // of leaving boot() to fall back to studies[0] or the last-active one.
+    await boot(prefix);
   } catch (error) {
     status.textContent = "import failed: " + error.message;
-    logStudio("export pair import failed: " + error.message);
+    showBanner("Import failed: " + error.message, "error");
+    logStudio("export import failed: " + error.message);
   }
 }
 

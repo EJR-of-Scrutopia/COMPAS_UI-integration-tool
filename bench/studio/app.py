@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 import bundle
+import derive_contract
 import generators
 import geometry
 import staging
@@ -310,6 +311,36 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
         directory.mkdir(parents=True, exist_ok=True)
         filename = "{}-{}.json".format(name, kind)
         (directory / filename).write_text(json.dumps(document), encoding="utf-8")
+
+        # P4 (presentation batch, 2026-08-18): a compas-only upload becomes
+        # a usable, geometry-only study on its own -- Param's ask was
+        # literally "i just need to upload the one import only". Only when
+        # NO contract exists yet for this name: a derived file must never
+        # shadow a real one, and this is the whole guarantee -- the write
+        # below never runs while contract_path already exists, whether
+        # that file is a real, authored contract OR an earlier derivation,
+        # and the "contract" branch above is the only other writer of that
+        # path and always overwrites unconditionally, so a real contract
+        # uploaded later for the same name always wins outright, no
+        # marker check needed on that side.
+        derived_contract = None
+        derivation_error = None
+        if kind == "compas":
+            contract_path = directory / "{}-contract.json".format(name)
+            if not contract_path.is_file():
+                try:
+                    derived_contract = derive_contract.derive_contract(document)
+                except ValueError as error:
+                    # Non-fatal to the compas upload itself (stored above,
+                    # same as before this task): a malformed thrustMesh
+                    # just means no study appears for this name yet,
+                    # exactly as if only the compas half had ever been
+                    # uploaded -- named here rather than silently dropped.
+                    derivation_error = str(error)
+                else:
+                    contract_path.write_text(
+                        json.dumps(derived_contract), encoding="utf-8")
+
         _invalidate_studio_cache(slug)
         other_kind = "compas" if kind == "contract" else "contract"
         other = directory / "{}-{}.json".format(name, other_kind)
@@ -325,6 +356,12 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
             "stored": filename,
             "pair_complete": other.is_file(),
             "authored_tessellation": sidecar.name if sidecar.is_file() else None,
+            "derived_contract": derived_contract is not None,
+            "derived_support_count": (
+                derived_contract["provenance"]["support_count"]
+                if derived_contract else None
+            ),
+            "derivation_error": derivation_error,
         }
 
     @app.put("/api/uploads/columns/{filename}")
