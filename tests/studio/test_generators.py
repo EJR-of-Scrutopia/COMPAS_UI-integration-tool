@@ -600,3 +600,8 @@ def test_planned_patterns_say_which_wave_they_arrive_in():
     assert "guastavino-herringbone" in g.PLANNED
     assert "armadillo-dual" in g.PLANNED
     assert set(g.PLANNED) & set(g.GENERATORS) == set()
+    # 6c shipped as a Grasshopper component rather than a server-side
+    # generator (the Ananke Equilibrium plugin repo's
+    # docs/superpowers/specs/2026-08-18-armadillo-dual-design.md, "Out of
+    # scope"): the dropdown's note says so instead of just naming a wave.
+    assert "Armadillo Dual component" in g.PLANNED["armadillo-dual"]

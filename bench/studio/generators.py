@@ -37,7 +37,8 @@ PLANNED = {
     "hexagonal-panels": "wave 6b",
     "diagrid": "wave 6b",
     "spiral-courses": "wave 6b",
-    "armadillo-dual": "wave 6c",
+    "armadillo-dual": "wave 6c -- author with the Armadillo Dual component "
+    "in Grasshopper and import the sidecar",
 }
 
 # Every material's default, overridable from the UI. Tile and stone point
