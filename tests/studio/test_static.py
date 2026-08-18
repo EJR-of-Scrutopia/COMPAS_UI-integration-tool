@@ -347,6 +347,43 @@ def test_export_import_selects_and_loads_the_imported_study():
     assert "boot(contractPrefix)" in js[import_start:import_end]
 
 
+def test_a_reload_restores_the_last_loaded_study_not_studies_zero():
+    # P3 (presentation batch, 2026-08-18). Diagnosis: M2's own fix above
+    # already re-fetches /api/studies and selects + loads a freshly
+    # imported export within the same page, verified live against a
+    # running server -- no reload needed, and neither the client-refetch
+    # nor the server-cache theories in the brief reproduced. The actual
+    # break is boot()'s fallback when NO preferredExport wins at all: a
+    # plain page reload calls boot() with none, and until this fix that
+    # always meant studies[0] (alphabetically first) regardless of what was
+    # actually loaded before the reload -- so reloading during (or after)
+    # an import's own tens-of-seconds first cut silently dropped the user
+    # onto a different study, reading as "the import never landed" even
+    # though the upload and the dropdown entry were both fine.
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    assert 'const LAST_STUDY_KEY = "bench-studio-study";' in js
+    load_start = js.index("async function loadStudy(exportName)")
+    load_end = js.index("\n}", load_start)
+    load_body = js[load_start:load_end]
+    # The write must land AFTER buildScene actually succeeds (inside the
+    # try block, past the point a failed fetch or a superseded sequence
+    # number would have already returned), never before.
+    build_at = load_body.index("buildScene(fresh, preserve);")
+    write_at = load_body.index("localStorage.setItem(LAST_STUDY_KEY, exportName);")
+    assert build_at < write_at
+    boot_start = js.index("async function boot(preferredExport)")
+    boot_end = js.index("\n}", boot_start)
+    boot_body = js[boot_start:boot_end]
+    assert 'localStorage.getItem(LAST_STUDY_KEY)' in boot_body
+    # The fallback order: an explicit, still-valid preferredExport (a fresh
+    # import) wins outright; only when that is absent does the remembered
+    # last-active study get a turn, ahead of the studies[0] default.
+    preferred_at = boot_body.index("preferredExport && names.includes(preferredExport)")
+    last_active_at = boot_body.index("lastActive && names.includes(lastActive)")
+    default_at = boot_body.index("names.length ? names[0] : null")
+    assert preferred_at < last_active_at < default_at
+
+
 def test_run_completion_reloads_with_the_params_captured_at_post_time():
     # M5: a slider nudge mid-run must not orphan the run's own result --
     # watchRun must reload with the material/rings/thickness the run was

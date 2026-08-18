@@ -2384,6 +2384,22 @@ function requestMatchesLoaded(material) {
 // The selects commit immediately; they share the token, not the timer.
 const RELOAD_SETTLE_MS = 1500;
 
+// P3 fix (presentation batch, 2026-08-18): the last export that actually
+// finished loading (written by loadStudy, read by boot's fallback below).
+// Diagnosis: importExportPair() already called boot(contractPrefix) after a
+// successful upload (the M2 fix), and that already re-fetches /api/studies
+// and selects + loads the new export within the same page -- verified live
+// against studio.py, no reload needed. The real break is boot()'s OWN
+// fallback when no preferredExport wins: a plain reload calls boot() with
+// none at all, and until this fix that always landed on studies[0]
+// (alphabetically first), discarding whatever was actually on screen. A
+// first cut of an unfamiliar study takes tens of seconds server-side; a
+// reload reached for during that wait -- or any later revisit -- silently
+// dropped Param onto a different study, which reads as "the import never
+// really landed" even though the upload and the dropdown entry were both
+// fine.
+const LAST_STUDY_KEY = "bench-studio-study";
+
 function scheduleReload() {
   if (state.reloadTimer) clearTimeout(state.reloadTimer);
   state.reloadTimer = setTimeout(() => {
@@ -2439,6 +2455,10 @@ async function loadStudy(exportName) {
       ? { f: state.timeline.t / timelineDuration(), playing: state.timeline.playing }
       : null;
     buildScene(fresh, preserve);
+    // P3 fix: remember the study that actually finished loading, so a
+    // plain reload (boot() with no preferredExport) can restore it instead
+    // of always falling back to studies[0] -- see boot()'s own fallback.
+    localStorage.setItem(LAST_STUDY_KEY, exportName);
     logStudio("loaded " + exportName + " (" + materialLabel + ", "
       + patternLabel(state.pattern) + ", " + state.size + " m) in "
       + ((Date.now() - startedAt) / 1000).toFixed(1) + "s");
@@ -2480,9 +2500,20 @@ async function boot(preferredExport) {
     // that was just imported, not silently fall back to studies[0]. The
     // preferred name only wins when it actually exists in the fresh list
     // (an incomplete pair, for instance, never appears here at all).
+    // P3 fix: a plain reload calls boot() with no preferredExport at all,
+    // so without a second-choice fallback it always landed on studies[0]
+    // regardless of what was actually on screen before the reload -- see
+    // LAST_STUDY_KEY's own comment above for why that reads as "the import
+    // never landed". The last export that actually finished loading (any
+    // load, imported or just picked from the dropdown) is that second
+    // choice, checked against the fresh list the same way preferredExport
+    // already is.
+    const lastActive = localStorage.getItem(LAST_STUDY_KEY);
     const toLoad = preferredExport && names.includes(preferredExport)
       ? preferredExport
-      : (names.length ? names[0] : null);
+      : (lastActive && names.includes(lastActive)
+        ? lastActive
+        : (names.length ? names[0] : null));
     if (toLoad) {
       select.value = toLoad;
       await loadStudy(toLoad);
