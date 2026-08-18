@@ -181,7 +181,19 @@ def _chord_deviation(tess: Dict, surface: cutting.Surface, rounds: int) -> float
     for cell in tess["cells"]:
         if sampled > 200:
             break
-        points, triangles, _ = _cap(tess, cell, rounds)
+        try:
+            points, triangles, _ = _cap(tess, cell, rounds)
+        except UntriangulatableCell:
+            # Review fix (2026-08-18), MUST FIX 4: this call site reaches
+            # _cap before segment_pieces's own per-cell guard ever runs
+            # (choose_rounds is called first, to decide the round count
+            # every cell then subdivides at), so an untriangulatable cell
+            # here used to crash the whole cut rather than merely being
+            # dropped later. A degenerate cell is skipped for sampling
+            # purposes the same way it is dropped for drawing purposes:
+            # one fewer sample toward the chord-deviation measurement,
+            # not a reason the round count can never be chosen at all.
+            continue
         lifted = [_lift(surface, p) for p in points]
         for a, b, c in triangles:
             sampled += 1
@@ -230,6 +242,22 @@ def _lift(surface: cutting.Surface, plan) -> Dict:
     }
 
 
+class UntriangulatableCell(ValueError):
+    """A cell's own ring is too degenerate for cutting.ear_clip to find any
+    ear at all.
+
+    Review fix (2026-08-18): raised only around the ear_clip call itself,
+    not around cutting.bridge_holes just above it. bridge_holes raises a
+    plain ValueError of its own for a genuinely malformed AUTHORED hole (a
+    hole not inside its own outline, or one that could not be bridged into
+    a ring that already carries other bridges) -- an authoring error that
+    must fail loudly, not be reclassified as a degenerate drop. Subclassing
+    ValueError keeps any caller that only knows the old, broader contract
+    working; segment_pieces catches this narrower type specifically, so a
+    bridge_holes failure still propagates uncaught.
+    """
+
+
 def _cap(tess: Dict, cell: Dict, rounds: int):
     """The cell's plan triangulation and its boundary chains.
 
@@ -247,7 +275,7 @@ def _cap(tess: Dict, cell: Dict, rounds: int):
     try:
         triangles = cutting.ear_clip(ring, points)
     except (IndexError, ValueError) as error:
-        raise ValueError(
+        raise UntriangulatableCell(
             "cell {!r} could not be triangulated: {}".format(cell["key"], error)
         ) from error
     chains = [list(cell["outline"])] + [list(hole) for hole in cell["holes"]]
@@ -643,7 +671,7 @@ def segment_pieces(
     for cell in tess["cells"]:
         try:
             points, triangles, chains = _cap(tess, cell, rounds)
-        except ValueError:
+        except UntriangulatableCell:
             # Rim-rectangular fix (2026-08-18): a cell degenerate enough
             # that cutting.ear_clip finds no ear at all (not merely a
             # self-crossing ring it can still triangulate inside out, the
@@ -653,10 +681,16 @@ def segment_pieces(
             # any outline point of this cell has even been lifted. Same
             # remedy: drop the piece, disclose the key, do not crash the
             # whole cut over one degenerate corner of a real, irregular
-            # mesh. Measured: at 0.30 m (the piece-size slider's finest
-            # position) on the real Trial 2 export, two cells near the
-            # same rim notch domain.WOBBLE_TOLERANCE already names
-            # (c1p67, c1p118) are both this degenerate; see
+            # mesh. Caught by this specific exception type, not a plain
+            # ValueError: cutting.bridge_holes (also called inside _cap,
+            # for a cell with holes) raises a plain ValueError of its own
+            # for a genuinely malformed AUTHORED hole, which must still
+            # fail loudly rather than be reclassified as a degenerate
+            # drop -- see UntriangulatableCell's own docstring. Measured:
+            # at 0.30 m (the piece-size slider's finest position) on the
+            # real Trial 2 export, two cells near the same rim notch
+            # domain.WOBBLE_TOLERANCE already names (c1p67, c1p118) are
+            # both this degenerate; see
             # .superpowers/sdd/2026-08-18-rim-spikes/diagnosis.md.
             degenerate_dropped.append(cell["key"])
             continue
@@ -682,9 +716,31 @@ def segment_pieces(
         # entirely -- not shipped as a self-overlapping or zero-area
         # casting -- and named, not silently omitted, in
         # report["degenerate_dropped"] below.
+        #
+        # Review fix (2026-08-18), MUST FIX 7: _distinct_ring only
+        # collapses CONSECUTIVE duplicates, so a ring like A, B, A, C
+        # (corner 1 and corner 3 project onto the same boundary point,
+        # with corner 2 still between them) keeps 4 "distinct" points by
+        # that check alone while actually pinching into a self-touching
+        # figure -- a real fold this move can introduce, invisible to
+        # tessellation.build_tessellation's own folded/slivers report,
+        # which is computed pre-lift, before any point has moved.
+        # tessellation._is_simple (already used for exactly this question
+        # at cut-build time) is run again here, on the DEDUPED ring, so it
+        # answers "is what is left, after the harmless consecutive
+        # collapse above, still a simple polygon" rather than tripping on
+        # the very duplicate that collapse already explained away. Folded
+        # into the same degenerate_dropped disclosure, not a second count:
+        # both are "this cell's own moved outline is no longer a valid
+        # shape, so it is dropped rather than shipped broken."
         outline_shape = _distinct_ring([mid[i][:2] for i in cell["outline"]])
         hole_shapes = [_distinct_ring([mid[i][:2] for i in hole]) for hole in cell["holes"]]
-        if len(outline_shape) < 3 or any(len(hole) < 3 for hole in hole_shapes):
+        if (
+            len(outline_shape) < 3
+            or any(len(hole) < 3 for hole in hole_shapes)
+            or not tessellation._is_simple(outline_shape)
+            or any(not tessellation._is_simple(hole) for hole in hole_shapes)
+        ):
             degenerate_dropped.append(cell["key"])
             continue
 

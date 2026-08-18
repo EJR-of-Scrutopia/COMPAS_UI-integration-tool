@@ -341,6 +341,70 @@ def authored_sidecar():
     }
 
 
+def authored_sidecar_with_a_degenerate_cell():
+    """Two cells: "a" covers the whole tiny_contract plan, [0, 2] squared.
+    "b" is a small (0.02 m) real quad sitting entirely past the domain's
+    own top right corner (2, 2), in both x and y, so every one of its own
+    four corners lands off the render mesh and projects onto the
+    identical nearest boundary point, the corner itself -- the same
+    collapse test_a_piece_that_collapses_below_three_corners_is_dropped_
+    and_disclosed (test_pieces.py) exercises directly against pieces.py.
+    Here the point is the CUT still names "b" (tessellation.
+    build_tessellation, and staging.stage_plan built from it) even though
+    pieces.segment_pieces drops it from the drawn pieces.
+    """
+    return {
+        "schema": "bench.tessellation/1",
+        "units": "m",
+        "domain": "plan",
+        "pattern": "authored",
+        "cells": [
+            {"key": "a", "course": 0,
+             "outline": [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]]},
+            {"key": "b", "course": 0,
+             "outline": [[2.05, 2.05], [2.03, 2.05], [2.03, 2.03], [2.05, 2.03]]},
+        ],
+    }
+
+
+def test_a_degenerate_dropped_cell_does_not_silently_drop_the_staging_plan(
+    tmp_path, monkeypatch
+):
+    """Review fix (2026-08-18), MUST FIX 1, end to end. Before this fix,
+    bundle._staging_matches's plain subset test silently dropped the
+    whole staging plan (and with it the formwork animation and the CRA
+    verdict) with no message at all, whenever the cut's own guard-
+    degeneracy pass dropped even one cell the plan legitimately named --
+    exactly what the real Trial 2 export does at 0.30 m (see
+    .superpowers/sdd/2026-08-18-rim-spikes/diagnosis.md and outcome.md).
+    """
+    bundle, upload, _ = fake_export(tmp_path, monkeypatch)
+    sidecar = bundle.tessellation_sidecar("Tiny")
+    sidecar.write_text(
+        json.dumps(authored_sidecar_with_a_degenerate_cell()), encoding="utf-8"
+    )
+
+    import staging as staging_module
+    staged = staging_module.run_staging(
+        {"contract": upload / "Tiny-contract.json",
+         "geometry": upload / "Tiny-compas.json"},
+        material="concrete", pattern="bonded-courses", size=0.9,
+        out_path=bundle.staging_path("tiny", "concrete", "bonded-courses", 0.9, 0.2),
+        runner=lambda request: {"converged": True, "message": ""},
+        include_cra=False,
+    )
+    named = {s for stage in staged["stages"] for s in stage["segments"]}
+    assert "b" in named, "the cut itself must still stage the cell that later drops"
+
+    document = bundle.build_bundle("Tiny", "concrete", "bonded-courses", 0.9, 0.2)
+    drawn = {piece["key"] for piece in document["pieces"]}
+    assert drawn == {"a"}, "cell b must have been dropped as degenerate, not drawn"
+    assert document["tessellation"]["degenerate_dropped"] == ["b"]
+    assert document["staging"] is not None, (
+        "a plan naming a degenerate-dropped key must still ship"
+    )
+
+
 def staged_against(bundle, upload):
     import staging as staging_module
 
@@ -437,6 +501,28 @@ def test_the_staleness_gate_compares_segments_against_piece_keys():
     assert not b._staging_matches(None, made)
     # An empty plan names nothing, so it cannot contradict the cut.
     assert b._staging_matches({"stages": []}, made)
+
+
+def test_the_staleness_gate_tolerates_degenerate_dropped_keys():
+    """Review fix (2026-08-18), MUST FIX 1: a cell the tessellation itself
+    names, and that a stage plan therefore legitimately stages, can still
+    be dropped by pieces.segment_pieces's own guard-degeneracy pass
+    (untriangulatable, or collapsed below 3 corners after the
+    rim-rectangular snap -- see pieces.py). That is a real cell of THIS
+    cut that never became a drawn piece, not a mismatch with a different
+    cut's plan, which is the only thing this gate exists to catch. The
+    degenerate_dropped argument lets the gate tell the two apart.
+    """
+    b = studio()[1]
+    made = [{"key": "c0p0"}, {"key": "c0p1"}]
+    assert b._staging_matches(
+        {"stages": [{"segments": ["c0p0", "c0p1", "c1p67"]}]}, made, ["c1p67"])
+    # A key on neither list is still a real mismatch.
+    assert not b._staging_matches(
+        {"stages": [{"segments": ["c0p0", "gone"]}]}, made, ["c1p67"])
+    # No degenerate_dropped argument at all keeps the old, strict rule.
+    assert not b._staging_matches(
+        {"stages": [{"segments": ["c0p0", "c1p67"]}]}, made)
 
 
 def test_the_cut_is_reused_across_material_and_thickness(tmp_path, monkeypatch):

@@ -491,11 +491,15 @@ fix and its own full measurement.
 retrospective correction, not a stale claim: K3, as shipped, left every
 projected cap point's own PLAN position exactly where `domain.radius_at`
 placed it, up to 52.3 mm outside the true rim, and only its z, normal and
-field weights moved. Param's own complaint ("blocks that seem to jettison
-off in areas of it... typically by the edges") is that gap made visible:
-a corner sampled honestly on the true rim but still drawn tens of
+field weights moved. Measured at up to 52.3 mm, that gap is a real
+contributor to the ragged rim silhouette Param's own complaint names
+("blocks that seem to jettison off in areas of it... typically by the
+edges") -- a corner sampled honestly on the true rim but still drawn
 millimetres away from it, on a straight edge to its correctly-placed
-neighbour, is a spike. `cutting.Surface.lift` now carries the projected
+neighbour, reads as roughness. It is not the dominant cause: the worst,
+most visible spikes trace to a separate, larger (up to 505.7 mm) and
+unrelated mechanism, described two paragraphs below, that this fix does
+not touch. `cutting.Surface.lift` now carries the projected
 (x, y) through in its own returned dict (not only z/normal/weights), and
 `pieces._lift` ships it as the point's own drawn position, so a corner
 that needed the boundary-polyline projection now sits ON the rim, not

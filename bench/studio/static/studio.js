@@ -2138,6 +2138,24 @@ function renderDataPanel(v) {
         : "folded: no cell's welded outline crosses itself";
     content.appendChild(foldedLine);
 
+    // Rim-rectangular fix (2026-08-18): a cell whose own corners collapse
+    // below 3 distinct points after the plan-snap move (or that
+    // cutting.ear_clip cannot triangulate at all once the geometry has
+    // moved) is dropped rather than shipped broken or left to crash the
+    // cut. Guarded the same way folded/clamped/projected above are: a
+    // bundle cached before this fix has no degenerate_dropped to read.
+    const dropped = tess.degenerate_dropped;
+    const droppedLine = document.createElement("p");
+    droppedLine.textContent = !dropped
+      ? "degenerate dropped cells: not measured in this cached bundle"
+      : dropped.length
+        ? "degenerate dropped: " + dropped.length + " cell(s) collapsed "
+          + "below 3 distinct corners, or could not be triangulated, after "
+          + "the rim move, and were dropped rather than drawn broken -- "
+          + dropped.join(", ")
+        : "degenerate dropped: no cell was dropped";
+    content.appendChild(droppedLine);
+
     if (tess.backward_turn_degrees !== null && tess.backward_turn_degrees !== undefined) {
       const wobbleLine = document.createElement("p");
       wobbleLine.textContent = tess.backward_steps + " of the plan's own rim step(s) "

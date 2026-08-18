@@ -74,18 +74,6 @@ def _course_count(domain: Dict, size: float) -> int:
     return max(1, int(math.floor(_mean_radius(domain) / size + 0.5)))
 
 
-def _circumference(domain: Dict, f: float) -> float:
-    """Plan length once around at normalised radius f."""
-
-    total = 0.0
-    previous = domain_module.plan_point(domain, f, 0.0)
-    for i in range(1, ANGLE_SAMPLES + 1):
-        point = domain_module.plan_point(domain, f, TWO_PI * i / ANGLE_SAMPLES)
-        total += math.hypot(point[0] - previous[0], point[1] - previous[1])
-        previous = point
-    return total
-
-
 def _inside_span(angles, start: float, end: float) -> List[float]:
     """Every candidate angle, resolved to whichever branch lands strictly
     inside (start, end) and deduplicated, sorted by the value actually
@@ -226,9 +214,9 @@ def _arc_length_samples(domain: Dict, f: float) -> Tuple[List[float], List[float
     """Theta and cumulative plan arc length at radius f, sampled at
     ANGLE_SAMPLES steps around one full turn and closed (thetas[-1] is
     exactly TWO_PI, cumulative[-1] is the course's own circumference at
-    this radius -- the same sampling _circumference uses, kept here
-    instead so the running total can be inverted back to an angle, which
-    a plain running total alone cannot do).
+    this radius). Kept as a running total alongside its own theta samples,
+    rather than the plain summed distance a circumference figure alone
+    would be, so the running total can be inverted back to an angle.
     """
 
     thetas = [TWO_PI * i / ANGLE_SAMPLES for i in range(ANGLE_SAMPLES + 1)]
@@ -251,6 +239,14 @@ def _theta_at_length(thetas: List[float], cumulative: List[float], s: float) -> 
     """
 
     total = cumulative[-1]
+    # Cheap cleanup (review, 2026-08-18): a genuinely zero-length course
+    # (mid radius zero all the way round) would otherwise divide by zero
+    # at "s % total" below. _uniform_arc_divisions already guards its own
+    # near-zero case the same way (length <= 1e-9 -> 1 piece); this guard
+    # keeps that same threshold's promise here, at the one call site that
+    # actually performs a division by it.
+    if total <= 1e-9:
+        return thetas[0]
     s = s % total
     lo, hi = 0, len(cumulative) - 1
     while lo + 1 < hi:

@@ -1113,6 +1113,12 @@ def test_the_data_panel_has_a_cut_section_with_every_measured_disclosure():
         # primary fallback), so the panel has to read this new field or
         # the rim fix has no disclosure of its own at all.
         "tess.projected_points",
+        # Rim-rectangular fix (2026-08-18): a cell dropped by the guard-
+        # degeneracy pass (collapsed below 3 corners after the plan-snap
+        # move, or untriangulatable) enters none of the counts above --
+        # the same "named and nowhere excluded" reasoning folded already
+        # follows, so this needs the same reader.
+        "tess.degenerate_dropped",
     ):
         assert field in body, "the Cut section must read {}".format(field)
     # The counts need denominators. "137 cap points clamped" and "137 of
@@ -1230,6 +1236,14 @@ def test_the_data_panel_survives_a_bundle_cached_before_a_field_existed():
     assert 'typeof tess.projected_points !== "number"' in body, (
         "the projected-point count must be guarded the same way: an older "
         "cache has neither the field nor a reason to crash the panel"
+    )
+    # Rim-rectangular fix (2026-08-18): degenerate_dropped landed after
+    # this too, guarded the same "falsy means not measured" way folded is
+    # (an empty list must still read as a real, present zero, not fall
+    # into the same branch as a missing field).
+    assert "const dropped = tess.degenerate_dropped" in body and "!dropped" in body, (
+        "the degenerate-dropped count must be guarded the same way: an "
+        "older cache has neither the field nor a reason to crash the panel"
     )
 
 

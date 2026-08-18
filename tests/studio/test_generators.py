@@ -115,6 +115,22 @@ def test_uniform_arc_divisions_states_the_sliver_merge_rule():
     assert g._uniform_arc_divisions(0.0, 1.0) == 1
 
 
+def test_theta_at_length_does_not_divide_by_zero_on_a_degenerate_course():
+    """Cheap cleanup (review, 2026-08-18): a genuinely zero-length course
+    (cumulative[-1] == 0.0, every sample collapsed to the same plan point)
+    used to raise ZeroDivisionError at "s % total" -- _uniform_arc_
+    divisions already guards this same near-zero case (length <= 1e-9 ->
+    1 piece); _theta_at_length needs the identical guard at its own
+    division, not just at the caller that happens to divide by the same
+    number first.
+    """
+
+    g = studio("generators")
+    thetas = [0.0, math.pi, 2.0 * math.pi]
+    cumulative = [0.0, 0.0, 0.0]
+    assert g._theta_at_length(thetas, cumulative, 0.5) == thetas[0]
+
+
 def test_within_course_pieces_are_exact_equal_arc_length():
     """The primary invariant the row-uniform courses fix promises: every
     piece within one course's own contiguous arc is the SAME arc length,
@@ -196,36 +212,69 @@ def test_a_bigger_target_size_makes_fewer_pieces():
     assert len(small["cells"]) > len(large["cells"])
 
 
+def _measure_arc_length(domain, f, theta_a, theta_b, steps=4000):
+    """Independent numerical arc length from theta_a to theta_b (theta_b
+    >= theta_a, neither wrapped) at radius f, sampling domain.plan_point
+    directly -- no generators.py internals at all -- so a check built on
+    this cannot pass merely by reading back the same computation the code
+    under test already performed."""
+
+    d = studio("domain")
+    total = 0.0
+    previous = d.plan_point(domain, f, theta_a)
+    for i in range(1, steps + 1):
+        theta = theta_a + (theta_b - theta_a) * i / steps
+        point = d.plan_point(domain, f, theta)
+        total += math.hypot(point[0] - previous[0], point[1] - previous[1])
+        previous = point
+    return total
+
+
 def test_bonded_offset_rule_is_exact():
     """Row-uniform courses fix (2026-08-18): the stagger that used to be a
     half-ANGLE offset (course % 2) * pi / count is now a half-PIECE-LENGTH
     offset (generators._divisions), the actual physical point of running
     bond -- shifting alternate courses by half a brick, not half a degree.
-    There is no closed form angle expression for that any more on a
-    general (non-circular) domain, so this is checked against the
-    module's own arc-length machinery directly: even courses are
-    unstaggered (their first head joint sits at theta = 0 exactly), and
-    an odd course's own offset is exactly the angle
-    generators._theta_at_length places half a piece-length along the
-    course's own mid-radius circumference -- the offset IS that
-    inversion, not merely close to it.
+
+    Checked independently of _divisions/_arc_length_samples/_theta_at_length
+    (an earlier version of this test read those back and was true by
+    construction): read course 0's and course 1's own first two cells'
+    real, generated start angles straight off the tessellation, then
+    measure the arc length between them with a standalone numerical
+    integration (_measure_arc_length, above) that touches only
+    domain.plan_point. Course 0 (even, unstaggered) must start at theta
+    zero; the arc length from there to course 1's own start must be half
+    of course 1's own first piece length, both measured the same
+    independent way.
     """
+
     g = studio("generators")
     domain = disc_domain()
     size = 1.0
-    courses = g._course_count(domain, size)
+    tess = g.generate("bonded-courses", domain, size)
+    axis = domain["axis"]
 
-    for course in range(courses):
-        count, offset, angles = g._divisions(domain, size, courses, course)
-        assert offset == angles[0]
-        mid_f = 1.0 - (course + 0.5) / courses
-        thetas, cumulative = g._arc_length_samples(domain, mid_f)
-        piece_length = cumulative[-1] / count
-        expected_offset = g._theta_at_length(
-            thetas, cumulative, (course % 2) * (piece_length / 2.0))
-        assert offset == expected_offset
-        if course % 2 == 0:
-            assert offset == 0.0
+    def start_theta(key):
+        cell = next(c for c in tess["cells"] if c["key"] == key)
+        point = tess["points"][cell["outline"][0]]
+        return math.atan2(point[1] - axis[1], point[0] - axis[0])
+
+    theta0 = start_theta("c0p0")
+    assert theta0 == pytest.approx(0.0, abs=1e-9)
+
+    two_pi = 2.0 * math.pi
+    theta1 = start_theta("c1p0")
+    theta1_next = start_theta("c1p1")
+    if theta1 < 0.0:
+        theta1 += two_pi
+    if theta1_next < theta1:
+        theta1_next += two_pi
+
+    courses = tess["courses"]
+    mid_f = 1.0 - 1.5 / courses  # course 1's own mid radius
+    measured_offset = _measure_arc_length(domain, mid_f, 0.0, theta1)
+    measured_piece = _measure_arc_length(domain, mid_f, theta1, theta1_next)
+    assert measured_offset == pytest.approx(measured_piece / 2.0, rel=1e-3)
 
 
 def test_adjacent_courses_have_different_divisions():

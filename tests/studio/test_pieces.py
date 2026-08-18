@@ -547,6 +547,121 @@ def test_a_piece_that_collapses_below_three_corners_is_dropped_and_disclosed():
     assert report["degenerate_dropped"] == ["collapsing"]
 
 
+def test_a_move_induced_fold_from_non_consecutive_corners_is_caught():
+    """Review fix (2026-08-18), MUST FIX 7: _distinct_ring only collapses
+    CONSECUTIVE duplicates, so a ring shaped A, B, A, C -- corner 0 and
+    corner 2 (NOT adjacent; corner 1 sits between them in the ring) both
+    project onto the identical nearest boundary point, while corner 1 and
+    corner 3 stay put -- keeps 4 "distinct" points by that check alone,
+    even though the moved ring now pinches through itself at the shared
+    point. This is invisible to tessellation.build_tessellation's own
+    folded/slivers report, computed on the RAW, pre-lift outline: this
+    exact 4 point ring is genuinely simple before the move (confirmed
+    below) and only self-intersects after it.
+
+    Built by hand rather than found on a real export (the real notch
+    cases are rare enough that hunting for this specific corner-order
+    coincidence was not worth it): corners 0 and 2 both sit at x > 1 (off
+    the unit square, both nearest to the same point on the right edge,
+    (1.0, 0.5), regardless of exactly how far right each one is); corners
+    1 and 3 sit at x = 0.5, safely inside.
+    """
+
+    p = studio("pieces")
+    t = studio("tessellation")
+    surface = flat_surface(width=1.0, height=1.0, nx=4, ny=4)
+    surface.boundary = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+
+    raw_outline = [[1.05, 0.5], [0.5, 0.9], [1.03, 0.5], [0.5, 0.1]]
+    assert t._is_simple(raw_outline), "the fixture's own raw ring must be simple"
+    assert not t._is_simple([[1.0, 0.5], [0.5, 0.9], [1.0, 0.5], [0.5, 0.1]]), (
+        "the fixture must actually self-intersect once projected, or this "
+        "test proves nothing"
+    )
+
+    tess = t.build_tessellation(
+        [{"key": "foldme", "course": 0, "outline": raw_outline, "holes": []}],
+        "test", "generated", 1.0, 1,
+    )
+    # Invisible to the pre-lift check: the whole point of this defect.
+    assert tess["report"]["folded"] == []
+    assert tess["report"]["slivers"] == []
+
+    made, report = p.segment_pieces(tess, surface, [])
+    assert made == []
+    assert report["degenerate_dropped"] == ["foldme"]
+
+
+def test_a_malformed_authored_hole_still_fails_loudly_not_dropped():
+    """Review fix (2026-08-18), MUST FIX 3: the except clause guarding
+    _cap in segment_pieces must not swallow cutting.bridge_holes's own
+    ValueError ("a hole is not inside its outline"), raised for a
+    genuinely malformed AUTHORED hole -- an authoring error that has to
+    reach the caller as a real exception, not be silently reclassified as
+    a degenerate drop the way an untriangulatable ring now is (see
+    pieces.UntriangulatableCell). This hole sits entirely outside its own
+    outline, on purpose.
+    """
+
+    p = studio("pieces")
+    t = studio("tessellation")
+    surface = flat_surface()
+    tess = t.build_tessellation(
+        [{
+            "key": "bad-hole", "course": 0,
+            "outline": [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            "holes": [[[2.0, 0.4], [2.2, 0.4], [2.2, 0.6], [2.0, 0.6]]],
+        }],
+        "test", "generated", 1.0, 1,
+    )
+    with pytest.raises(ValueError, match="not inside its outline"):
+        p.segment_pieces(tess, surface, [])
+
+
+def test_choose_rounds_skips_an_untriangulatable_cell_instead_of_crashing():
+    """Review fix (2026-08-18), MUST FIX 4: choose_rounds (through its own
+    call to _chord_deviation) reaches _cap BEFORE segment_pieces's own
+    per-cell guard ever runs, to decide the round count every cell then
+    subdivides at. An untriangulatable cell here used to crash the whole
+    cut rather than merely being dropped later.
+
+    This exact 6 point ring is not synthetic: it is the real, welded
+    course-1 outline of cell c1p67 on the real Trial 2 export at 0.30 m
+    (translated so its first point sits at the origin; translation does
+    not change whether ear_clip can find an ear), the untriangulatable
+    cell test_an_untriangulatable_cell_is_dropped_not_crashed already
+    covers at the segment_pieces level. This test pins the same shape of
+    guard one level earlier, directly against choose_rounds.
+    """
+
+    p = studio("pieces")
+    t = studio("tessellation")
+    surface = flat_surface(width=4.0, height=4.0, nx=8, ny=8)
+    bad_ring = [
+        [0.0, 0.0], [-0.0025253425958640108, -0.0008205391412818841],
+        [0.7160146446535371, -1.0524795182665843],
+        [0.45262581780893907, -0.6843516657593325],
+        [0.35506881662975687, -0.5079613556404095],
+        [-0.301073808142152, 0.42352151136338634],
+    ]
+    tess = t.build_tessellation(
+        [
+            {"key": "good", "course": 0,
+             "outline": [[1.0, 1.0], [2.0, 1.0], [2.0, 2.0], [1.0, 2.0]],
+             "holes": []},
+            {"key": "bad", "course": 0, "outline": bad_ring, "holes": []},
+        ],
+        "test", "generated", 1.0, 1,
+    )
+    chosen = p.choose_rounds(tess, surface)
+    assert chosen["rounds"] >= 0
+    # The real point: segment_pieces itself still runs end to end, past
+    # choose_rounds, and drops the same cell it would have crashed on.
+    made, report = p.segment_pieces(tess, surface, [])
+    assert "bad" in report["degenerate_dropped"]
+    assert [piece["key"] for piece in made] == ["good"]
+
+
 def test_a_normal_piece_ships_with_no_degenerate_drops():
     """The guard degeneracy fix must not fire on ordinary geometry: the
     four cell fixture's own report carries an empty, present (not absent)
@@ -893,19 +1008,6 @@ def test_rim_points_project_to_the_boundary_on_the_real_trial_2_plan():
     # order as the K3 baseline (both are governed by the same real rim
     # notch), not a coincidental match to the old number.
     assert report["projected_max_m"] == pytest.approx(0.046405, abs=1e-4)
-
-
-def _point_in_loop(loop, x, y):
-    inside = False
-    n = len(loop)
-    for i in range(n):
-        ax, ay = loop[i]
-        bx, by = loop[(i + 1) % n]
-        if (ay > y) != (by > y):
-            crossing = ax + (y - ay) * (bx - ax) / (by - ay)
-            if crossing > x:
-                inside = not inside
-    return inside
 
 
 def _nearest_point_on_loop(loop, x, y):

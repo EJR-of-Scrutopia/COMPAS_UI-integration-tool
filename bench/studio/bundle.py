@@ -17,7 +17,7 @@ import os
 import tempfile
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import cutting
 import domain
@@ -113,7 +113,9 @@ def _read_optional(path: Path) -> Optional[dict]:
     return None
 
 
-def _staging_matches(staged: Optional[dict], made: List[dict]) -> bool:
+def _staging_matches(
+    staged: Optional[dict], made: List[dict], degenerate_dropped: Sequence[str] = ()
+) -> bool:
     """Does this stage plan name the cells these pieces actually carry?
 
     The bundle guards its own pieces twice, with REQUIRED_BUNDLE_KEYS and
@@ -146,6 +148,20 @@ def _staging_matches(staged: Optional[dict], made: List[dict]) -> bool:
     under that same key, so a matching pair has equal sets. Subset, not
     equality, is the test, because a plan naming fewer cells than are
     drawn is still a plan about this cut.
+
+    Review fix (2026-08-18): a stage plan is solved against binding["keys"],
+    every cell the CUT itself names, before pieces.segment_pieces's own
+    guard-degeneracy pass (see pieces.py) can drop a handful of them as
+    untriangulatable or collapsed below 3 corners. Those keys are real cells
+    of this cut, correctly named by the plan, that simply never became a
+    drawn piece -- not a mismatch with a DIFFERENT cut's plan, which is the
+    only thing this gate exists to catch (see the docstring above). Treating
+    them as a fatal mismatch silently dropped the whole staging plan (and
+    with it the formwork animation and the CRA verdict) on any export/size
+    combination that drops even one cell, with no message anywhere: at
+    0.30 m on the real Trial 2 export, exactly this happened. named is
+    therefore compared against made's own keys UNION the cells this cut's
+    own report already discloses as dropped, not against made alone.
     """
 
     if staged is None:
@@ -161,6 +177,7 @@ def _staging_matches(staged: Optional[dict], made: List[dict]) -> bool:
         if not isinstance(segments, list):
             return False
         named.update(segments)
+    named -= set(degenerate_dropped)
     return named <= {piece["key"] for piece in made}
 
 
@@ -326,7 +343,7 @@ def build_bundle(
     # A stale plan is worse than no plan: see _staging_matches.
     staged = _read_optional(
         staging_path(slug, material, pattern, size, thickness))
-    if not _staging_matches(staged, made):
+    if not _staging_matches(staged, made, report.get("degenerate_dropped") or ()):
         staged = None
 
     document = {
