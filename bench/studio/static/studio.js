@@ -3460,7 +3460,30 @@ function rebuildTimeline(preserve) {
     // touches the camera at all -- see W5, frame()). A same-export reload
     // skips it: the centre is the same point, and the camera is wherever
     // the user put it.
+    //
+    // A NEW study also reframes the camera position (2026-08-18: loading
+    // the Armadillo after another study left the camera inside or miles
+    // from the new shell -- retargeting alone cannot fix a position that
+    // belongs to the previous study's framing). The current viewing
+    // direction is kept so the reframe feels like a zoom-to-extents, and
+    // the distance comes from the new study's own bounding radius.
+    const vertices = state.bundle.analysis_mesh.vertices;
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (const v of vertices) {
+      if (v[0] < minX) minX = v[0]; if (v[0] > maxX) maxX = v[0];
+      if (v[1] < minY) minY = v[1]; if (v[1] > maxY) maxY = v[1];
+      if (v[2] < minZ) minZ = v[2]; if (v[2] > maxZ) maxZ = v[2];
+    }
+    const boundingRadius = 0.5 * Math.hypot(maxX - minX, maxY - minY, maxZ - minZ);
+    const direction = camera.position.clone().sub(controls.target);
+    if (direction.lengthSq() < 1e-9) direction.set(1, 1, 0.6);
+    direction.normalize();
+    if (direction.z < 0.15) direction.z = 0.15; // never frame from underground
+    direction.normalize();
     controls.target.copy(state.centre);
+    camera.position.copy(state.centre.clone().add(
+      direction.multiplyScalar(Math.max(2.2 * boundingRadius, 5))));
     controls.update();
   }
   buildPieceMeshes();

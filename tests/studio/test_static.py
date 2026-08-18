@@ -3295,6 +3295,33 @@ def test_w5_centroid_recompute_is_a_bounding_box_not_an_average():
     assert "state.centre = sceneCentroid();" in rebuild_body
 
 
+def test_a_new_study_load_reframes_the_camera_to_the_studys_extents():
+    """2026-08-18: loading the Armadillo after another study left the
+    camera inside or far from the new shell -- retargeting alone cannot
+    fix a position that belongs to the previous study's framing. A NEW
+    study load (rebuildTimeline's !preserve branch) reframes the camera
+    along the current viewing direction at a distance from the study's
+    own bounding radius, never from underground; a same-export reload
+    (preserve) still leaves the camera exactly where the user put it."""
+
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    rebuild_body = _function_body(js, "rebuildTimeline")
+    preserve_guard = rebuild_body.index("if (!preserve) {")
+    preserve_end = rebuild_body.index("\n  }", preserve_guard)
+    reframe = rebuild_body[preserve_guard:preserve_end]
+    assert "boundingRadius" in reframe
+    assert "camera.position.copy(" in reframe, (
+        "retargeting alone leaves the camera at the previous study's "
+        "position; the reframe must move it"
+    )
+    assert "Math.max(2.2 * boundingRadius, 5)" in reframe
+    assert "direction.z < 0.15" in reframe, "never frame from underground"
+    # The preserve path must NOT touch the camera: everything after the
+    # !preserve block stays camera-free.
+    after = rebuild_body[preserve_end:]
+    assert "camera.position" not in after
+
+
 def test_w6_ground_controls_exist_and_scale_hides_for_dark_studio():
     """Task 5 (W6, studio tweaks 2026-08-17): each ground preset gains Tint
     (colour) and Scale (texture repeat multiplier) controls, plus a reset.
