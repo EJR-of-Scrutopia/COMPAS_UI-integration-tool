@@ -41,6 +41,12 @@ const state = {
   hdriHeight: 2,        // GroundedSkybox height (camera height above ground in the source photo), metres
   hdriRotation: 0,      // degrees, spins the dome/background about the world vertical
   hdriEstimateAzimuth: null, // raw pixel-estimated azimuth from the last loadHdri; lets the rotation slider re-aim the sun without re-scanning pixels
+  // P1 (presentation batch, 2026-08-18): hdri-ground checkbox, default off.
+  // The dome floor and the studio ground plane occupy almost the same
+  // world position (see applyHdriGroundOverride); off keeps today's
+  // projected look untouched, on forces the studio ground -- and its own
+  // preset/tint/scale controls -- on top of it.
+  hdriShowGround: false,
   sunColourOverride: null,   // S5: hex string once the sun-colour input is touched; null lets a preset choose the colour again
   sunIntensityOverride: null, // F4: sun.intensity captured once a day cycle finishes; null lets a preset choose the intensity again, exactly like sunColourOverride
   sunElevationSetting: 40,   // F1: the #sun-elevation slider's own value, written only by its own input handler; the day cycle reads its peak from here, never from the slider itself (applyDayCycle also writes that slider, clamped for display -- see applyDayCycle)
@@ -318,6 +324,11 @@ function applyEnvironment() {
     // second time. See applyGrade for the one live site.
   }
   applyGrade();
+  // P1: leaving hdri+projected mode (or hdri mode entirely) must drop the
+  // ground's renderOrder override too, not just hide the checkbox row --
+  // applyHdriBackdrop's own call covers the hdri branch above; this one
+  // covers sky and studio.
+  applyHdriGroundOverride();
 }
 
 function regenerateEnvironment() {
@@ -359,6 +370,7 @@ function applyHdriBackdrop() {
   disposeHdriDome();
   document.getElementById("hdri-scale-row").classList.toggle("hidden", state.hdriProjection !== "projected");
   document.getElementById("hdri-height-row").classList.toggle("hidden", state.hdriProjection !== "projected");
+  document.getElementById("hdri-ground-row").classList.toggle("hidden", state.hdriProjection !== "projected");
   const rotation = THREE.MathUtils.degToRad(state.hdriRotation);
   // Equirects are authored Y-up; the scene is Z-up, so the environment
   // sampler rotates a quarter turn about X, same as the old flat backdrop.
@@ -384,6 +396,32 @@ function applyHdriBackdrop() {
     scene.background = state.hdriTexture; // null paints the clear colour until a file loads
     scene.backgroundRotation.set(Math.PI / 2, 0, rotation);
   }
+  applyHdriGroundOverride();
+}
+
+// P1 (presentation batch, 2026-08-18): the GroundedSkybox floor and the
+// studio ground plane sit almost on top of each other -- the dome's local
+// y=0 plane (its own flattened equatorial disc, per GroundedSkybox.js) maps
+// to world z=0 once the dome's wrapping group applies the Y-up-to-Z-up
+// quarter turn (rotation.x = PI/2), and the ground disc itself sits at
+// z=-0.03 -- but GroundedSkybox's own material sets depthWrite: false (a
+// photographic backdrop must never occlude anything drawn after it), so
+// there is no real depth fight between the two: whichever one paints
+// LAST simply wins the pixel, and until this fix that draw order was
+// whatever three's opaque sort happened to land on, which is what read as
+// Param's "not in all instances". three.js sorts the opaque render list by
+// renderOrder before anything else (painterSortStable, three.module.js), so
+// giving the ground a renderOrder above the dome's own default of 0 settles
+// it outright and deterministically, with no grazing-angle shimmer to
+// diagnose away (confirmed against a probe capture; see the P1 report) --
+// polygonOffset and a z lift were the brief's other named options, but
+// neither is needed once the actual mechanism (paint order, not equal
+// depths) is understood.
+function applyHdriGroundOverride() {
+  if (!state.objects.ground) return;
+  const showGround = state.environmentMode === "hdri"
+    && state.hdriProjection === "projected" && state.hdriShowGround;
+  state.objects.ground.renderOrder = showGround ? 1 : 0;
 }
 
 async function refreshHdriList(selectName) {
@@ -1108,6 +1146,10 @@ function buildScene(bundle, preserve) {
   ground.position.z = -0.03;
   state.objects.ground = ground;
   scene.add(ground);
+  // P1: a freshly built ground mesh always starts at the Object3D default
+  // renderOrder (0), so a study reload while "Show ground" is on has to
+  // re-apply it -- see applyHdriGroundOverride's own comment.
+  applyHdriGroundOverride();
 
   applyCut(preserve);
   buildLayerToggles();
@@ -2759,13 +2801,21 @@ document.getElementById("hdri-projection").addEventListener("change", (e) => {
   state.hdriProjection = e.target.value;
   applyHdriBackdrop();
 });
+document.getElementById("hdri-scale").addEventListener("input", (e) => {
+  document.getElementById("hdri-scale-value").textContent = e.target.value;
+});
 document.getElementById("hdri-scale").addEventListener("change", (e) => {
   state.hdriScale = +e.target.value;
+  document.getElementById("hdri-scale-value").textContent = e.target.value;
   applyHdriBackdrop();
 });
 document.getElementById("hdri-height").addEventListener("change", (e) => {
   state.hdriHeight = +e.target.value;
   applyHdriBackdrop();
+});
+document.getElementById("hdri-ground").addEventListener("change", (e) => {
+  state.hdriShowGround = e.target.checked;
+  applyHdriGroundOverride();
 });
 // Dragging the rotation slider spins the live dome/background directly
 // (cheap: no geometry rebuild); releasing it re-aims the sun from the

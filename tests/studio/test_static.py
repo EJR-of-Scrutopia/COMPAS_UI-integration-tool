@@ -2254,6 +2254,68 @@ def test_the_hdri_backdrop_projects_and_rotates():
         .read_text(encoding="utf-8"))
 
 
+def test_hdri_ground_toggle_settles_paint_order_not_depth():
+    # P1 (presentation batch, 2026-08-18). Diagnosis: the dome's own
+    # GroundedSkybox.js sets depthWrite: false on its MeshBasicMaterial (a
+    # photographic backdrop must never occlude anything drawn after it), so
+    # the dome floor and the studio ground plane were never actually
+    # depth-fighting -- whichever one painted LAST simply won the pixel,
+    # and until this fix that draw order was whatever three's opaque sort
+    # happened to land on: Param's own "not in all instances". renderOrder
+    # is the fix (three.js sorts the opaque list by renderOrder before
+    # anything else -- painterSortStable, three.module.js): a ground
+    # renderOrder above the dome's default 0 makes the ground paint last,
+    # deterministically, with no equal-depth race to shimmer at a grazing
+    # angle. polygonOffset and a z lift were the brief's other named
+    # options; neither is needed once the true mechanism is understood.
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    assert 'id="hdri-ground-row"' in html and 'id="hdri-ground"' in html
+    ground_row_start = html.index('id="hdri-ground-row"')
+    ground_tag = html[ground_row_start:html.index(">", html.index('id="hdri-ground"', ground_row_start))]
+    assert 'type="checkbox"' in ground_tag
+    assert "checked" not in ground_tag, "the toggle must default off"
+
+    # The floor-reach relabel: the existing hdri-scale control IS the dome
+    # radius (state.hdriScale, default 60 m per BENT), just unlabelled --
+    # the fix is legibility, not a new control.
+    assert "Projection radius (floor reach)" in html
+    assert 'id="hdri-scale-value"' in html
+    assert "hdriScale: 60," in js
+
+    assert "hdriShowGround: false," in js
+    override_body = _function_body(js, "applyHdriGroundOverride")
+    assert 'state.environmentMode === "hdri"' in override_body
+    assert 'state.hdriProjection === "projected"' in override_body
+    assert "state.hdriShowGround" in override_body
+    assert "renderOrder = showGround ? 1 : 0" in override_body
+
+    # Applied everywhere the ground mesh or the dome can change: a fresh
+    # study load (a brand new ground mesh, renderOrder reset to the
+    # Object3D default of 0), a projection/mode switch, and the checkbox
+    # itself.
+    build_body = _function_body(js, "buildScene")
+    assert "applyHdriGroundOverride()" in build_body
+    backdrop_body = _function_body(js, "applyHdriBackdrop")
+    assert "applyHdriGroundOverride()" in backdrop_body
+    env_body = _function_body(js, "applyEnvironment")
+    assert "applyHdriGroundOverride()" in env_body
+    toggle_start = js.index('getElementById("hdri-ground").addEventListener("change"')
+    toggle_body = js[toggle_start:js.index("\n});", toggle_start)]
+    assert "state.hdriShowGround = e.target.checked" in toggle_body
+    assert "applyHdriGroundOverride()" in toggle_body
+
+    # Visible only in hdri mode (the whole #hdri-row) AND projected (grouped
+    # with the scale/height rows it shares that gating with).
+    assert 'document.getElementById("hdri-ground-row").classList.toggle("hidden", state.hdriProjection !== "projected")' in backdrop_body
+
+    # The ground preset + tint + scale controls are reused, not duplicated:
+    # they are not gated to any environment mode at all, so they already
+    # apply identically in hdri mode -- there is no second copy to find.
+    for duplicate in ("hdri-ground-preset", "hdri-ground-tint", "hdri-ground-scale"):
+        assert duplicate not in html
+
+
 def test_environment_functions_never_read_the_clock_or_the_timeline():
     js = (STATIC / "studio.js").read_text(encoding="utf-8")
     for name in ("applyEnvironment", "regenerateEnvironment", "applySunFromSliders"):
