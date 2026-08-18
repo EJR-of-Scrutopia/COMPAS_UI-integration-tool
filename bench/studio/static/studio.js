@@ -2125,14 +2125,22 @@ function renderDataPanel(v) {
     // A folded cell is named and nowhere excluded: it is still cut, still
     // capped and still drawn, with one lobe of its cap inside out. It
     // enters none of the counts above, so naming it here is the only way
-    // anyone learns which piece on screen is the bad one.
+    // anyone learns which piece on screen is the bad one. A key that also
+    // appears in tessellation.degenerate_dropped was dropped after the
+    // lift, not drawn -- the dropped line below already tells that cell's
+    // story, so it is subtracted here to keep the "still drawn" claim true
+    // for the keys that remain.
     const folded = coverage.folded;
+    const droppedKeys = tess.degenerate_dropped || [];
+    const stillDrawnFolded = folded
+      ? folded.filter((key) => !droppedKeys.includes(key))
+      : folded;
     const foldedLine = document.createElement("p");
     foldedLine.textContent = !folded
       ? "folded cells: not measured in this cached bundle"
-      : folded.length
-        ? "folded: " + folded.length + " cell(s) whose welded outline "
-          + "crosses itself -- " + folded.join(", ") + ". Each is still cut, "
+      : stillDrawnFolded.length
+        ? "folded: " + stillDrawnFolded.length + " cell(s) whose welded outline "
+          + "crosses itself -- " + stillDrawnFolded.join(", ") + ". Each is still cut, "
           + "still capped and still drawn, with one lobe of its cap inside "
           + "out, and enters none of the coverage counts above."
         : "folded: no cell's welded outline crosses itself";

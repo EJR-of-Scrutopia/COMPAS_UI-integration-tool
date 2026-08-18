@@ -255,6 +255,13 @@ class UntriangulatableCell(ValueError):
     ValueError keeps any caller that only knows the old, broader contract
     working; segment_pieces catches this narrower type specifically, so a
     bridge_holes failure still propagates uncaught.
+
+    Stay narrow at every call site: a future bare "except ValueError"
+    wrapped around a _cap call would silently re-absorb the swallowing
+    behavior this narrowing was written to remove, catching a genuinely
+    malformed authored hole's bridge_holes failure right alongside a
+    degenerate cell instead of letting it fail loudly. Catch
+    UntriangulatableCell explicitly, not ValueError.
     """
 
 

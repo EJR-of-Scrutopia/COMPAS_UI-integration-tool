@@ -1137,6 +1137,25 @@ def test_the_data_panel_has_a_cut_section_with_every_measured_disclosure():
     assert "coverage.folded" in body, (
         "the Cut section must show the folded list beside the coverage report"
     )
+    # A cutting-engine fix can put the same cell key in both coverage.folded
+    # and tess.degenerate_dropped (measured e.g. c4p100/c4p57 at 0.30 m):
+    # the corner-collapse guard runs after the fold check, so a folded cell
+    # can also collapse and be dropped after the rim move. The folded line
+    # must subtract degenerate_dropped before it renders its count and key
+    # list, or the two lines contradict each other over the same key -- one
+    # saying "still drawn", the other "dropped rather than drawn".
+    assert "const droppedKeys = tess.degenerate_dropped || []" in body, (
+        "the folded line must read degenerate_dropped to know which of "
+        "its own keys the dropped line already claimed"
+    )
+    assert "folded.filter((key) => !droppedKeys.includes(key))" in body, (
+        "the folded list must be filtered against degenerate_dropped "
+        "before the folded line quotes a count or a key list off it"
+    )
+    assert "stillDrawnFolded.length" in body and "stillDrawnFolded.join" in body, (
+        "the folded line's count and key list must come from the filtered "
+        "list, not the raw coverage.folded list"
+    )
     # The residual is disclosed as a sine; BENCH.md gives degrees too.
     assert "residualDegrees(" in body, (
         "the residual must be disclosed in degrees as well as as a sine"
@@ -1244,6 +1263,17 @@ def test_the_data_panel_survives_a_bundle_cached_before_a_field_existed():
     assert "const dropped = tess.degenerate_dropped" in body and "!dropped" in body, (
         "the degenerate-dropped count must be guarded the same way: an "
         "older cache has neither the field nor a reason to crash the panel"
+    )
+    # The folded line now filters coverage.folded against degenerate_dropped
+    # (an overlap fix, 2026-08-18: the two lists can share a key, and the
+    # folded line must not still call a dropped cell "drawn"). A bundle
+    # cached before degenerate_dropped existed has no list to filter
+    # against, so the subtraction must default to an empty list rather than
+    # throw filtering against undefined.
+    assert "tess.degenerate_dropped || []" in body, (
+        "the folded line's subtraction must default to an empty list on a "
+        "cache with no degenerate_dropped, not throw filtering against "
+        "undefined"
     )
 
 
