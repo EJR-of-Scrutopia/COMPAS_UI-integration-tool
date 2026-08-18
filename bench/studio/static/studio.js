@@ -2143,7 +2143,10 @@ function renderDataPanel(v) {
           + "crosses itself -- " + stillDrawnFolded.join(", ") + ". Each is still cut, "
           + "still capped and still drawn, with one lobe of its cap inside "
           + "out, and enters none of the coverage counts above."
-        : "folded: no cell's welded outline crosses itself";
+        : folded.length
+          ? "folded: every self-crossing cell was dropped rather than drawn "
+            + "(see the dropped line below)"
+          : "folded: no cell's welded outline crosses itself";
     content.appendChild(foldedLine);
 
     // Rim-rectangular fix (2026-08-18): a cell whose own corners collapse
