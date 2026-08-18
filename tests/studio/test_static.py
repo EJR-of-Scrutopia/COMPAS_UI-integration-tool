@@ -2516,6 +2516,92 @@ def test_wire_net_vertex_colours_are_off_at_rest():
     assert "nodeMaterial.vertexColors" not in build_body
 
 
+def test_net_nodes_are_black_and_the_net_receives_shadow():
+    """Param (2026-08-18), after the ghost fix restored the net's true
+    brightness: the wires stay the registry steel silver, but the nodes
+    read as black cable fittings, and the net must darken where the shell
+    shades it. A metalness-1 black is a mirror, not black, so the node
+    clone drops to a dull dielectric with the environment term cut; the
+    net receives shadow (castShadow stays off -- the K-era pin below --
+    because an occluded net inside the closed vault must not project a
+    grid onto the ground)."""
+
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    build_body = _function_body(js, "buildWiresAndNodes")
+    assert "nodeMaterial.color.setHex(0x16181c);" in build_body, (
+        "the nodes are black cable fittings, not steel spheres"
+    )
+    assert "nodeMaterial.metalness = 0.2;" in build_body
+    assert "nodeMaterial.envMapIntensity = 0.25;" in build_body, (
+        "a bright environment would wash the black back to grey"
+    )
+    assert "wires.receiveShadow = nodes.receiveShadow = true;" in build_body, (
+        "the net must sit IN shadow where the shell shades it"
+    )
+    assert "wires.castShadow = nodes.castShadow = false;" in build_body
+    # The wires themselves keep the registry steel look untouched: no
+    # colour override on the wire clone.
+    assert "wireMaterial.color" not in build_body
+
+
+def test_recording_is_stoppable_mid_run():
+    """Param (2026-08-18): a recording stalled mid-run (background-tab
+    throttling) with no way out but a page refresh. The Record button now
+    doubles as the stop: while state.recording is true its click sets
+    recordCancelled instead of starting a second overlapping run, the
+    frame loop breaks at the next frame boundary, and the frames already
+    uploaded still stitch (stop early, keep the clip); a stop before the
+    first frame skips the stitch entirely."""
+
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    assert "let recordCancelled = false;" in js
+    record_body = _function_body(js, "recordAnimation")
+    assert "if (recordCancelled) break;" in record_body, (
+        "the loop must check the flag once per frame, between uploads"
+    )
+    assert 'recordButton.textContent = "Stop recording";' in record_body
+    assert "if (recordCancelled && uploaded === 0) {" in record_body, (
+        "a stop before the first frame has nothing to stitch"
+    )
+    assert 'recordButton.textContent = "Record";' in record_body, (
+        "the finally block must hand the button back, error or not"
+    )
+    # The click wiring routes by state.recording: cancel while recording,
+    # start otherwise -- never a second concurrent recordAnimation.
+    wiring_at = js.index('document.getElementById("record-button").addEventListener')
+    wiring = js[wiring_at:js.index("});", wiring_at)]
+    assert "if (state.recording) {" in wiring
+    assert "recordCancelled = true;" in wiring
+
+
+def test_recording_quality_is_selectable():
+    """Param (2026-08-18): the recording gets a quality setting. A
+    resolution select feeds recordAnimation's one-shot read; every sizing
+    site (renderer, composer, camera aspect) uses the chosen pair, so the
+    stitched video really is the chosen size and lower settings record
+    proportionally faster (smaller PNG per frame)."""
+
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert '<select id="record-quality">' in html
+    for value, label in [("1280x720", "720p"), ("1920x1080", "1080p"),
+                         ("2560x1440", "1440p"), ("3840x2160", "4K")]:
+        assert value in html and label in html
+    assert '<option value="1920x1080" selected>' in html, (
+        "1080p stays the default the button always promised"
+    )
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    record_body = _function_body(js, "recordAnimation")
+    assert 'qualitySelect.value.split("x").map(Number)' in record_body
+    assert "renderer.setSize(recordWidth, recordHeight, false);" in record_body
+    assert "composer.setSize(recordWidth, recordHeight);" in record_body
+    assert "camera.aspect = recordWidth / recordHeight;" in record_body, (
+        "a non-16:9 canvas with a stale aspect would letterbox the video"
+    )
+    assert "1920, 1080" not in record_body, (
+        "no sizing site may keep the old hardcoded pair"
+    )
+
+
 def test_drop_reach_scales_with_the_shells_own_extent():
     """Task 1 (studio tweaks, 2026-08-17): the "ribbon of blocks flying
     above the crown" was DROP_HEIGHT (a flat 12 m constant) outliving the

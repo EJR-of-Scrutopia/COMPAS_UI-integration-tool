@@ -943,6 +943,14 @@ function buildWiresAndNodes(bundle) {
   const sphere = new THREE.SphereGeometry(nodeRadius, 12, 8);
   const nodeMaterial = materials.steel.clone();
   nodeMaterial.transparent = true;
+  // The nodes read as black cable fittings against the silver wires
+  // (Param, 2026-08-18). A metalness-1 black is a mirror, not black, so
+  // the clone drops to a dull dielectric and the environment term is cut
+  // to keep it dark under a bright studio backdrop.
+  nodeMaterial.color.setHex(0x16181c);
+  nodeMaterial.metalness = 0.2;
+  nodeMaterial.roughness = 0.6;
+  nodeMaterial.envMapIntensity = 0.25;
   const nodes = new THREE.InstancedMesh(sphere, nodeMaterial, vertices.length);
   vertices.forEach((v, i) => {
     m.makeTranslation(v[0], v[1], v[2]);
@@ -954,6 +962,12 @@ function buildWiresAndNodes(bundle) {
   // they projected a grid shadow of an invisible net through the finished
   // vault onto the ground. Overlays cast nothing; castings and columns do.
   wires.castShadow = nodes.castShadow = false;
+  // Receiving is the other direction and wanted (Param, 2026-08-18: the
+  // net was not "appearing in shadow"): where the shell shades the net,
+  // the sun's direct term now attenuates. The environment term is
+  // shadow-blind by nature, so the effect is strongest on the matte
+  // nodes and the sun-lit side of the wires.
+  wires.receiveShadow = nodes.receiveShadow = true;
   return { wires, nodes };
 }
 
@@ -3831,9 +3845,20 @@ function applyOrbit(theta, height) {
 }
 
 // ---------- record mode ----------
+// A recording is stoppable (Param, 2026-08-18: one stalled mid-run with
+// no way out but a page refresh): while state.recording is true the
+// Record button reads "Stop recording" and its click sets this flag
+// instead of starting a second overlapping run. The loop checks it once
+// per frame, so a stop lands at the next frame boundary, and whatever
+// was already uploaded still stitches -- stop early, keep the clip.
+let recordCancelled = false;
+
 async function recordAnimation() {
   const status = document.getElementById("record-status");
   if (!state.timeline || !state.bundle) { status.textContent = "load a study first"; return; }
+  const recordButton = document.getElementById("record-button");
+  recordCancelled = false;
+  recordButton.textContent = "Stop recording";
   // F1: capture the peak from the same source the day-cycle button reads,
   // not the slider -- applyDayCycle's own writes below clamp that slider
   // for display, and reading it back here would let a mid-recording clamp
@@ -3843,7 +3868,14 @@ async function recordAnimation() {
   const fps = 60;
   const speed = state.timeline.speed;
   const total = Math.ceil(timelineDuration() / speed * fps);
-  status.textContent = "recording " + total + " frames at 1080p (a few MB each on disk)";
+  // Record quality select (Param, 2026-08-18): value is "WIDTHxHEIGHT",
+  // read once at start -- a mid-recording change waits for the next run.
+  // Lower sizes also record proportionally faster (smaller PNG per frame),
+  // the practical answer to a crawling background-tab recording.
+  const qualitySelect = document.getElementById("record-quality");
+  const [recordWidth, recordHeight] = qualitySelect.value.split("x").map(Number);
+  const qualityLabel = qualitySelect.selectedOptions[0].textContent;
+  status.textContent = "recording " + total + " frames at " + qualityLabel + " (a few MB each on disk)";
   const wasPlaying = state.timeline.playing;
   // F2: a live day cycle must not keep advancing off frame()'s wall clock
   // while the recording also drives it off frameIndex -- two clocks racing
@@ -3851,9 +3883,9 @@ async function recordAnimation() {
   const wasDayCyclePlaying = state.dayCycle.playing;
   state.timeline.playing = false;
   state.dayCycle.playing = false;
-  renderer.setSize(1920, 1080, false);
-  composer.setSize(1920, 1080);
-  camera.aspect = 1920 / 1080;
+  renderer.setSize(recordWidth, recordHeight, false);
+  composer.setSize(recordWidth, recordHeight);
+  camera.aspect = recordWidth / recordHeight;
   camera.updateProjectionMatrix();
   state.recording = true;   // resize() must skip while this is set
   // W5: the recording drives the turntable off its own frame-indexed
@@ -3875,8 +3907,10 @@ async function recordAnimation() {
   // 0 would snap the live turntable's next active tick to azimuth zero
   // instead of leaving it exactly where it already was.
   let recordOrbitTheta = orbitTheta;
+  let uploaded = 0;
   try {
     for (let frameIndex = 0; frameIndex < total; frameIndex++) {
+      if (recordCancelled) break;
       if (state.dayCycle.record) {
         // Deterministic: frameIndex alone drives u, so a recording is
         // reproducible frame for frame like applyTimeline already is. The
@@ -3896,7 +3930,12 @@ async function recordAnimation() {
         "/api/frames/" + target + "?frame=" + (frameIndex + 1),
         { method: "POST", body: blob });
       if (!response.ok) throw new Error("frame upload failed: " + response.status);
+      uploaded = frameIndex + 1;
       if (frameIndex % 30 === 0) status.textContent = "frame " + frameIndex + " / " + total;
+    }
+    if (recordCancelled && uploaded === 0) {
+      status.textContent = "recording stopped before the first frame; nothing saved";
+      return;
     }
     if (state.dayCycle.record) {
       // F4: persist the recording's own final sun state, the same way
@@ -3906,7 +3945,9 @@ async function recordAnimation() {
       state.sunColourOverride = document.getElementById("sun-colour").value;
       state.sunIntensityOverride = sun.intensity;
     }
-    status.textContent = "stitching...";
+    status.textContent = recordCancelled
+      ? "stopped at frame " + uploaded + " / " + total + ", stitching what was captured..."
+      : "stitching...";
     const stitched = await fetch("/api/frames/" + target + "/stitch?fps=" + fps, { method: "POST" });
     const body = await stitched.json();
     status.textContent = stitched.ok
@@ -3930,9 +3971,17 @@ async function recordAnimation() {
     // that recapture reads camera.position.z, which the recording loop
     // above has already left at recordOrbitHeight.
     if (state.timeline.autoSpin) orbitTheta = recordOrbitTheta;
+    recordButton.textContent = "Record";
   }
 }
-document.getElementById("record-button").addEventListener("click", recordAnimation);
+document.getElementById("record-button").addEventListener("click", () => {
+  if (state.recording) {
+    recordCancelled = true;
+    document.getElementById("record-status").textContent = "stopping at the next frame...";
+    return;
+  }
+  recordAnimation();
+});
 
 // ---------- day cycle ----------
 // S5: frame() is the only wall-clock advancer (see below); this button
