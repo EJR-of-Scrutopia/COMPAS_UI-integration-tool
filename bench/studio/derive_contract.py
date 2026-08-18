@@ -48,7 +48,17 @@ SUPPORT_Z_TOLERANCE = 1e-3
 # Embedded verbatim in the derived document's provenance.derived field, so
 # a reader (the Data panel, a human opening the file) sees the same words
 # app.py's own response and studio.js's own import-time note use.
-DERIVED_MARKER = "geometry only, from compas thrustMesh; no analysis in this export"
+#
+# Review sweep (2026-08-18): the supports clause is load-bearing honesty.
+# infer_support_ids GUESSES the grounded set (boundary vertices within
+# 1 mm of the mesh z-minimum), and a staged CRA run rests its whole
+# stands/collapses verdict on that guess -- a vault whose feet sit at
+# more than one level silently loses the higher ones. The marker says so
+# wherever it is shown rather than implying only the forces are absent.
+DERIVED_MARKER = (
+    "geometry only, from compas thrustMesh; no analysis in this export, "
+    "and supports are INFERRED (boundary vertices within 1 mm of the "
+    "lowest point) -- a staged verdict rests on that guess")
 
 
 def _parse_thrust_mesh(thrust_mesh: Union[str, Mapping[str, Any]]) -> Mapping[str, Any]:

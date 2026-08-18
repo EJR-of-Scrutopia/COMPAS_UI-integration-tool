@@ -3457,7 +3457,12 @@ function rebuildTimeline(preserve) {
   state.timeline = {
     playing: false, t: 0,
     speed: +document.getElementById("timeline-speed").value,
-    inflateSeconds: +document.getElementById("inflate-seconds").value,
+    // No net, nothing to inflate: a derived geometry-only contract ships
+    // zero equilibrium edges, and a 3 s inflation window over an absent
+    // net is 3 s of nothing before the first piece may drop.
+    inflateSeconds: state.bundle.analysis_mesh.edges.length === 0
+      ? 0
+      : +document.getElementById("inflate-seconds").value,
     orbitSpeed: +document.getElementById("orbit-speed").value,
     orbitDistance: +document.getElementById("orbit-distance").value,
     autoSpin: true,
@@ -4075,17 +4080,18 @@ function applySceneAtTime(t) {
     // first casting reads build = 0 as "the very start of its drop" and
     // hangs at DROP_HEIGHT for the whole inflation window instead of being
     // absent. inflate reaches exactly 1 the instant build time begins.
+    // Review sweep (2026-08-18): the uncut shell is a FORM, not a
+    // casting -- P5's contract is "still loads and shows itself", so it
+    // ignores the inflation gate and the drop clock entirely and stands
+    // at its built pose from t = 0.
+    if (segment.userData.uncutShell) {
+      segment.visible = true;
+      continue;
+    }
     if (inflate < 1) {
       segment.visible = false;
       continue;
     }
-    // P5: the uncut shell's single segment (buildUncutShell, key
-    // "uncut-shell") owns no entry in state.segmentIndex -- that map is
-    // built from state.bundle.pieces (applyCut), which is empty for an
-    // uncut study. Treated as position 0, the same as a real course 0
-    // piece 0: it drops in once, on the same clock any first casting
-    // would, rather than throwing on a lookup that was never going to
-    // find a piece here in the first place.
     const indexed = state.segmentIndex.get(segment.userData.key);
     const position = indexed ? indexed.order : 0;
     // The stagger placementStep derives is smaller than DROP_SECONDS on
@@ -4142,9 +4148,19 @@ function applySceneAtTime(t) {
   // away at the end. Always pins the resting ghost for inspection even
   // after the strike. Hidden removes the ghost shell everywhere, build
   // phase included.
+  // Review sweep (2026-08-18): a study with no thrust net (a derived,
+  // geometry-only contract ships equilibrium.edges = []) has nothing
+  // else to show at rest in Timeline mode -- every piece is inflation-
+  // gated and there is no net to inflate, so honouring Hidden left the
+  // viewport EMPTY. The ghost (this very analysis mesh) is the form;
+  // for a no-net study it shows regardless of the formwork preference.
+  const noNet = state.bundle.analysis_mesh.edges.length === 0;
   const mode = state.formworkMode;
-  falsework.visible = mode === "always" || (mode === "animation" && strikeU < 1);
-  falsework.material.opacity = mode === "always" ? 0.3 : 0.3 * inflate * (1 - strikeU);
+  falsework.visible = noNet ||
+    mode === "always" || (mode === "animation" && strikeU < 1);
+  falsework.material.opacity = (noNet || mode === "always")
+    ? 0.3
+    : 0.3 * inflate * (1 - strikeU);
   // R3: the ghost is built from the analysis surface mesh. K1 (cutting
   // truth, 2026-08-17): buildPieceMeshes now extrudes the opaque pieces
   // UPWARD from that same surface by the full shell thickness -- the
@@ -4154,7 +4170,7 @@ function applySceneAtTime(t) {
   // shell. The -0.02 constant in the animation branch below is unchanged:
   // it was always a bare clearance constant standing a small gap below
   // the surface, never a thickness-derived offset, so K1 leaves it be.
-  falsework.position.z = mode === "always"
+  falsework.position.z = (noNet || mode === "always")
     ? -0.05
     : -0.02 - 1.5 * strikeU;
   // The strike takes the thrust network with it: wires and nodes fade,
@@ -4309,7 +4325,9 @@ function applyShowMode() {
   state.objects.nodes.position.z = nodeClearance;
   const falsework = state.objects.falsework;
   if (falsework) {
-    const wanted = state.formworkMode === "always" && state.showMode !== "framework";
+    const wanted = (state.formworkMode === "always" ||
+      state.bundle.analysis_mesh.edges.length === 0) &&
+      state.showMode !== "framework";
     falsework.visible = wanted;
     if (wanted) {
       falsework.material.opacity = 0.3;
