@@ -41,6 +41,12 @@ const state = {
   hdriHeight: 2,        // GroundedSkybox height (camera height above ground in the source photo), metres
   hdriRotation: 0,      // degrees, spins the dome/background about the world vertical
   hdriEstimateAzimuth: null, // raw pixel-estimated azimuth from the last loadHdri; lets the rotation slider re-aim the sun without re-scanning pixels
+  // P1 (presentation batch, 2026-08-18): hdri-ground checkbox, default off.
+  // The dome floor and the studio ground plane occupy almost the same
+  // world position (see applyHdriGroundOverride); off keeps today's
+  // projected look untouched, on forces the studio ground -- and its own
+  // preset/tint/scale controls -- on top of it.
+  hdriShowGround: false,
   sunColourOverride: null,   // S5: hex string once the sun-colour input is touched; null lets a preset choose the colour again
   sunIntensityOverride: null, // F4: sun.intensity captured once a day cycle finishes; null lets a preset choose the intensity again, exactly like sunColourOverride
   sunElevationSetting: 40,   // F1: the #sun-elevation slider's own value, written only by its own input handler; the day cycle reads its peak from here, never from the slider itself (applyDayCycle also writes that slider, clamped for display -- see applyDayCycle)
@@ -75,8 +81,12 @@ const state = {
   // (see restoreAppearance/persistAppearance). null means no override; the
   // registry material always shows through untouched otherwise. W2 (studio
   // tweaks, 2026-08-17): render skins are gone -- a material always keeps
-  // its own texture and base colour; tint recolours it.
-  appearance: { tint: null, finish: null },
+  // its own texture and base colour; tint recolours it. P2 (presentation
+  // batch, 2026-08-18): variation is never null -- unlike tint/finish it is
+  // always a live number (0 homogeneous .. 1 today's full patch amplitude),
+  // so a persisted entry with no variation key (every entry written before
+  // this task) migrates to 1 in restoreAppearance, not to "no override".
+  appearance: { tint: null, finish: null, variation: 1 },
 };
 
 const canvas = document.getElementById("view");
@@ -318,6 +328,11 @@ function applyEnvironment() {
     // second time. See applyGrade for the one live site.
   }
   applyGrade();
+  // P1: leaving hdri+projected mode (or hdri mode entirely) must drop the
+  // ground's renderOrder override too, not just hide the checkbox row --
+  // applyHdriBackdrop's own call covers the hdri branch above; this one
+  // covers sky and studio.
+  applyHdriGroundOverride();
 }
 
 function regenerateEnvironment() {
@@ -359,6 +374,7 @@ function applyHdriBackdrop() {
   disposeHdriDome();
   document.getElementById("hdri-scale-row").classList.toggle("hidden", state.hdriProjection !== "projected");
   document.getElementById("hdri-height-row").classList.toggle("hidden", state.hdriProjection !== "projected");
+  document.getElementById("hdri-ground-row").classList.toggle("hidden", state.hdriProjection !== "projected");
   const rotation = THREE.MathUtils.degToRad(state.hdriRotation);
   // Equirects are authored Y-up; the scene is Z-up, so the environment
   // sampler rotates a quarter turn about X, same as the old flat backdrop.
@@ -384,6 +400,32 @@ function applyHdriBackdrop() {
     scene.background = state.hdriTexture; // null paints the clear colour until a file loads
     scene.backgroundRotation.set(Math.PI / 2, 0, rotation);
   }
+  applyHdriGroundOverride();
+}
+
+// P1 (presentation batch, 2026-08-18): the GroundedSkybox floor and the
+// studio ground plane sit almost on top of each other -- the dome's local
+// y=0 plane (its own flattened equatorial disc, per GroundedSkybox.js) maps
+// to world z=0 once the dome's wrapping group applies the Y-up-to-Z-up
+// quarter turn (rotation.x = PI/2), and the ground disc itself sits at
+// z=-0.03 -- but GroundedSkybox's own material sets depthWrite: false (a
+// photographic backdrop must never occlude anything drawn after it), so
+// there is no real depth fight between the two: whichever one paints
+// LAST simply wins the pixel, and until this fix that draw order was
+// whatever three's opaque sort happened to land on, which is what read as
+// Param's "not in all instances". three.js sorts the opaque render list by
+// renderOrder before anything else (painterSortStable, three.module.js), so
+// giving the ground a renderOrder above the dome's own default of 0 settles
+// it outright and deterministically, with no grazing-angle shimmer to
+// diagnose away (confirmed against a probe capture; see the P1 report) --
+// polygonOffset and a z lift were the brief's other named options, but
+// neither is needed once the actual mechanism (paint order, not equal
+// depths) is understood.
+function applyHdriGroundOverride() {
+  if (!state.objects.ground) return;
+  const showGround = state.environmentMode === "hdri"
+    && state.hdriProjection === "projected" && state.hdriShowGround;
+  state.objects.ground.renderOrder = showGround ? 1 : 0;
 }
 
 async function refreshHdriList(selectName) {
@@ -520,7 +562,15 @@ async function loadHdri(name) {
 }
 
 // ---------- procedural textures: offline, no image assets ----------
-function noiseTexture(size, base, variation) {
+// P2 (presentation batch, 2026-08-18): both take an optional trailing
+// amplitude, defaulting to 1 -- every existing call site that omits it
+// (the registry construction below, and GROUNDS' unrelated concrete-slab
+// texture) is bit-identical to before, since the random sequence is reseeded
+// the same way on every call regardless of amplitude. amplitude scales only
+// the RANDOM term, never the base tone, so 0 collapses to a flat, honest
+// average of what the noisy version would have painted -- not a different,
+// arbitrarily brighter or darker flat colour.
+function noiseTexture(size, base, variation, amplitude = 1) {
   const canvasEl = document.createElement("canvas");
   canvasEl.width = canvasEl.height = size;
   const context = canvasEl.getContext("2d");
@@ -528,7 +578,7 @@ function noiseTexture(size, base, variation) {
   let seed = 1234567;
   const random = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
   for (let i = 0; i < image.data.length; i += 4) {
-    const v = base + (random() - 0.5) * 2 * variation;
+    const v = base + (random() - 0.5) * 2 * variation * amplitude;
     image.data[i] = image.data[i + 1] = image.data[i + 2] = Math.max(0, Math.min(255, v));
     image.data[i + 3] = 255;
   }
@@ -542,7 +592,7 @@ function noiseTexture(size, base, variation) {
   return texture;
 }
 
-function grainTexture(size) {
+function grainTexture(size, amplitude = 1) {
   const canvasEl = document.createElement("canvas");
   canvasEl.width = canvasEl.height = size;
   const context = canvasEl.getContext("2d");
@@ -551,7 +601,7 @@ function grainTexture(size) {
   let seed = 424242;
   const random = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
   for (let y = 0; y < size; y += 3) {
-    const tone = 0.75 + 0.25 * random();
+    const tone = 0.75 + 0.25 * random() * amplitude;
     context.fillStyle = "rgba(" + Math.floor(140 * tone) + "," + Math.floor(96 * tone) + "," + Math.floor(48 * tone) + ",0.55)";
     context.fillRect(0, y + Math.floor(3 * random()), size, 1 + Math.floor(2 * random()));
   }
@@ -877,6 +927,79 @@ const materials = {
   }),
 };
 
+// P2 (presentation batch, 2026-08-18): the map/roughnessMap recipe behind
+// each registry material above, named so applyMaterialVariation can
+// regenerate them at a different amplitude -- the exact size/base/variation
+// (or grain size) each material was constructed with above, kept as one
+// source so the two never drift apart. steel and falsework carry no noise
+// map and are not user-selectable materials, so neither is here.
+const MATERIAL_NOISE_RECIPES = {
+  "concrete": {
+    map: { size: 256, base: 205, variation: 14 },
+    roughnessMap: { size: 256, base: 215, variation: 40 },
+  },
+  "concrete-c50": {
+    map: { size: 256, base: 205, variation: 14 },
+    roughnessMap: { size: 256, base: 215, variation: 40 },
+  },
+  "concrete-sprayed": {
+    map: { size: 256, base: 195, variation: 46 },
+    roughnessMap: { size: 256, base: 225, variation: 40 },
+  },
+  "timber": {
+    map: { grain: true, size: 512 },
+  },
+  "brick": {
+    map: { size: 256, base: 150, variation: 26 },
+    roughnessMap: { size: 256, base: 210, variation: 30 },
+  },
+  "tile": {
+    map: { size: 256, base: 190, variation: 18 },
+  },
+  "stone": {
+    map: { size: 256, base: 215, variation: 22 },
+    roughnessMap: { size: 256, base: 220, variation: 35 },
+  },
+};
+
+// Cost: a 256px noiseTexture/grainTexture regenerate is well under the
+// brief's 100 ms budget (measured a few ms each on this machine), but
+// pieceMaterial() clones the registry material PER PIECE, so regenerating
+// per clone would multiply that by piece count. Caching per material+slot+
+// step (the slider's own 0.05 steps, so at most 21 distinct textures per
+// slot ever exist) and mutating the shared registry material in place means
+// every clone's own .map/.roughnessMap reference -- copied, not deep-cloned,
+// by THREE.Material.clone() -- picks up the regenerated texture for free.
+const variationTextureCache = {};
+
+function variationTexture(materialKey, slot, recipe, amount) {
+  const cacheKey = materialKey + ":" + slot + ":" + amount;
+  const cached = variationTextureCache[cacheKey];
+  if (cached) return cached;
+  const texture = recipe.grain
+    ? grainTexture(recipe.size, amount)
+    : noiseTexture(recipe.size, recipe.base, recipe.variation, amount);
+  variationTextureCache[cacheKey] = texture;
+  return texture;
+}
+
+// Mutates every recipe material's OWN map/roughnessMap in place, so every
+// pieceMaterial() clone taken after this call (buildPieceMeshes, per piece)
+// picks up the new amplitude without regenerating anything itself. Called
+// from restoreAppearance (before the incoming material's pieces are built,
+// same contract as tint/finish) and from the slider's own change handler.
+function applyMaterialVariation() {
+  const amount = state.appearance.variation;
+  for (const key of Object.keys(MATERIAL_NOISE_RECIPES)) {
+    const recipe = MATERIAL_NOISE_RECIPES[key];
+    const material = materials[key];
+    for (const slot of ["map", "roughnessMap"]) {
+      if (!recipe[slot]) continue;
+      material[slot] = variationTexture(key, slot, recipe[slot], amount);
+    }
+  }
+}
+
 // ---------- scene building ----------
 function meshGeometry(meshData) {
   const geometry = new THREE.BufferGeometry();
@@ -935,7 +1058,16 @@ function buildWiresAndNodes(bundle) {
     wires.setColorAt(i, white);
     baseMatrices.push(m.clone());
   });
-  wires.instanceColor.needsUpdate = true;
+  // P4 (presentation batch, 2026-08-18): a derived, geometry-only contract
+  // carries no equilibrium.edges (see derive_contract.py), so edges.length
+  // is 0 here and the forEach above never runs. InstancedMesh.setColorAt
+  // is what lazily allocates instanceColor in the first place (three's own
+  // implementation, not this file's choice); with zero instances it is
+  // never called, so instanceColor stays null and setting .needsUpdate on
+  // it crashed loadStudy outright ("Cannot set properties of null") --
+  // this was the actual break the P4 acceptance probe surfaced against
+  // the real Armadillo-shaped upload path, not a hypothetical.
+  if (wires.instanceColor) wires.instanceColor.needsUpdate = true;
   // Task 6: the forces layer rebuilds instance matrices (thicker wire =
   // bigger force) and restores them on toggle-off; the base endpoints/
   // orientation/length live here so that restore is exact.
@@ -1108,6 +1240,10 @@ function buildScene(bundle, preserve) {
   ground.position.z = -0.03;
   state.objects.ground = ground;
   scene.add(ground);
+  // P1: a freshly built ground mesh always starts at the Object3D default
+  // renderOrder (0), so a study reload while "Show ground" is on has to
+  // re-apply it -- see applyHdriGroundOverride's own comment.
+  applyHdriGroundOverride();
 
   applyCut(preserve);
   buildLayerToggles();
@@ -1386,7 +1522,9 @@ function applyWireForces() {
       wires.setColorAt(i, white);
     }
     wires.instanceMatrix.needsUpdate = true;
-    wires.instanceColor.needsUpdate = true;
+    // P4: instanceColor stays null on a zero-edge (geometry-only) net --
+    // see buildWiresAndNodes's own comment on the exact same guard.
+    if (wires.instanceColor) wires.instanceColor.needsUpdate = true;
     wires.material.color.copy(materials.steel.color);
     wires.material.vertexColors = false;
     wires.material.needsUpdate = true;
@@ -1408,7 +1546,10 @@ function applyWireForces() {
     wires.setColorAt(i, STRESS_SCALE(force, magnitude));
   });
   wires.instanceMatrix.needsUpdate = true;
-  wires.instanceColor.needsUpdate = true;
+  // P4: unreachable with an empty forces array in practice (layerAvailability
+  // never lets `active` land here when it is), but the same defensive guard
+  // as the other two instanceColor sites, at no cost.
+  if (wires.instanceColor) wires.instanceColor.needsUpdate = true;
 }
 
 function stressValue(pair, surface, magnitude) {
@@ -1895,6 +2036,25 @@ function capPointCount() {
 function renderDataPanel(v) {
   const content = document.getElementById("data-content");
   content.innerHTML = "";
+
+  // ---------- P4: geometry-only disclosure ----------
+  // bundle.py threads the derived contract's own provenance.derived marker
+  // through to bundle.provenance.derived_geometry_only (null for a real,
+  // authored contract). Rendered first, ahead of the Cut section, so it is
+  // the first thing read on a study built from one file instead of a pair.
+  const derived = state.bundle && state.bundle.provenance
+    && state.bundle.provenance.derived_geometry_only;
+  if (derived) {
+    const derivedHeading = document.createElement("h3");
+    derivedHeading.textContent = "Geometry only";
+    content.appendChild(derivedHeading);
+    const derivedLine = document.createElement("p");
+    derivedLine.textContent = "No analysis is present in this export: " + derived
+      + ". Forces, loads and reactions read as empty, and the force-driven "
+      + "layers stay disabled -- upload a *-contract.json for this export "
+      + "to add real analysis.";
+    content.appendChild(derivedLine);
+  }
 
   // ---------- Cut section ----------
   // A cut that dropped analysis faces, missed a joint plane, or clamped a
@@ -2413,6 +2573,22 @@ function requestMatchesLoaded(material) {
 // The selects commit immediately; they share the token, not the timer.
 const RELOAD_SETTLE_MS = 1500;
 
+// P3 fix (presentation batch, 2026-08-18): the last export that actually
+// finished loading (written by loadStudy, read by boot's fallback below).
+// Diagnosis: importExportPair() already called boot(contractPrefix) after a
+// successful upload (the M2 fix), and that already re-fetches /api/studies
+// and selects + loads the new export within the same page -- verified live
+// against studio.py, no reload needed. The real break is boot()'s OWN
+// fallback when no preferredExport wins: a plain reload calls boot() with
+// none at all, and until this fix that always landed on studies[0]
+// (alphabetically first), discarding whatever was actually on screen. A
+// first cut of an unfamiliar study takes tens of seconds server-side; a
+// reload reached for during that wait -- or any later revisit -- silently
+// dropped Param onto a different study, which reads as "the import never
+// really landed" even though the upload and the dropdown entry were both
+// fine.
+const LAST_STUDY_KEY = "bench-studio-study";
+
 function scheduleReload() {
   if (state.reloadTimer) clearTimeout(state.reloadTimer);
   state.reloadTimer = setTimeout(() => {
@@ -2468,6 +2644,10 @@ async function loadStudy(exportName) {
       ? { f: state.timeline.t / timelineDuration(), playing: state.timeline.playing }
       : null;
     buildScene(fresh, preserve);
+    // P3 fix: remember the study that actually finished loading, so a
+    // plain reload (boot() with no preferredExport) can restore it instead
+    // of always falling back to studies[0] -- see boot()'s own fallback.
+    localStorage.setItem(LAST_STUDY_KEY, exportName);
     logStudio("loaded " + exportName + " (" + materialLabel + ", "
       + patternLabel(state.pattern) + ", " + state.size + " m) in "
       + ((Date.now() - startedAt) / 1000).toFixed(1) + "s");
@@ -2509,9 +2689,20 @@ async function boot(preferredExport) {
     // that was just imported, not silently fall back to studies[0]. The
     // preferred name only wins when it actually exists in the fresh list
     // (an incomplete pair, for instance, never appears here at all).
+    // P3 fix: a plain reload calls boot() with no preferredExport at all,
+    // so without a second-choice fallback it always landed on studies[0]
+    // regardless of what was actually on screen before the reload -- see
+    // LAST_STUDY_KEY's own comment above for why that reads as "the import
+    // never landed". The last export that actually finished loading (any
+    // load, imported or just picked from the dropdown) is that second
+    // choice, checked against the fresh list the same way preferredExport
+    // already is.
+    const lastActive = localStorage.getItem(LAST_STUDY_KEY);
     const toLoad = preferredExport && names.includes(preferredExport)
       ? preferredExport
-      : (names.length ? names[0] : null);
+      : (lastActive && names.includes(lastActive)
+        ? lastActive
+        : (names.length ? names[0] : null));
     if (toLoad) {
       select.value = toLoad;
       await loadStudy(toLoad);
@@ -2538,39 +2729,103 @@ async function putFile(url, file) {
   return response.json();
 }
 
+// P4 (presentation batch, 2026-08-18): "*-contract.json" or "*-compas.json"
+// only -- anything else cannot be routed to /api/uploads/exports/{name}/
+// {kind}, which only ever accepts those two kinds (app.py).
+function importFileKind(filename) {
+  if (filename.endsWith("-contract.json")) return "contract";
+  if (filename.endsWith("-compas.json")) return "compas";
+  return null;
+}
+
+// Every validation failure below goes through here: the inline status line
+// alone (12px, dim grey, styles.css) sat inside a collapsed-by-default
+// Import panel and was easy to miss entirely -- a failure that never
+// reaches a network request looked identical to one that silently
+// succeeded. showBanner is now the second, harder-to-miss half of every
+// one of them, matching the sibling hdri-upload handler's own catch block.
+function importValidationError(status, message) {
+  status.textContent = message;
+  showBanner("Import failed: " + message, "error");
+}
+
 async function importExportPair() {
   const status = document.getElementById("import-status");
   const input = document.getElementById("import-export-input");
   const files = Array.from(input.files || []);
-  const contractFile = files.find((f) => f.name.endsWith("-contract.json"));
-  const compasFile = files.find((f) => f.name.endsWith("-compas.json"));
-  if (files.length !== 2 || !contractFile || !compasFile) {
-    status.textContent = "pick exactly a *-contract.json and *-compas.json pair";
+  if (!files.length) {
+    importValidationError(status, "pick a *-contract.json or *-compas.json file");
     return;
   }
-  const contractPrefix = contractFile.name.slice(0, -"-contract.json".length);
-  const compasPrefix = compasFile.name.slice(0, -"-compas.json".length);
-  if (!contractPrefix || contractPrefix !== compasPrefix) {
-    status.textContent = "the two files must share the same export name prefix";
+  if (files.length > 2) {
+    importValidationError(
+      status, "pick at most two files: one *-contract.json and one *-compas.json");
     return;
   }
-  status.textContent = "uploading " + contractPrefix + "...";
+  // P4: the pair is no longer required -- a single *-compas.json becomes a
+  // geometry-only study on its own (app.py derives the missing contract).
+  // A single *-contract.json, or a real pair, still work exactly as
+  // before; only the "must be exactly two files" gate is gone.
+  const picked = [];
+  for (const file of files) {
+    const kind = importFileKind(file.name);
+    if (!kind) {
+      importValidationError(
+        status, file.name + " is neither a *-contract.json nor a *-compas.json file");
+      return;
+    }
+    picked.push({ file, kind });
+  }
+  if (picked.length === 2 && picked[0].kind === picked[1].kind) {
+    importValidationError(
+      status, "pick one *-contract.json and one *-compas.json, not two of the same kind");
+    return;
+  }
+  const prefixOf = (entry) => entry.file.name.slice(0, -("-" + entry.kind + ".json").length);
+  const prefixes = picked.map(prefixOf);
+  if (picked.length === 2 && prefixes[0] !== prefixes[1]) {
+    importValidationError(status, "the two files must share the same export name prefix");
+    return;
+  }
+  const prefix = prefixes[0];
+  if (!prefix) {
+    importValidationError(status, "the export name cannot be empty");
+    return;
+  }
+  // Contract before compas when both are given: the order the pair-only
+  // flow this replaces always used, and the only one either upload's own
+  // pair_complete answer can actually depend on.
+  picked.sort((a, b) => (a.kind === "contract" ? 0 : 1) - (b.kind === "contract" ? 0 : 1));
+  status.textContent = "uploading " + prefix + "...";
   try {
-    await putFile("/api/uploads/exports/" + encodeURIComponent(contractPrefix) + "/contract", contractFile);
-    const result = await putFile("/api/uploads/exports/" + encodeURIComponent(contractPrefix) + "/compas", compasFile);
+    let result = null;
+    for (const entry of picked) {
+      result = await putFile(
+        "/api/uploads/exports/" + encodeURIComponent(prefix) + "/" + entry.kind, entry.file);
+    }
     status.textContent = result.pair_complete
-      ? "imported " + contractPrefix
-      : "stored " + contractPrefix + "; pair incomplete";
+      ? "imported " + prefix
+      : "stored " + prefix + "; pair incomplete";
     logStudio(result.pair_complete
-      ? "imported export pair " + contractPrefix
-      : "stored " + contractPrefix + "; pair incomplete");
+      ? "imported " + prefix
+      : "stored " + prefix + "; pair incomplete");
+    // A one-line note the moment a compas-only upload lands: item 3's
+    // "analysis layers are unavailable for it", visible even before the
+    // study finishes loading (renderDataPanel carries the same note for
+    // as long as the study stays loaded -- see its own P4 section).
+    if (result.derived_contract) {
+      showBanner(
+        prefix + ": geometry only (no *-contract.json uploaded), analysis "
+        + "layers are unavailable for this export.", "info");
+    }
     input.value = "";
-    // M2 fix: select and load the export that was just imported, instead
-    // of leaving boot() to fall back to studies[0].
-    await boot(contractPrefix);
+    // M2/P3: select and load the export that was just imported, instead
+    // of leaving boot() to fall back to studies[0] or the last-active one.
+    await boot(prefix);
   } catch (error) {
     status.textContent = "import failed: " + error.message;
-    logStudio("export pair import failed: " + error.message);
+    showBanner("Import failed: " + error.message, "error");
+    logStudio("export import failed: " + error.message);
   }
 }
 
@@ -2620,9 +2875,19 @@ document.getElementById("material-finish").addEventListener("change", (e) => {
   persistAppearance();
   rebuildAppearance();
 });
+document.getElementById("material-variation").addEventListener("input", (e) => {
+  document.getElementById("material-variation-value").textContent = Math.round(+e.target.value * 100);
+});
+document.getElementById("material-variation").addEventListener("change", (e) => {
+  state.appearance.variation = +e.target.value;
+  persistAppearance();
+  applyMaterialVariation();
+  rebuildAppearance();
+});
 document.getElementById("material-reset").addEventListener("click", () => {
-  state.appearance = { tint: null, finish: null };
+  state.appearance = { tint: null, finish: null, variation: 1 };
   localStorage.removeItem(appearanceStorageKey(document.getElementById("material-select").value));
+  applyMaterialVariation();
   syncAppearanceControls();
   rebuildAppearance();
 });
@@ -2757,13 +3022,21 @@ document.getElementById("hdri-projection").addEventListener("change", (e) => {
   state.hdriProjection = e.target.value;
   applyHdriBackdrop();
 });
+document.getElementById("hdri-scale").addEventListener("input", (e) => {
+  document.getElementById("hdri-scale-value").textContent = e.target.value;
+});
 document.getElementById("hdri-scale").addEventListener("change", (e) => {
   state.hdriScale = +e.target.value;
+  document.getElementById("hdri-scale-value").textContent = e.target.value;
   applyHdriBackdrop();
 });
 document.getElementById("hdri-height").addEventListener("change", (e) => {
   state.hdriHeight = +e.target.value;
   applyHdriBackdrop();
+});
+document.getElementById("hdri-ground").addEventListener("change", (e) => {
+  state.hdriShowGround = e.target.checked;
+  applyHdriGroundOverride();
 });
 // Dragging the rotation slider spins the live dome/background directly
 // (cheap: no geometry rebuild); releasing it re-aims the sun from the
@@ -3414,6 +3687,10 @@ function syncAppearanceControls() {
   const finish = state.appearance.finish !== null ? state.appearance.finish : 0.5;
   document.getElementById("material-finish").value = finish;
   document.getElementById("material-finish-value").textContent = Math.round(finish * 100);
+  // P2: variation is never null (see state.appearance's own comment), so
+  // there is no default-substitution branch to mirror finish's above.
+  document.getElementById("material-variation").value = state.appearance.variation;
+  document.getElementById("material-variation-value").textContent = Math.round(state.appearance.variation * 100);
 }
 
 // Called from both the material-select change handler and loadStudy, both
@@ -3428,8 +3705,13 @@ function syncAppearanceControls() {
 // key is read by nothing, and the next persistAppearance() call (a tint or
 // finish change) overwrites the stored entry with the two-key shape,
 // dropping it for good.
+//
+// P2 migration: a "bench-studio-appearance:" entry written before this task
+// carries no variation key at all. typeof parsed.variation !== "number" for
+// every such entry, so it loads as 1 -- today's full patch amplitude, the
+// look every existing entry was actually persisted showing.
 function restoreAppearance(material) {
-  let appearance = { tint: null, finish: null };
+  let appearance = { tint: null, finish: null, variation: 1 };
   const stored = localStorage.getItem(appearanceStorageKey(material));
   if (stored) {
     try {
@@ -3437,10 +3719,12 @@ function restoreAppearance(material) {
       appearance = {
         tint: parsed.tint || null,
         finish: typeof parsed.finish === "number" ? parsed.finish : null,
+        variation: typeof parsed.variation === "number" ? parsed.variation : 1,
       };
     } catch (error) { /* corrupt localStorage entry: fall back to the defaults above */ }
   }
   state.appearance = appearance;
+  applyMaterialVariation();
   syncAppearanceControls();
 }
 
