@@ -113,6 +113,105 @@ def test_unknown_export_fails_with_the_available_names(tmp_path, monkeypatch):
         bundle.build_bundle("Nope", "concrete", "bonded-courses", 0.9)
 
 
+def bay_contract():
+    """A 3x3 grid of unit quads with the (2, 1) face removed.
+
+    The bay makes the plan genuinely not star shaped about its own axis --
+    the same fixture shape test_app.py's own bay_contract() uses to drive
+    this through the API; this copy exercises build_bundle directly. See
+    that docstring for the geometric reasoning.
+    """
+    side, n = 3, 4
+    verts = [
+        {"x": float(i), "y": float(j), "z": 0.0}
+        for j in range(n) for i in range(n)
+    ]
+    faces = []
+    fid = 0
+    for j in range(side):
+        for i in range(side):
+            if (i, j) == (2, 1):
+                continue
+            faces.append({
+                "id": fid,
+                "vertices": [
+                    j * n + i, j * n + i + 1,
+                    (j + 1) * n + i + 1, (j + 1) * n + i,
+                ],
+            })
+            fid += 1
+    edges = []
+    for face in faces:
+        v = face["vertices"]
+        for k in range(4):
+            edges.append({"u": v[k], "v": v[(k + 1) % 4]})
+    return {
+        "equilibrium": {
+            "vertices": verts, "edges": edges, "loads": [],
+            "resolvedSupportNodeIds": [0],
+        },
+        "formGraph": {"faces": faces},
+    }
+
+
+def test_a_cut_refusal_ships_uncut_not_written_to_disk(tmp_path, monkeypatch):
+    """P5 (presentation batch, 2026-08-18): build_bundle's own half of the
+    contract get_bundle relies on (test_app.py pins the HTTP shape). The
+    engine's refusal (generators.generate's "not star shaped" message,
+    reached through CutRefused) must not raise out of build_bundle at all:
+    the bundle ships with pieces empty and uncut_reason set to the
+    message, and -- the cache decision -- it is never written to
+    bundle_path, so a later, cuttable re-request (a different pattern, a
+    fixed export) is never blocked from a real cut by a stale uncut file
+    sitting at that path.
+    """
+    bundle, upload, studies = fake_export(tmp_path, monkeypatch)
+    (upload / "Bay-contract.json").write_text(
+        json.dumps(bay_contract()), encoding="utf-8"
+    )
+    (upload / "Bay-compas.json").write_text("{}", encoding="utf-8")
+    document = bundle.build_bundle("Bay", "concrete", "bonded-courses", 0.9)
+    assert document["pieces"] == []
+    assert document["tessellation"] is None
+    assert document["binding"] is None
+    assert document["staging"] is None
+    reason = document["uncut_reason"]
+    assert reason and "not star shaped" in reason
+    assert document["analysis_mesh"]["faces"], "the mesh ships regardless"
+    assert document["pattern"] == "bonded-courses"
+    target = bundle.bundle_path("bay", "concrete", "bonded-courses", 0.9, 0.2)
+    assert not target.exists(), "an uncut bundle must not be cached to disk"
+    # load_or_build_bundle must therefore recompute it fresh every time,
+    # rather than serving a stale uncut document from a path nothing wrote.
+    again = bundle.load_or_build_bundle("Bay", "concrete", "bonded-courses", 0.9)
+    assert again["uncut_reason"] == reason
+    assert not target.exists()
+
+
+def test_a_malformed_authored_tessellation_still_raises_plain_valueerror(
+    tmp_path, monkeypatch
+):
+    """CutRefused must not swallow a malformed AUTHORED tessellation: that
+    is bad input (tessellation.from_document raising on a broken cell),
+    not a valid plan the engine declines to cover, and get_bundle's own
+    400 contract for it (test_app.py's test_a_malformed_authored_
+    tessellation_is_a_400_naming_the_cell) depends on it staying a plain
+    ValueError, not the CutRefused subclass build_bundle now catches.
+    """
+    bundle, upload, _ = fake_export(tmp_path, monkeypatch)
+    contract = tiny_contract()
+    contract["tessellation"] = {
+        "schema": "bench.tessellation/1", "units": "m", "domain": "plan",
+        "pattern": "authored", "cells": ["oops"],
+    }
+    (upload / "Tiny-contract.json").write_text(
+        json.dumps(contract), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="cell 0") as excinfo:
+        bundle.build_bundle("Tiny", "concrete", "bonded-courses", 0.9)
+    assert not isinstance(excinfo.value, bundle.CutRefused)
+
+
 def test_bundles_are_cached_per_thickness(tmp_path, monkeypatch):
     bundle, _, studies = fake_export(tmp_path, monkeypatch)
     default = bundle.build_bundle("Tiny", "concrete", "bonded-courses", 0.9)

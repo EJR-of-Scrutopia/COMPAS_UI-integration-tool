@@ -218,6 +218,28 @@ def clear_cut_memo() -> None:
         _cut_memo.clear()
 
 
+class CutRefused(ValueError):
+    """The cutting engine's own refusal on otherwise valid geometry.
+
+    P5 (presentation batch, 2026-08-18): domain.plan_domain (the rim is not
+    a single loop -- boundary_ring's own "more than one loop" message, an
+    oculus or a hole) and generators.generate (the plan is not star shaped
+    about its axis) both raise a plain ValueError, and build_tessellation_
+    for re-raises it as this subclass instead, ONLY on the branch with no
+    authored tessellation to fall back on. build_bundle catches CutRefused
+    and ships the bundle anyway (pieces empty, uncut_reason carrying this
+    message verbatim): the plan is real, valid geometry, and the engine's
+    documented single-star-shaped-loop constraint (see domain.py's own
+    module docstring) is not being relaxed, only reported honestly instead
+    of surfacing as a 400 for an upload that parsed and validated fine.
+    A plain ValueError -- a malformed AUTHORED tessellation, from
+    tessellation.from_document -- is deliberately left alone: that is bad
+    input, not a valid plan the engine declines to cover, and stays a 400
+    (see get_bundle in app.py and test_a_malformed_authored_tessellation_
+    is_a_400_naming_the_cell in test_app.py).
+    """
+
+
 def build_tessellation_for(export_name, contract, arrays, render, pattern, size):
     """The one cut, built once, for the drawing and for the analysis alike.
 
@@ -252,11 +274,18 @@ def build_tessellation_for(export_name, contract, arrays, render, pattern, size)
     if authored is not None:
         tess = tessellation.from_document(authored, surface.height)
     else:
-        plan = domain.plan_domain(
-            arrays["vertices"], arrays["faces"],
-            geometry.face_centroids(arrays["vertices"], arrays["faces"]),
-        )
-        tess = generators.generate(pattern, plan, size)
+        try:
+            plan = domain.plan_domain(
+                arrays["vertices"], arrays["faces"],
+                geometry.face_centroids(arrays["vertices"], arrays["faces"]),
+            )
+            tess = generators.generate(pattern, plan, size)
+        except ValueError as error:
+            # See CutRefused's own docstring: this is the one place the
+            # distinction between "the engine refuses valid geometry" and
+            # "the input is malformed" can actually be drawn, because it is
+            # the one place that knows which of the two branches raised.
+            raise CutRefused(str(error)) from error
     centroids = geometry.face_centroids(arrays["vertices"], arrays["faces"])
     binding = tessellation.analysis_binding(tess, centroids)
     return tess, surface, binding
@@ -341,47 +370,86 @@ def build_bundle(
     arrays = geometry.mesh_arrays(contract)
     render = _render_mesh(arrays["vertices"], arrays["faces"])
 
-    tess, binding, supports, made, report = _cut_for(
-        export_name, contract, arrays, render, pattern, size)
+    uncut_reason = None
+    try:
+        tess, binding, supports, made, report = _cut_for(
+            export_name, contract, arrays, render, pattern, size)
+    except CutRefused as error:
+        # P5 (presentation batch, 2026-08-18): the engine's own refusal on
+        # otherwise valid geometry (see CutRefused's own docstring) used to
+        # propagate all the way to get_bundle as a plain ValueError, which
+        # turned an upload that parsed fine, appeared in the study list and
+        # auto-selected into a 400 with nothing to look at. The bundle
+        # ships anyway: the analysis mesh, the provenance, and whatever
+        # fields/forces the contract carries (zero for a derived,
+        # geometry-only one -- see derive_contract.py) are exactly as real
+        # as they are for a cut study. Only the cut itself, and everything
+        # downstream of it (pieces, staging, the tessellation summary), is
+        # missing; uncut_reason carries the engine's own message verbatim
+        # so the client can say why.
+        uncut_reason = str(error)
+        tess = binding = report = None
+        made = []
+        supports = geometry.support_ids(contract)
 
-    # backward_turn/backward_steps only exist on a generated cut (the
-    # domain they are measured from is never built for an imported one),
-    # so None here means "not applicable", not "zero wobble".
-    backward_turn = tess.get("backward_turn")
-    tessellation_summary = {
-        "pattern": tess["pattern"],
-        "source": tess["source"],
-        "target_size": tess["target_size"],
-        "courses": tess["courses"],
-        "cells": len(tess["cells"]),
-        "provenance": tess.get("provenance"),
-        "z_offset_max": tess.get("z_offset_max"),
-        "courses_inferred": tess.get("courses_inferred", False),
-        "backward_turn_degrees": (
-            math.degrees(backward_turn) if backward_turn is not None else None
-        ),
-        "backward_steps": tess.get("backward_steps"),
-        "report": binding["report"],
-    }
-    overlap = set(tessellation_summary) & set(report)
-    if overlap:
-        # A raise, not an assert: python -O strips an assert, and the
-        # contract this guards (the two dicts spread into one below) fails
-        # silently when it goes, with one dict quietly clobbering the
-        # other's field. A contract worth stating is worth enforcing in
-        # every interpreter mode.
-        raise ValueError(
-            "pieces.segment_pieces's report shares key(s) {} with the "
-            "tessellation summary; spreading it in would let one silently "
-            "overwrite the other".format(sorted(overlap))
-        )
-
-    # The stage plan is embedded only if it was solved against THIS cut.
-    # A stale plan is worse than no plan: see _staging_matches.
-    staged = _read_optional(
-        staging_path(slug, material, pattern, size, thickness))
-    if not _staging_matches(staged, made, report.get("degenerate_dropped") or ()):
+    if uncut_reason is None:
+        # backward_turn/backward_steps only exist on a generated cut (the
+        # domain they are measured from is never built for an imported one),
+        # so None here means "not applicable", not "zero wobble".
+        backward_turn = tess.get("backward_turn")
+        tessellation_summary = {
+            "pattern": tess["pattern"],
+            "source": tess["source"],
+            "target_size": tess["target_size"],
+            "courses": tess["courses"],
+            "cells": len(tess["cells"]),
+            "provenance": tess.get("provenance"),
+            "z_offset_max": tess.get("z_offset_max"),
+            "courses_inferred": tess.get("courses_inferred", False),
+            "backward_turn_degrees": (
+                math.degrees(backward_turn) if backward_turn is not None else None
+            ),
+            "backward_steps": tess.get("backward_steps"),
+            "report": binding["report"],
+        }
+        overlap = set(tessellation_summary) & set(report)
+        if overlap:
+            # A raise, not an assert: python -O strips an assert, and the
+            # contract this guards (the two dicts spread into one below) fails
+            # silently when it goes, with one dict quietly clobbering the
+            # other's field. A contract worth stating is worth enforcing in
+            # every interpreter mode.
+            raise ValueError(
+                "pieces.segment_pieces's report shares key(s) {} with the "
+                "tessellation summary; spreading it in would let one silently "
+                "overwrite the other".format(sorted(overlap))
+            )
+        tessellation_document = {**tessellation_summary, **report}
+        binding_document = {
+            "assignment": binding["assignment"], "order": binding["order"],
+            "keys": binding["keys"],
+        }
+        # The stage plan is embedded only if it was solved against THIS cut.
+        # A stale plan is worse than no plan: see _staging_matches.
+        staged = _read_optional(
+            staging_path(slug, material, pattern, size, thickness))
+        if not _staging_matches(staged, made, report.get("degenerate_dropped") or ()):
+            staged = None
+        cut_pattern = tess["pattern"]
+    else:
+        # Minimal/no tessellation summary, per the P5 contract: a fabricated
+        # "0 courses, 0 cells" summary would invite the Data panel's whole
+        # "Cut" section (studio.js's renderDataPanel) to render as though a
+        # cut ran and found nothing, rather than never having run at all.
+        # None is the honest value, and it is also what studio.js's own
+        # `if (tess)` guard on that section already treats as "skip it".
+        tessellation_document = None
+        binding_document = None
         staged = None
+        # No cut means no cut pattern; the document falls back to what was
+        # requested, the same value an authored cut's absence of a domain
+        # would otherwise leave unstated.
+        cut_pattern = pattern
 
     document = {
         "export": export_name,
@@ -401,7 +469,7 @@ def build_bundle(
         # None through here poisoned the client's state.size and then 400'd
         # on the very next reload. The tessellation summary below is the
         # honest record of what the cut actually used.
-        "pattern": tess["pattern"],
+        "pattern": cut_pattern,
         "size": size,
         "generated": datetime.datetime.now(datetime.timezone.utc)
         .isoformat(timespec="seconds"),
@@ -416,16 +484,20 @@ def build_bundle(
             for k, v in geometry.support_reactions_newtons(contract).items()
         },
         "member_forces": geometry.member_forces_newtons(contract),
-        "binding": {
-            "assignment": binding["assignment"], "order": binding["order"],
-            "keys": binding["keys"],
-        },
-        "tessellation": {**tessellation_summary, **report},
+        "binding": binding_document,
+        "tessellation": tessellation_document,
         "pieces": made,
         "staging": staged,
         "verification": _read_optional(
             STUDIES_DIR / slug / "fea-verification.json"
         ),
+        # None on a normal, cut bundle. On an engine refusal, the engine's
+        # own message verbatim (see CutRefused's docstring) -- the one
+        # field the client checks to tell an uncut bundle from a cut one at
+        # all (studio.js's own `if (tess)` guard on the tessellation summary
+        # cannot, since a bundle cached before this task also had a null-ish
+        # absence there for other reasons).
+        "uncut_reason": uncut_reason,
         "provenance": {
             "contract_file": pairs[export_name]["contract"].name,
             "thickness": thickness,
@@ -454,9 +526,18 @@ def build_bundle(
                     "stage plan names cells this cut does not draw",
         },
     }
-    target = bundle_path(slug, material, pattern, size, thickness)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(document), encoding="utf-8")
+    # Cache decision (P5): an uncut bundle is NOT written to disk. Every
+    # REQUIRED_BUNDLE_KEYS entry lives under "tessellation", which is None
+    # here, so a cached copy would need its own staleness carve-out to
+    # avoid load_or_build_bundle treating it as stale forever and rebuilding
+    # it on every read anyway -- at which point the cache buys nothing. An
+    # uncut build is also cheap: no cut ran, only the plan/domain check that
+    # refused it, far below a real cut's own cost. Simplest honest choice:
+    # never cache it, always recompute it fresh.
+    if uncut_reason is None:
+        target = bundle_path(slug, material, pattern, size, thickness)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(document), encoding="utf-8")
     return document
 
 

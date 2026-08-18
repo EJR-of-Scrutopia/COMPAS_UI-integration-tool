@@ -145,12 +145,26 @@ def test_bundle_endpoint_validates_and_serves(tmp_path, monkeypatch):
     assert out_of_range.status_code == 400
 
 
-def test_a_plan_the_engine_refuses_is_a_400_not_a_500(tmp_path, monkeypatch):
+def test_a_plan_the_engine_refuses_ships_a_200_with_uncut_reason(tmp_path, monkeypatch):
     """A vault with a bay (re-entrant plan) is not star shaped, and no
     polar pattern can cover it. Before this wave no geometry could reach
     this failure at all, since the old ring/wedge binning worked on any
-    centroid cloud; get_bundle must surface generators.generate's own
-    message rather than let it fall through to an unhandled 500.
+    centroid cloud; then, through the presentation-batch wave, get_bundle
+    surfaced generators.generate's own message as a 400 rather than an
+    unhandled 500.
+
+    DELIBERATE CONTRACT CHANGE (P5, 2026-08-18): a 400 here meant an
+    otherwise valid upload -- one that parsed, appeared in the study list
+    and auto-selected -- loaded nothing at all, on the strength of a
+    pre-existing, documented engine constraint (domain.py's own module
+    docstring: the plan must be a single star-shaped loop) that this task
+    does not relax. The engine's message still has to reach the client
+    (that half of the old test's intent is unchanged, see the assertions
+    below), but now as a 200 whose uncut_reason carries it, with the
+    analysis mesh, provenance and empty pieces shipped alongside it, so an
+    uncuttable study still loads and shows its form. See
+    bundle.CutRefused for the exact mechanism and bundle.build_bundle for
+    where it is caught.
     """
     client, _ = make_client(tmp_path, monkeypatch)
     upload = tmp_path / "upload"
@@ -162,10 +176,22 @@ def test_a_plan_the_engine_refuses_is_a_400_not_a_500(tmp_path, monkeypatch):
         "/api/studies/Bay/bundle",
         params={"material": "concrete", "pattern": "bonded-courses", "size": 0.9},
     )
-    assert response.status_code == 400
-    detail = response.json()["detail"]
-    assert "not star shaped" in detail
-    assert "Author the tessellation in Grasshopper and import it instead" in detail
+    assert response.status_code == 200
+    document = response.json()
+    reason = document["uncut_reason"]
+    assert reason
+    assert "not star shaped" in reason
+    assert "Author the tessellation in Grasshopper and import it instead" in reason
+    assert document["pieces"] == []
+    assert document["tessellation"] is None
+    assert document["staging"] is None
+    assert document["binding"] is None
+    # The mesh and the contract's own fields are unaffected by the cut
+    # refusing: they are read before the cut is ever attempted.
+    assert document["analysis_mesh"]["faces"], "the analysis mesh still ships"
+    assert document["pattern"] == "bonded-courses", (
+        "no cut pattern exists, so the document falls back to the requested one"
+    )
 
 
 def test_an_authored_bundles_size_round_trips_through_the_api(tmp_path, monkeypatch):

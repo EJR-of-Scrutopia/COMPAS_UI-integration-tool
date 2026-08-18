@@ -1005,7 +1005,27 @@ function meshGeometry(meshData) {
   const geometry = new THREE.BufferGeometry();
   const positions = new Float32Array(meshData.vertices.flat());
   const index = [];
-  for (const [a, b, c, d] of meshData.faces) index.push(a, b, c, a, c, d);
+  // Fan triangulation, the same idiom columnGeometryFrom already uses for
+  // an arbitrary polygon face: face[0], face[i], face[i + 1] for every
+  // interior corner. A quad still comes out as (a, b, c) + (a, c, d),
+  // exactly what the old hard-coded 4-vertex destructure produced, so
+  // every existing caller (the falsework mesh, any render_mesh built by
+  // subdivision.subdivide_quads) is unaffected.
+  //
+  // P5 (presentation batch, 2026-08-18): the old `for (const [a, b, c, d]
+  // of meshData.faces)` assumed every face had exactly 4 vertices. A
+  // compas-only import's analysis mesh can be triangulated (bundle.py's
+  // _render_mesh docstring: subdivide_quads raises on anything but a
+  // quad and the render mesh falls back to the raw, possibly triangular,
+  // faces) -- destructuring a 3-vertex face left `d` undefined, which a
+  // Uint32Array index coerces to 0, silently drawing the wrong triangle
+  // on every single face. This is the mesh the P5 uncut shell (and the
+  // falsework ghost, on the same real Armadillo-shaped upload) is built
+  // from, so a mesh with any non-quad face has to triangulate correctly
+  // here, not merely avoid crashing.
+  for (const face of meshData.faces) {
+    for (let i = 1; i < face.length - 1; i++) index.push(face[0], face[i], face[i + 1]);
+  }
   geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   const uvs = new Float32Array(meshData.vertices.length * 2);
   meshData.vertices.forEach((v, i) => { uvs[2 * i] = v[0] * 0.15; uvs[2 * i + 1] = v[1] * 0.15; });
@@ -1291,8 +1311,16 @@ function applyCut(preserve) {
   // claim the Data panel already refuses to make. The units span, which
   // the slider's live input handler never touches, carries the correction
   // so a mid-drag label stays true rather than reverting to "mm target".
-  document.getElementById("size-units").textContent =
-    state.bundle.tessellation.source === "imported"
+  //
+  // P5: tess is null on an uncut bundle (bundle.py ships "minimal/no
+  // tessellation summary" when the cut refused -- see build_bundle), so
+  // the imported/generated distinction below cannot be asked at all; the
+  // control reads honestly as unused rather than dereferencing a summary
+  // that was never built.
+  const tess = state.bundle.tessellation;
+  document.getElementById("size-units").textContent = !tess
+    ? " mm requested, but this study did not cut: see the Data panel"
+    : tess.source === "imported"
       ? " mm requested, but this cut is authored in Grasshopper and the size control is not used"
       : " mm target";
   // Same defence for the pattern (Task 9, the half of C1 Task 8 left open):
@@ -1309,7 +1337,19 @@ function applyCut(preserve) {
     document.getElementById("pattern-select").value = pattern;
   }
   document.getElementById("piece-count").textContent = state.bundle.pieces.length;
-  document.getElementById("course-count").textContent = state.bundle.tessellation.courses;
+  document.getElementById("course-count").textContent = tess ? tess.courses : 0;
+  // P5: running a staged FEA analysis over a study the engine could not
+  // cut makes no more sense server side (staging.run_staging would hit
+  // the same CutRefused bundle.py does, and fail the run with a raw
+  // exception name) than it does to draw pieces for one -- the existing
+  // disable+note pattern (compare updateMaterialControls's joint-gap
+  // disable for sprayed concrete) is reused here rather than letting the
+  // click reach the server only to fail asynchronously.
+  const runButton = document.getElementById("run-button");
+  runButton.disabled = !!state.bundle.uncut_reason;
+  document.getElementById("run-status").textContent = state.bundle.uncut_reason
+    ? "not available: this study's cut refused (see the Data panel)"
+    : "";
   // The index the timeline looks a casting up in, keyed by the PIECE's own
   // key: pieces.py emits exactly one casting per cell of the cut
   // tessellation, so the cell's own key is the piece's identity too. The
@@ -1581,6 +1621,19 @@ function fieldPerRenderVertex(nodeField, fallback) {
 
 function recolourSegments() {
   if (!state.bundle || !state.objects.shell) return;
+  // P5: the uncut shell (buildUncutShell) is one plain mesh with no
+  // weights/surface/basePositions userData -- there is no cut, so there
+  // are no per-vertex field weights to have recorded in the first place.
+  // Nothing below it needs guarding for that reason: layerAvailability
+  // already reports stress and deflection as unavailable for an uncut
+  // study (no staged run, no verification), so there is no heatmap this
+  // pass could ever be asked to paint. Only the legend's own visibility
+  // still has to follow that, in case a previous, cuttable study left it
+  // showing.
+  if (state.bundle.uncut_reason) {
+    updateLegend(1, 1e-9, null, null);
+    return;
+  }
   const stage = finalStage();
   const exaggeration = +document.getElementById("exaggeration").value;
   const surface = document.getElementById("stress-surface").value;
@@ -1901,13 +1954,20 @@ function updateHud() {
   // and an authored cut ignores it. The HUD is what a user reads during
   // playback, so it is the last place that may quote a target the cut on
   // screen never had.
-  const sizeCaption = state.bundle.tessellation.source === "imported"
+  //
+  // P5: tess is null on an uncut bundle (see applyCut's own comment on
+  // the same field), so this reads uncut_reason directly rather than a
+  // tessellation summary that was never built.
+  const tess = state.bundle.tessellation;
+  const sizeCaption = tess && tess.source === "imported"
     ? "authored cut, the size control is not used"
-    : Math.round(state.bundle.size * 1000) + " mm target";
+    : state.bundle.uncut_reason
+      ? "did not cut: see the Data panel"
+      : Math.round(state.bundle.size * 1000) + " mm target";
   const lines = [state.bundle.export + "  (" + state.bundle.material + ", " +
     sizeCaption + ", " +
     state.bundle.pieces.length + " pieces in " +
-    state.bundle.tessellation.courses + " courses)"];
+    (tess ? tess.courses : 0) + " courses)"];
   const thicknessMm = Math.round(provenanceThickness * 1000);
   let thicknessLine = "shell thickness " + thicknessMm + " mm";
   if (v && v.thickness && Math.abs(v.thickness - provenanceThickness) > 1e-9) {
@@ -2054,6 +2114,29 @@ function renderDataPanel(v) {
       + "layers stay disabled -- upload a *-contract.json for this export "
       + "to add real analysis.";
     content.appendChild(derivedLine);
+  }
+
+  // ---------- P5: uncut disclosure ----------
+  // bundle.py ships uncut_reason (the engine's own refusal message,
+  // verbatim) whenever the cut could not run at all -- see build_bundle's
+  // CutRefused handling. Rendered second, ahead of the Cut section (which
+  // does not render at all here: state.bundle.tessellation is null on an
+  // uncut bundle, so the `if (tess)` guard below skips it on its own),
+  // right after the geometry-only note since the two often arrive
+  // together on the same compas-only upload.
+  if (state.bundle && state.bundle.uncut_reason) {
+    const uncutHeading = document.createElement("h3");
+    uncutHeading.textContent = "Uncut";
+    content.appendChild(uncutHeading);
+    const uncutLine = document.createElement("p");
+    uncutLine.textContent = "uncut: " + state.bundle.uncut_reason;
+    content.appendChild(uncutLine);
+    const uncutNote = document.createElement("p");
+    uncutNote.textContent = "The form above is the analysis mesh itself, "
+      + "not a cut casting shell: no pieces, no timeline drop, no staged "
+      + "analysis. Author the tessellation in Grasshopper and import it to "
+      + "cut this study.";
+    content.appendChild(uncutNote);
   }
 
   // ---------- Cut section ----------
@@ -2644,6 +2727,14 @@ async function loadStudy(exportName) {
       ? { f: state.timeline.t / timelineDuration(), playing: state.timeline.playing }
       : null;
     buildScene(fresh, preserve);
+    // P5 (presentation batch, 2026-08-18): the engine's own refusal reaches
+    // the user twice -- transiently here (matching the geometry-only
+    // upload notice, importExportPair above) and persistently in the Data
+    // panel (renderDataPanel's own "Uncut" section), which is where the
+    // full message lives once the banner fades.
+    if (fresh.uncut_reason) {
+      showBanner("uncut: " + fresh.uncut_reason, "info");
+    }
     // P3 fix: remember the study that actually finished loading, so a
     // plain reload (boot() with no preferredExport) can restore it instead
     // of always falling back to studies[0] -- see boot()'s own fallback.
@@ -3458,8 +3549,44 @@ function taperAt(course) {
   return 1 - state.taper * Math.min(1, course / courses);
 }
 
+// P5 (presentation batch, 2026-08-18): when the cut refuses (state.bundle.
+// uncut_reason set, pieces empty), buildPieceMeshes has nothing to cut
+// castings from -- the whole point of this task is that the study still
+// shows its form regardless. One mesh, built straight from the analysis
+// mesh (double sided: the surface is the display, with nothing on the far
+// side of it to make a single face winding meaningful), given the current
+// material's appearance the same way any casting gets it (pieceMaterial
+// already reads tint/finish/variation off state.appearance and the
+// material registry -- no thickness extrusion, no joints, no seat plane,
+// because there is no cut to have carried any of that). Returned as a
+// one-child Group, not a bare Mesh, so every state.objects.shell consumer
+// that already iterates `.children` (disposeShell, applyShowMode,
+// applySceneAtTime) keeps working with no branch of its own; only
+// recolourSegments needs to know the difference (see its own guard) since
+// heatmaps have no per-vertex field to paint here in the first place.
+function buildUncutShell() {
+  const group = new THREE.Group();
+  const geometry = meshGeometry(state.bundle.analysis_mesh);
+  const material = pieceMaterial("uncut-shell");
+  material.side = THREE.DoubleSide;
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.castShadow = mesh.receiveShadow = true;
+  mesh.userData.key = "uncut-shell";
+  // Read by applySceneAtTime to skip the sprayed-growth branch, which
+  // scales a piece's stored THICKNESS from its own centroid -- neither of
+  // which this segment has (see the comment at that branch's own guard).
+  mesh.userData.uncutShell = true;
+  group.add(mesh);
+  state.objects.shell = group;
+  scene.add(group);
+}
+
 function buildPieceMeshes() {
   disposeShell();
+  if (state.bundle && state.bundle.uncut_reason) {
+    buildUncutShell();
+    return;
+  }
   const group = new THREE.Group();
   // Thickness on screen is what the bundle was solved at, never the live
   // slider, which can drift while a bundle loads.
@@ -3913,7 +4040,15 @@ function applySceneAtTime(t) {
       segment.visible = false;
       continue;
     }
-    const position = state.segmentIndex.get(segment.userData.key).order;
+    // P5: the uncut shell's single segment (buildUncutShell, key
+    // "uncut-shell") owns no entry in state.segmentIndex -- that map is
+    // built from state.bundle.pieces (applyCut), which is empty for an
+    // uncut study. Treated as position 0, the same as a real course 0
+    // piece 0: it drops in once, on the same clock any first casting
+    // would, rather than throwing on a lookup that was never going to
+    // find a piece here in the first place.
+    const indexed = state.segmentIndex.get(segment.userData.key);
+    const position = indexed ? indexed.order : 0;
     // The stagger placementStep derives is smaller than DROP_SECONDS on
     // any real cut, so castings overlap in flight for every material and
     // sprayed concrete reads as continuous build up without any special
@@ -3925,7 +4060,16 @@ function applySceneAtTime(t) {
     }
     const u = Math.min(1, (build - start) / DROP_SECONDS);
     segment.visible = true;
-    if (sprayed) {
+    // P5: the sprayed-growth branch below scales a piece's own THICKNESS
+    // from a flat sheet at the formwork up to its full built depth, about
+    // a stored intrados centroid (segment.userData.centreZ) no uncut
+    // segment carries -- it has no thickness at all (buildUncutShell:
+    // "the surface itself is the display, no thickness extrusion") and no
+    // centroid to grow about, only its own real, doubly curved z. Scaling
+    // that in z the way a thin slab is grown would squash the whole form
+    // instead of building it up, so the uncut shell always takes the
+    // plain drop-in branch below regardless of the selected material.
+    if (sprayed && !segment.userData.uncutShell) {
       // Sprayed concrete thickens on the formwork where it is sprayed, so
       // the casting grows about its OWN centroid and stays where it will
       // stand. Piece geometry is absolute and the mesh sits at the origin,

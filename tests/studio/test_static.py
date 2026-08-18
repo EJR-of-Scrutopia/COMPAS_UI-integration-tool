@@ -244,6 +244,107 @@ def test_geometry_only_studies_disclose_it_in_the_data_panel():
     )
 
 
+def test_uncut_studies_disclose_it_in_the_data_panel_and_banner():
+    # P5 (presentation batch, 2026-08-18): bundle.py ships uncut_reason
+    # (the engine's own refusal message, verbatim) when the cut could not
+    # run at all -- see bundle.CutRefused. The client must say why in two
+    # places: a transient banner at load time (mirroring the geometry-only
+    # upload notice this mirrors, importExportPair) and a persistent Data
+    # panel line, both carrying the word "uncut" and the raw reason text,
+    # never silently dropping it.
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+
+    panel = _function_body(js, "renderDataPanel")
+    assert "state.bundle.uncut_reason" in panel
+    assert '"uncut: " + state.bundle.uncut_reason' in panel
+    uncut_heading_at = panel.index('uncutHeading.textContent = "Uncut"')
+    cut_heading_at = panel.index('cutHeading.textContent = "Cut"')
+    assert uncut_heading_at < cut_heading_at, (
+        "the uncut disclosure must render ahead of the Cut section, which "
+        "does not render at all for an uncut bundle (tessellation is null)"
+    )
+
+    load_body = _function_body(js, "loadStudy")
+    assert "fresh.uncut_reason" in load_body
+    assert 'showBanner("uncut: " + fresh.uncut_reason, "info")' in load_body
+
+
+def test_the_uncut_shell_is_built_double_sided_from_the_analysis_mesh():
+    # P5: an uncuttable study still shows its FORM -- one smooth mesh built
+    # straight from the analysis mesh (no thickness extrusion: there are no
+    # pieces to have carried one), double sided since there is nothing on
+    # the far side of a bare surface to make single-face winding
+    # meaningful, using the same pieceMaterial() every real casting gets
+    # its tint/finish/variation from.
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    shell = _function_body(js, "buildUncutShell")
+    assert "meshGeometry(state.bundle.analysis_mesh)" in shell
+    assert "pieceMaterial(" in shell
+    assert "THREE.DoubleSide" in shell
+    assert "state.objects.shell = group" in shell
+
+    build_body = _function_body(js, "buildPieceMeshes")
+    dispatch_at = build_body.index("buildUncutShell()")
+    dispose_at = build_body.index("disposeShell()")
+    assert dispose_at < dispatch_at, (
+        "the previous shell must be freed before the uncut one replaces it"
+    )
+    assert "state.bundle.uncut_reason" in build_body[:dispatch_at]
+
+
+def test_mesh_geometry_triangulates_any_polygon_not_only_quads():
+    # P5: a compas-only import's analysis mesh can be triangulated (see
+    # bundle.py's _render_mesh docstring), and meshGeometry is what both
+    # the falsework ghost and the new uncut shell build from. The old
+    # `for (const [a, b, c, d] of meshData.faces)` destructure assumed
+    # every face had exactly 4 vertices; a 3-vertex face left `d`
+    # undefined, which a Uint32Array index silently coerces to 0, drawing
+    # the wrong triangle on every face rather than crashing -- the real
+    # Armadillo-shaped export (801 vertices, 1481 triangular faces) hits
+    # this on every single face. Fan triangulation (the same idiom
+    # columnGeometryFrom already uses) fixes it for any face size.
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    body = _function_body(js, "meshGeometry")
+    assert "for (const [a, b, c, d] of meshData.faces)" not in body
+    assert "face.length - 1" in body
+    assert "face[0], face[i], face[i + 1]" in body
+
+
+def test_cut_dependent_controls_disable_for_an_uncut_study():
+    # P5: running staged analysis over a study the engine could not cut
+    # makes no more sense client side than drawing pieces for one does --
+    # the Run staged analysis button follows the same disable+note pattern
+    # updateMaterialControls already uses for the joint-gap slider on
+    # sprayed concrete.
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    body = _function_body(js, "applyCut")
+    assert 'runButton.disabled = !!state.bundle.uncut_reason' in body
+    assert "not available: this study's cut refused" in body
+    # The size/course captions must not dereference a tessellation summary
+    # that was never built (bundle.py ships null on an uncut bundle).
+    assert "const tess = state.bundle.tessellation;" in body
+    assert "tess ? tess.courses : 0" in body
+
+
+def test_the_timeline_does_not_crash_over_zero_pieces():
+    # P5: applySceneAtTime looks up each shell segment's drop position in
+    # state.segmentIndex, which is built from state.bundle.pieces
+    # (applyCut) and is therefore empty for an uncut study -- the uncut
+    # shell's own single segment (key "uncut-shell") has no entry there.
+    # An unguarded .get(...).order threw, which while playing killed the
+    # render loop until reload (the same class of bug applyShowMode's own
+    # comment already documents for shell/wires/nodes). It must fall back
+    # rather than throw, and the sprayed-growth branch -- which scales a
+    # stored per-piece thickness this segment does not have -- must never
+    # run for it either.
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    body = _function_body(js, "applySceneAtTime")
+    assert "state.segmentIndex.get(segment.userData.key).order" not in body
+    assert "const indexed = state.segmentIndex.get(segment.userData.key);" in body
+    assert "const position = indexed ? indexed.order : 0;" in body
+    assert "if (sprayed && !segment.userData.uncutShell) {" in body
+
+
 def test_thickness_control_is_wired_and_honest():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     js = (STATIC / "studio.js").read_text(encoding="utf-8")
@@ -766,6 +867,13 @@ def test_applycut_writes_the_piece_and_course_counts_it_reads():
     # ring_slider only checks the elements exist in the page. If applyCut
     # stopped writing them, both would sit at their static HTML zero and
     # the suite would stay green.
+    #
+    # P5 (presentation batch, 2026-08-18): course-count now reads through a
+    # local `tess` that can be null (bundle.py ships no tessellation
+    # summary for an uncut bundle -- see build_bundle's CutRefused
+    # handling), falling back to 0 rather than dereferencing .courses off
+    # nothing; the assertion follows that fallback rather than the bare
+    # field read it replaced.
     js = (STATIC / "studio.js").read_text(encoding="utf-8")
     start = js.index("function applyCut(")
     body = js[start:js.index("\n}", start)]
@@ -773,9 +881,10 @@ def test_applycut_writes_the_piece_and_course_counts_it_reads():
         'getElementById("piece-count").textContent = state.bundle.pieces.length'
         in body
     )
+    assert 'const tess = state.bundle.tessellation;' in body
     assert (
-        'getElementById("course-count").textContent = '
-        'state.bundle.tessellation.courses' in body
+        'getElementById("course-count").textContent = tess ? tess.courses : 0'
+        in body
     )
 
 
@@ -1811,8 +1920,13 @@ def test_no_piece_shows_while_the_net_is_still_inflating():
     end = js.index("\n}", start)
     body = js[start:end]
     loop_start = body.index("for (const segment of state.objects.shell.children)")
+    # P5 (presentation batch, 2026-08-18): the lookup itself gained a
+    # fallback (the uncut shell's single segment owns no state.segmentIndex
+    # entry -- see test_the_timeline_does_not_crash_over_zero_pieces), so
+    # the arithmetic now starts at that lookup's own local, not the bare
+    # field read it replaced.
     arithmetic_start = body.index(
-        "const position = state.segmentIndex.get", loop_start)
+        "const indexed = state.segmentIndex.get", loop_start)
     gate = body[loop_start:arithmetic_start]
     assert "inflate" in gate, (
         "the piece loop must gate on the inflation factor, computed from t, "
@@ -1931,12 +2045,18 @@ def test_sprayed_concrete_grows_about_its_own_centroid():
     body = js[start:js.index("\n}", start)]
     assert "sprayedMaterial()" in body
     assert "DROP_HEIGHT" in body, "other materials still drop"
-    sprayed_branch = body[body.index("if (sprayed) {"):body.index("} else {", body.index("if (sprayed) {"))]
+    # P5 (presentation batch, 2026-08-18): the sprayed branch's own guard
+    # gained a second condition -- the uncut shell (buildUncutShell) has
+    # no stored thickness or centroid to grow from, so it must always take
+    # the plain drop branch below regardless of the selected material; see
+    # test_the_timeline_does_not_crash_over_zero_pieces for that half.
+    sprayed_if_at = body.index("if (sprayed && !segment.userData.uncutShell) {")
+    sprayed_branch = body[sprayed_if_at:body.index("} else {", sprayed_if_at)]
     assert "userData.centreZ * (1 - grown)" in sprayed_branch, (
         "growth must compensate the position, or the casting is dragged "
         "down to z = 0 and stretched back up"
     )
-    drop_branch = body[body.index("} else {", body.index("if (sprayed) {")):]
+    drop_branch = body[body.index("} else {", sprayed_if_at):]
     assert "segment.scale.set(1, 1, 1)" in drop_branch and "segment.position.z" in drop_branch, (
         "the drop branch must reset both scale and position, so switching "
         "material cannot leave stale growth state behind"
@@ -3000,8 +3120,13 @@ def test_drop_reach_scales_with_the_shells_own_extent():
     # DROP_HEIGHT itself, DROP_SECONDS, the stagger and the sprayed
     # (scale-based) branch are all untouched by this fix.
     assert "const DROP_HEIGHT = 12" in js
+    # P5 (presentation batch, 2026-08-18): the sprayed guard gained a second
+    # condition (see test_the_timeline_does_not_crash_over_zero_pieces);
+    # this fix's own claim -- untouched by the drop-height change -- still
+    # holds for the branch itself, only the condition that reaches it grew.
+    sprayed_if_at = scene_body.index("if (sprayed && !segment.userData.uncutShell) {")
     sprayed_branch = scene_body[
-        scene_body.index("if (sprayed) {"):scene_body.index("} else {", scene_body.index("if (sprayed) {"))
+        sprayed_if_at:scene_body.index("} else {", sprayed_if_at)
     ]
     assert "userData.centreZ * (1 - grown)" in sprayed_branch, (
         "the sprayed branch must stay scale-based and untouched by the "

@@ -136,12 +136,19 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
         try:
             return bundle.load_or_build_bundle(export, material, pattern, size, thickness)
         except ValueError as error:
-            # domain.boundary_ring, generators.generate and
-            # tessellation.from_document all raise ValueError with a message
-            # naming the offending vertex or cell -- an oculus, a re-entrant
-            # plan, or a bad authored cell all land here. The message is the
+            # tessellation.from_document raises ValueError with a message
+            # naming the offending cell -- a bad authored tessellation lands
+            # here, and so does an unknown export name. The message is the
             # whole point (it says where to look), so it is carried through
             # unchanged rather than paraphrased or swallowed into a 500.
+            #
+            # P5 (presentation batch, 2026-08-18): domain.boundary_ring and
+            # generators.generate no longer reach this handler at all. Their
+            # ValueError -- an oculus, a hole, a re-entrant plan the engine's
+            # single-star-shaped-loop constraint refuses -- is valid geometry,
+            # not a malformed request, so build_bundle catches it itself
+            # (see bundle.CutRefused) and ships a 200 with uncut_reason set
+            # rather than raising through to here.
             raise HTTPException(400, str(error))
 
     @app.post("/api/runs", status_code=202)
