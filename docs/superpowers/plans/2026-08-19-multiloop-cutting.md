@@ -64,7 +64,7 @@
   - `test_a_crossing_hole_splits_into_two_components`: square (0,0)-(4,4), hole rectangle (-1,1.5)-(5,2.5) -> two cells keyed "c0p0" (area 6, the larger is equal here so assert the deterministic tie: area-descending then the stitcher's ring order) and "c0p0b", both course 0.
   - `test_a_swallowed_hole_becomes_an_interior_ring`: square (0,0)-(4,4), hole square (1,1)-(3,3) -> one cell, outline unchanged, holes == [the hole ring], area check via shoelace outline minus hole == 12.
   - `test_a_cell_inside_the_hole_is_dropped`: square (1,1)-(2,2), hole square (0,0)-(4,4) -> zero cells, cells_in_openings == 1.
-  - `test_a_sliver_component_is_dropped_and_named`: square (0,0)-(4,4), hole rectangle (-1,-1)-(3.999,5) -> the surviving right-edge strip has area 0.004*4 = 0.016 < 0.5% of 16 (0.08) -> zero cells, "c0p0" in opening_slivers.
+  - `test_a_sliver_component_is_dropped_and_named`: square (0,0)-(4,4), hole rectangle (-1,-1)-(3.999,5) -> the surviving right-edge strip is 0.001 m wide, area 0.001*4 = 0.004 < 0.5% of 16 (0.08) -> zero cells, "c0p0" in opening_slivers.
   - `test_a_collinear_tangency_is_dropped_and_named`: square (0,0)-(4,4), hole square (4,1)-(6,3) sharing the x=4 edge run -> "c0p0" in opening_clip_failures, zero crash.
   - `test_two_holes_apply_sequentially`: square (0,0)-(8,4), holes (1,1)-(3,3) swallowed and (7,-1)-(9,5) biting the right edge -> one cell with one interior ring and a trimmed right edge; both effects present.
 - [ ] **Step 2: run, confirm failures.**
