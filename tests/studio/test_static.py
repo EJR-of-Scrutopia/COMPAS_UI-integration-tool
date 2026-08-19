@@ -3437,3 +3437,108 @@ def test_w6_ground_handlers_apply_the_active_material_in_place():
     assert "localStorage.removeItem(groundStorageKey(state.groundPreset));" in reset_body
     assert "syncGroundControls(state.groundPreset);" in reset_body
     assert "applyGroundAppearance(state.groundPreset);" in reset_body
+
+
+def test_select_changes_settle_on_their_own_shorter_timer():
+    # Task 3 (cut cancellation, 2026-08-19): the pattern and material
+    # selects used to fire one full server cut per change event, no
+    # debounce at all -- the measured problem the spec grounds this wave
+    # in. They now settle on SELECT_SETTLE_MS, a fifth of the sliders'
+    # RELOAD_SETTLE_MS (a single deliberate pick must still feel
+    # immediate; only rapid cycling coalesces), through their own
+    # dedicated timer and the same commit path (requestMatchesLoaded then
+    # loadStudy) the sliders already use.
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    assert "RELOAD_SETTLE_MS = 1500" in js
+    assert "SELECT_SETTLE_MS = 300" in js
+    schedule_body = _function_body(js, "scheduleSelectReload")
+    assert "clearTimeout" in schedule_body and "setTimeout" in schedule_body
+    assert "SELECT_SETTLE_MS" in schedule_body
+    assert "loadStudy(" in schedule_body
+    assert "requestMatchesLoaded(" in schedule_body, (
+        "a select commit that matches the loaded bundle must not fire a "
+        "request, exactly like the sliders' own scheduleReload"
+    )
+    for control_id in ("material-select", "pattern-select"):
+        change_start = js.index(
+            'getElementById("{}").addEventListener("change"'.format(control_id))
+        change_body = js[change_start:js.index("\n});", change_start)]
+        assert "scheduleSelectReload()" in change_body, control_id
+        assert "loadStudy(" not in change_body, (
+            "{} must not fire an immediate load any more -- the commit "
+            "waits for the settle timer now, exactly like the "
+            "sliders".format(control_id)
+        )
+    # The study select stays immediate: switching studies swaps the whole
+    # subject under comparison, not a setting on the one already loaded,
+    # so there is no rapid-cycling case worth coalescing.
+    study_start = js.index('getElementById("study-select").addEventListener("change"')
+    study_line = js[study_start:js.index("\n", study_start)]
+    assert "loadStudy(e.target.value)" in study_line
+    assert "scheduleSelectReload" not in study_line
+
+
+def test_an_immediate_load_supersedes_every_pending_settle_timer():
+    # loadStudy already cleared reloadTimer for this reason (a size commit
+    # followed by an immediate study, pattern or material change must not
+    # also fire the settled request a moment later); selectTimer needs the
+    # exact same treatment now that a second, independent timer exists.
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    load_start = js.index("async function loadStudy(")
+    load_body = js[load_start:js.index("\n}", load_start)]
+    reload_at = load_body.index(
+        "if (state.reloadTimer) { clearTimeout(state.reloadTimer); state.reloadTimer = null; }")
+    select_at = load_body.index(
+        "if (state.selectTimer) { clearTimeout(state.selectTimer); state.selectTimer = null; }")
+    assert reload_at < select_at
+
+
+def test_loadstudy_aborts_the_fetch_it_supersedes():
+    # Task 3: a superseded fetch used to run to completion and simply be
+    # ignored on arrival (the token check alone). It is now cancelled
+    # outright, so the server (bundle.py's own cooperative checkpoints)
+    # finds out and stops computing an answer nobody is waiting for.
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    assert "abortController: null," in js
+    load_start = js.index("async function loadStudy(")
+    load_body = js[load_start:js.index("\n}", load_start)]
+    assert "AbortController" in load_body
+    assert "state.abortController.abort()" in load_body
+    assert "state.abortController = new AbortController();" in load_body
+    assert "state.abortController.signal" in load_body
+    # The previous fetch must be aborted, and the token moved, before the
+    # new fetch is even sent -- not after.
+    sequence_at = load_body.index("++state.loadSequence")
+    abort_at = load_body.index("state.abortController.abort()")
+    new_controller_at = load_body.index("state.abortController = new AbortController();")
+    fetch_at = load_body.index("await fetchJson(")
+    assert sequence_at < abort_at < new_controller_at < fetch_at
+
+    # fetchJson itself must accept and thread the signal.
+    assert "async function fetchJson(url, signal)" in js
+    fetch_json_start = js.index("async function fetchJson(url, signal)")
+    fetch_json_body = js[fetch_json_start:js.index("\n}", fetch_json_start)]
+    assert "fetch(url, { signal })" in fetch_json_body
+
+
+def test_a_superseded_fetch_or_a_409_is_dropped_silently_by_the_token():
+    # An AbortError from loadStudy's own AbortController, and a 409
+    # {"superseded": true} that somehow lands un-aborted, both reach the
+    # same catch block; neither must banner, because both are caused by
+    # the very request that already moved state.loadSequence past this
+    # call's own captured `sequence` -- the token stays the sole authority
+    # for what owns the screen, not a status-code special case.
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    load_start = js.index("async function loadStudy(")
+    load_body = js[load_start:js.index("\n}", load_start)]
+    catch_at = load_body.index("} catch (error) {")
+    catch_body = load_body[catch_at:]
+    assert "AbortError" in catch_body
+    assert "409" in catch_body
+    assert "superseded" in catch_body
+    guard_at = catch_body.index("if (sequence !== state.loadSequence) return;")
+    banner_at = catch_body.index('showBanner("Failed to load study: "')
+    assert guard_at < banner_at, (
+        "the token guard must run before the banner, so a superseded "
+        "response of either kind never reaches the user"
+    )

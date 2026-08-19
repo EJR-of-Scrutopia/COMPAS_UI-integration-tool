@@ -76,6 +76,17 @@ const state = {
   patternChosen: false, // an explicit pattern choice survives material changes
   loadSequence: 0,      // bundle request token: only the newest response lands
   reloadTimer: null,    // the settle timer behind size and thickness commits
+  // Task 3 (cut cancellation, 2026-08-19): the shorter, dedicated settle
+  // timer behind pattern and material commits (see SELECT_SETTLE_MS) --
+  // its own field, not reloadTimer, because a slider commit and a select
+  // commit can both be pending at once and each must be cancellable on
+  // its own.
+  selectTimer: null,
+  // The in-flight bundle fetch's own controller. loadStudy aborts it
+  // before minting a fresh one, so a fetch a newer commit displaces is
+  // actually cancelled rather than merely outlived and ignored on
+  // arrival.
+  abortController: null,
   // Task 5: render-only overrides, keyed to the loaded ANALYSIS material
   // and persisted per material under "bench-studio-appearance:" + material
   // (see restoreAppearance/persistAppearance). null means no override; the
@@ -2589,8 +2600,12 @@ function renderDataPanel(v) {
 }
 
 // ---------- data plumbing ----------
-async function fetchJson(url) {
-  const response = await fetch(url);
+// signal is optional (Task 3, cut cancellation, 2026-08-19): only
+// loadStudy passes one, to abort a fetch a newer commit displaces; every
+// other caller omits it, and fetch(url, { signal: undefined }) behaves
+// exactly like fetch(url).
+async function fetchJson(url, signal) {
+  const response = await fetch(url, { signal });
   if (!response.ok) throw new Error(url + " -> " + response.status + " " + (await response.text()));
   return response.json();
 }
@@ -2653,8 +2668,20 @@ function requestMatchesLoaded(material) {
 
 // Size and thickness commits settle before they cut: stepping a slider
 // five times costs one request, RELOAD_SETTLE_MS after the last step.
-// The selects commit immediately; they share the token, not the timer.
 const RELOAD_SETTLE_MS = 1500;
+
+// Task 3 (cut cancellation, 2026-08-19): "the selects commit immediately;
+// they share the token, not the timer" stopped being true the moment a
+// rapid pattern flip started costing one full server cut per change
+// event -- the measured problem this wave fixes. The selects now settle
+// too, on SELECT_SETTLE_MS, deliberately a fifth of RELOAD_SETTLE_MS
+// above: a single deliberate pick must still feel immediate, only rapid
+// cycling (arrow keys stepping a <select>) should coalesce. What every
+// commit still shares, slider or select, timed or immediate, is the one
+// loadSequence token below -- and now the one AbortController loadStudy
+// holds, which actually cancels the fetch a newer commit displaces
+// instead of merely outliving it unread.
+const SELECT_SETTLE_MS = 300;
 
 // P3 fix (presentation batch, 2026-08-18): the last export that actually
 // finished loading (written by loadStudy, read by boot's fallback below).
@@ -2683,11 +2710,29 @@ function scheduleReload() {
   }, RELOAD_SETTLE_MS);
 }
 
+// Task 3: the pattern and material selects' own settle timer, same shape
+// as scheduleReload above (same commit path: requestMatchesLoaded then
+// loadStudy) but SELECT_SETTLE_MS shorter and its own state field, so a
+// pending slider settle and a pending select settle can never clobber
+// each other's timer id.
+function scheduleSelectReload() {
+  if (state.selectTimer) clearTimeout(state.selectTimer);
+  state.selectTimer = setTimeout(() => {
+    state.selectTimer = null;
+    const select = document.getElementById("study-select");
+    const material = document.getElementById("material-select").value;
+    if (!select.value || requestMatchesLoaded(material)) return;
+    loadStudy(select.value);
+  }, SELECT_SETTLE_MS);
+}
+
 async function loadStudy(exportName) {
-  // An immediate load supersedes a pending settle timer: without this, a
-  // size commit followed within the settle window by a material, pattern
-  // or study change fires two full server cuts instead of one.
+  // An immediate load supersedes any pending settle timer, slider or
+  // select: without this, a size commit followed within either window by
+  // a material, pattern or study change fires two full server cuts
+  // instead of one.
   if (state.reloadTimer) { clearTimeout(state.reloadTimer); state.reloadTimer = null; }
+  if (state.selectTimer) { clearTimeout(state.selectTimer); state.selectTimer = null; }
   const material = document.getElementById("material-select").value;
   // The incoming material's own stored appearance (or the defaults, if it
   // has none) must be in place before the pieces below are built, or the
@@ -2696,8 +2741,16 @@ async function loadStudy(exportName) {
   restoreAppearance(material);
   // The token: whoever increments last owns the screen. A response that
   // comes back to find a newer sequence number is dropped silently, so
-  // two overlapping cuts can never race each other onto the canvas.
+  // two overlapping cuts can never race each other onto the canvas. Task
+  // 3 adds a second mechanism alongside it, not instead of it: the
+  // AbortController below actually cancels the fetch this load displaces
+  // (bundle.py's own cooperative checkpoints then raise CutSuperseded and
+  // stop the cut mid-build), rather than letting it run to an answer
+  // nobody is waiting for any more. The token stays the sole authority
+  // for what renders; the abort only decides how much gets wasted first.
   const sequence = ++state.loadSequence;
+  if (state.abortController) state.abortController.abort();
+  state.abortController = new AbortController();
   const status = document.getElementById("cut-status");
   const overlay = document.getElementById("cut-overlay");
   const materialLabel = document.querySelector(
@@ -2714,7 +2767,7 @@ async function loadStudy(exportName) {
     "/bundle?material=" + material + "&pattern=" + encodeURIComponent(state.pattern) +
     "&size=" + state.size + "&thickness=" + state.thickness;
   try {
-    const fresh = await fetchJson(url);
+    const fresh = await fetchJson(url, state.abortController.signal);
     if (sequence !== state.loadSequence) return;
     overlay.classList.add("hidden");
     status.textContent = "";
@@ -2743,6 +2796,20 @@ async function loadStudy(exportName) {
       + patternLabel(state.pattern) + ", " + state.size + " m) in "
       + ((Date.now() - startedAt) / 1000).toFixed(1) + "s");
   } catch (error) {
+    // The token is the sole authority for what owns the screen, whatever
+    // kind of error this is. An AbortError from this fetch's own
+    // AbortController firing above always finds sequence stale here,
+    // because the newer loadStudy call that aborted it already
+    // incremented state.loadSequence before doing so -- so it is
+    // swallowed exactly like a superseded ordinary response would be. A
+    // 409 {"superseded": true} that somehow lands un-aborted (fetchJson
+    // throws on any non-ok status, 409 included) is dropped the same way,
+    // for the same reason: the newer request that made the server answer
+    // 409 is, again, the very request that already moved the token past
+    // this one. Anything that reaches here with the token still
+    // current -- a genuine AbortError included, if one ever arrives
+    // without also having bumped the token -- is a real failure and
+    // banners exactly as before.
     if (sequence !== state.loadSequence) return;
     overlay.classList.add("hidden");
     status.textContent = "";
@@ -2960,14 +3027,19 @@ async function importColumns() {
 }
 
 // ---------- UI wiring ----------
+// Deliberately immediate, not debounced like the selects below: switching
+// studies swaps the whole subject under comparison rather than tweaking a
+// setting on the one already loaded, so there is no rapid-cycling case
+// worth coalescing, and the AbortController loadStudy now holds means
+// even a fast double-pick only ever finishes one cut, not two.
 document.getElementById("study-select").addEventListener("change", (e) => loadStudy(e.target.value));
 document.getElementById("material-select").addEventListener("change", (e) => {
   // Same rule as loadStudy: the incoming material's stored appearance is
-  // restored before anything is rebuilt, never after.
+  // restored before anything is rebuilt, never after -- immediately, not
+  // debounced; only the cut itself (scheduleSelectReload) waits.
   restoreAppearance(e.target.value);
   updatePatternForMaterial(e.target.value);
-  const select = document.getElementById("study-select");
-  if (select.value && !requestMatchesLoaded(e.target.value)) loadStudy(select.value);
+  scheduleSelectReload();
 });
 document.getElementById("material-tint").addEventListener("change", (e) => {
   state.appearance.tint = e.target.value;
@@ -3001,9 +3073,7 @@ document.getElementById("material-reset").addEventListener("click", () => {
 document.getElementById("pattern-select").addEventListener("change", (e) => {
   state.pattern = e.target.value;
   state.patternChosen = true;
-  const select = document.getElementById("study-select");
-  const material = document.getElementById("material-select").value;
-  if (select.value && !requestMatchesLoaded(material)) loadStudy(select.value);
+  scheduleSelectReload();
 });
 // Exactly the thickness slider's shape, and for the same reason: the piece
 // size is a property of the BUNDLE, not of the client. "input" only moves
