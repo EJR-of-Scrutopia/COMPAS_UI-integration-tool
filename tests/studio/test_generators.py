@@ -726,3 +726,88 @@ def test_monolithic_bands_refuse_openings_verbatim():
         "sprayed bands cannot yet cross openings; cut a jointed "
         "pattern or author the tessellation in Grasshopper."
     )
+
+
+# --- Fix round 1 (review finding 3): an opening is not a coverage hole ---
+
+
+def test_an_opening_is_not_reported_as_a_coverage_hole():
+    """tessellation._find_coverage_holes cannot tell an opening's own
+    boundary loop (every cell around it trimmed exactly onto it) apart
+    from a real gap -- both are a loop of single-owner facets. Before
+    generators._separate_opening_regions existed, the holed paraboloid's
+    successful cut reported report["coverage_holes"] with the opening's
+    own region inside it (measured directly: one entry, area 4.0,
+    matching the opening's own 2x2 plan footprint) -- a cut this task
+    itself calls successful showing a "coverage hole" that is not a
+    defect at all. The separation must move it out, not just hide it: it
+    lands in the new report["opening_regions"] instead.
+    """
+    g = studio("generators")
+    domain, vertices, faces, centroids = holed_paraboloid_domain()
+    tess = g.generate("bonded-courses", domain, 1.0)
+
+    assert tess["report"]["coverage_holes"] == []
+    assert len(tess["report"]["opening_regions"]) == 1
+    region = tess["report"]["opening_regions"][0]
+    assert region["area"] == pytest.approx(4.0, abs=1e-6)
+
+
+def test_a_genuine_gap_still_reports_as_a_coverage_hole_next_to_an_opening():
+    """The separation above must not blind the engine to a REAL gap.
+
+    Built by hand, the tests/studio/test_tessellation.py way: the same two
+    calls generate() makes internally (bonded_courses, then
+    openings.clip_cells) produce the actual clipped cell list for the
+    holed paraboloid fixture, then one INTERIOR cell -- course 1, key
+    "c1p0", measured to sit well clear of the opening (plan centroid
+    distance > 3 m from the opening's own centre) -- is deleted before
+    tessellation.build_tessellation runs directly (bypassing generate(),
+    to isolate _separate_opening_regions from the rest of the pipeline).
+    Measured before writing the assertions: this produces exactly two
+    coverage_holes entries, area 4.0 (the opening, cells the 8 clipped
+    ones bordering it) and area 0.857... (the deleted cell's own real
+    gap, cells its 6 real neighbours) -- confirmed disjoint sets. After
+    the separation pass, the real gap must be the ONLY entry left in
+    coverage_holes, and the opening the only one in opening_regions.
+    """
+    g = studio("generators")
+    o = studio("openings")
+    t = studio("tessellation")
+    domain, vertices, faces, centroids = holed_paraboloid_domain()
+    size = 1.0
+
+    raw = g.bonded_courses(domain, size)
+    hole_loops = [h["loop"] for h in domain["holes"]]
+    clipped, opening_report = o.clip_cells(raw, hole_loops, size)
+
+    victim = next(c for c in clipped if c["key"] == "c1p0")
+    victim_centroid = (
+        sum(p[0] for p in victim["outline"]) / len(victim["outline"]),
+        sum(p[1] for p in victim["outline"]) / len(victim["outline"]),
+    )
+    hole_centroid = (
+        sum(p[0] for p in hole_loops[0]) / len(hole_loops[0]),
+        sum(p[1] for p in hole_loops[0]) / len(hole_loops[0]),
+    )
+    distance = math.hypot(
+        victim_centroid[0] - hole_centroid[0], victim_centroid[1] - hole_centroid[1]
+    )
+    assert distance > 3.0, "the deleted cell must be nowhere near the opening"
+
+    reduced = [c for c in clipped if c["key"] != "c1p0"]
+    courses = g._course_count(domain, size)
+    tess = t.build_tessellation(reduced, "bonded-courses", "generated", size, courses)
+    assert len(tess["report"]["coverage_holes"]) == 2, (
+        "expected the opening's own region plus the one real gap"
+    )
+
+    g._separate_opening_regions(tess["report"], hole_loops, tess["points"])
+
+    assert len(tess["report"]["opening_regions"]) == 1
+    assert tess["report"]["opening_regions"][0]["area"] == pytest.approx(4.0, abs=1e-6)
+
+    assert len(tess["report"]["coverage_holes"]) == 1
+    gap = tess["report"]["coverage_holes"][0]
+    assert gap["area"] == pytest.approx(0.8571243186994373, rel=1e-6)
+    assert "c1p0" not in gap["cells"]

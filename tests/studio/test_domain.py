@@ -40,7 +40,7 @@ def tessellation_module():
     return tessellation
 
 
-def grid(side, drop=(), clockwise=False):
+def grid(side, drop=(), clockwise=False, mirror=False):
     """side by side unit quads, with the listed (i, j) faces left out.
 
     clockwise reverses each face's vertex order, so the same vertices and
@@ -54,11 +54,26 @@ def grid(side, drop=(), clockwise=False):
     around. Which way the rim is walked is therefore not a function of
     winding alone, which is exactly why the wobble measure has to be read
     relative to the direction of travel.
+
+    Fix round 1 (review finding 1, task-3-review.md): once plan_domain
+    routes through openings.extract_loops (Deviation 3, task-3-report.md),
+    `clockwise` above stops changing which vertex the rim is walked to
+    first at all -- extract_loops's walk direction is a deterministic
+    function of vertex ids, not of face winding, so it no longer gives
+    plan_domain a rim walked the other way round. mirror instead negates
+    every vertex's x coordinate (same vertex ids, same face winding): the
+    walk visits vertices in the identical id order either way, but
+    reflecting x negates every theta, which flips the SIGN of turn -- the
+    thing plan_domain's own sense logic actually reads. This is what still
+    exercises "sense is read from the geometry, not assumed" under the new
+    walk.
     """
     vertices = [
         [float(i), float(j), 0.0]
         for j in range(side + 1) for i in range(side + 1)
     ]
+    if mirror:
+        vertices = [[-x, y, z] for x, y, z in vertices]
     faces = []
     for j in range(side):
         for i in range(side):
@@ -74,6 +89,27 @@ def grid(side, drop=(), clockwise=False):
         for face in faces
     ]
     return vertices, faces, centroids
+
+
+def _turn_of(thetas):
+    """The same wrap-and-sum turn computation plan_domain performs
+    internally (domain.py's own steps/turn loop), reimplemented here so a
+    test can measure turn directly -- plan_domain's own return dict never
+    exposes it except inside failure["turn"], and this fixture is expected
+    to be ACCEPTED (failure is None), so there is nothing to read it from
+    otherwise.
+    """
+
+    TWO_PI = 2.0 * math.pi
+    turn = 0.0
+    for i in range(len(thetas)):
+        step = thetas[(i + 1) % len(thetas)] - thetas[i]
+        while step <= -math.pi:
+            step += TWO_PI
+        while step > math.pi:
+            step -= TWO_PI
+        turn += step
+    return turn
 
 
 def test_boundary_ring_is_one_closed_loop():
@@ -189,6 +225,70 @@ def test_a_plain_grid_wound_clockwise_is_star_shaped_too():
     assert domain["failure"] is None
     assert domain["backward_turn"] == 0.0
     assert domain["backward_steps"] == 0
+
+
+def test_a_mirrored_plain_grid_is_star_shaped_too():
+    """Fix round 1 (review finding 1): the pair of "wound_clockwise" tests
+    above no longer exercises plan_domain's own sense logic (domain.py:171)
+    at all, now that openings.extract_loops's walk direction does not
+    depend on face winding -- a mutation replacing `sense = -1.0 if turn <
+    0.0 else 1.0` with a hardcoded `sense = 1.0` left the entire suite
+    green (measured: 467 passed, 17 skipped). This test's fixture mirrors
+    the PLAN instead (grid(..., mirror=True): x -> -x, same vertex ids,
+    same face winding), which does still flip the walked direction, since
+    extract_loops's walk is id-canonical but theta is computed from real
+    coordinates: reflecting x negates every theta, so the sign of every
+    angular step, and of turn itself, flips.
+
+    Measured before pinning: turn == -6.283185307179586, i.e. -TWO_PI
+    within 1e-6, so this genuinely is a rim plan_domain must read as
+    walked "the other way" to accept -- under the correct sense logic
+    backward_turn is 0.0 (below); under a sense = 1.0 mutant it measures
+    the full 2*pi (6.283185307179586 rad) instead and star_shaped flips to
+    False, which is what backward_turn < 0.01 below is pinned to catch.
+    """
+    d = studio()
+    vertices, faces, centroids = grid(3, mirror=True)
+    domain = d.plan_domain(vertices, faces, centroids)
+
+    turn = _turn_of(domain["thetas"])
+    assert turn == pytest.approx(-2.0 * math.pi, abs=1e-6)
+
+    assert domain["star_shaped"] is True
+    assert domain["failure"] is None
+    assert domain["backward_turn"] < 0.01
+    assert domain["backward_steps"] == 0
+
+
+def test_a_mirrored_bay_is_still_refused_with_the_same_wobble():
+    """The bay counterpart to the mirrored plain-grid test above: review
+    finding 1 names BOTH test_a_plain_grid_wound_clockwise_is_star_shaped
+    _too and test_a_bay_wound_clockwise_is_still_refused as having lost
+    their grip on the sense mutant, so this closes the gap for the second
+    one too, not just the first.
+
+    Measured before pinning: mirroring the bay fixture also flips turn to
+    -TWO_PI (the same -6.283185307179586), and backward_turn comes out
+    0.7524840212747463 -- the same 0.752484 rad (to floating point) that
+    test_a_bay_is_reported_as_not_star_shaped and
+    test_a_bay_wound_clockwise_is_still_refused both already pin for this
+    physical bay, confirming the mirrored construction reproduces the same
+    shape rather than a different one. Under a sense = 1.0 mutant
+    backward_turn instead measures 7.035669328454333 rad -- an order of
+    magnitude off and well past WOBBLE_TOLERANCE either way, but the exact
+    pinned value below only matches the correct implementation.
+    """
+    d = studio()
+    vertices, faces, centroids = grid(3, drop={(2, 1)}, mirror=True)
+    domain = d.plan_domain(vertices, faces, centroids)
+
+    turn = _turn_of(domain["thetas"])
+    assert turn == pytest.approx(-2.0 * math.pi, abs=1e-6)
+
+    assert domain["star_shaped"] is False
+    assert domain["failure"]["backward_steps"] >= 1
+    assert domain["backward_turn"] == pytest.approx(0.7524840212747467)
+    assert domain["backward_turn"] > d.WOBBLE_TOLERANCE
 
 
 def test_a_plan_that_does_not_wind_once_is_refused_on_winding(monkeypatch):

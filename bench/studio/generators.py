@@ -428,6 +428,57 @@ GENERATORS = {
 }
 
 
+def _separate_opening_regions(report: Dict, hole_loops: List, points: List) -> None:
+    """Split report["coverage_holes"] into real gaps and opening regions.
+
+    Fix round 1 (review finding 3, task-3-review.md): tessellation's own
+    coverage-hole finder (tessellation._find_coverage_holes) reports every
+    enclosed region no cell covers, and cannot tell an opening apart from
+    a genuine gap -- both are, structurally, a loop of single-owner
+    facets. An opening IS such a loop by construction (clip_cells trims
+    every bordering cell onto the opening's true boundary, so the missing
+    material's edge sits exactly there), so on a holed cut every opening
+    ships as a false positive in coverage_holes unless something here
+    tells them apart.
+
+    The representative point for a coverage_holes entry is its own loop's
+    centroid (the mean of its own boundary points, `entry["points"]`
+    indexing into `points`): for an opening this lands deep inside that
+    opening's own polygon, because the loop bounding it is that polygon's
+    boundary. tessellation.point_in_ring treats "on the boundary" as
+    inside, matching plan_domain's own axis-in-opening rule. This is a
+    representative-point test, not a full polygon-containment proof: a
+    pathologically non-convex coverage-hole loop could in principle have
+    its own vertex-average centroid fall outside its own boundary, the
+    same class of approximation WOBBLE_TOLERANCE and the clip's own
+    sliver threshold already accept elsewhere in this engine, and not one
+    any real cut in this repo (paraboloid or Armadillo) has produced.
+
+    Mutates report in place: entries whose centroid falls inside any
+    opening move from "coverage_holes" into a new "opening_regions" list,
+    same entry shape, so nothing is silently dropped -- only reclassified.
+    A genuine gap's own loop bounds real, uncut material, nowhere near an
+    opening's polygon, so it is untouched by this pass and still names
+    itself in coverage_holes exactly as before.
+    """
+
+    coverage_holes = []
+    opening_regions = []
+    for entry in report["coverage_holes"]:
+        loop = entry["points"]
+        centroid = [
+            sum(points[i][0] for i in loop) / len(loop),
+            sum(points[i][1] for i in loop) / len(loop),
+        ]
+        in_opening = any(
+            tessellation.point_in_ring(centroid, list(range(len(hole_loop))), hole_loop)
+            for hole_loop in hole_loops
+        )
+        (opening_regions if in_opening else coverage_holes).append(entry)
+    report["coverage_holes"] = coverage_holes
+    report["opening_regions"] = opening_regions
+
+
 def generate(pattern: str, domain: Dict, size: float) -> Dict:
     builder = GENERATORS.get(pattern)
     if builder is None:
@@ -488,4 +539,12 @@ def generate(pattern: str, domain: Dict, size: float) -> Dict:
         tess["cells_clipped"] = opening_report["cells_clipped"]
         tess["opening_slivers"] = opening_report["opening_slivers"]
         tess["opening_clip_failures"] = opening_report["opening_clip_failures"]
+        # An opening is not a coverage hole (review finding 3): it is a
+        # loop of single-owner facets exactly like a real gap is, so
+        # tessellation's own coverage-hole finder cannot tell them apart
+        # on its own -- separate them here, where the opening polygons
+        # are known.
+        _separate_opening_regions(
+            tess["report"], [h["loop"] for h in holes], tess["points"]
+        )
     return tess
