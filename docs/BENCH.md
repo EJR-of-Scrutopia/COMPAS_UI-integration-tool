@@ -334,7 +334,7 @@ changed how every course divides:
 | subdivision rounds | 3, limited by edge (the edge length target, not the chord target, is what the round budget cuts off here) |
 | cap chord deviation | 0.973 mm against a 5.0 mm target |
 | corner normal residual, 530 corners | median 0.0397, mean 0.0455, p99 0.2193, max 0.2912 (its own worst corner, in courses 0 and 1) |
-| projected cap points | 481 of 35613, reaching 0.0464 m at the worst and 0.0013 m at the median (`clamped_points` is 0). Rim-rectangular fix (2026-08-18): `projected_max_m` is now the true worst DISPLACEMENT of a projected cap point's own plan position, not merely the sample-reach figure it replaced -- see the rim section below |
+| projected cap points | was 481 of 35613, reaching 0.0464 m at the worst, on the run this table is dated to (2026-08-18). Rim-rectangular fix (2026-08-18): `projected_max_m` is the true worst DISPLACEMENT of a projected cap point's own plan position, not merely the sample-reach figure it replaced. First-exit fix (2026-08-19, `docs/superpowers/specs/2026-08-19-rim-remainder-design.md`): re-measured at 442 of 35613, reaching **0.008679 m** at the worst (`clamped_points` still 0) -- see the rim section below |
 | coverage | 0 orphan faces, 0 double faces (of 2400 analysis faces), 0 open facets, 0 slivers, 0 folded, 0 coverage holes, 0 broken boundary entries, 0 missing planes |
 
 The studio polish wave tried tightening the cap subdivision, CAP_EDGE_TARGET
@@ -394,28 +394,40 @@ names both the face and every cell claiming it. One of the three in each
 case (c4p102, c4p54) is also on the folded list below; whether the fold
 is the cause of the overlap has not been measured.
 
-What a tolerated rim wobble costs is folded cells, and the sweep names
-every one of them:
+What a tolerated rim wobble USED TO cost was folded cells; the sweep
+named every one of them:
 
 | size | folded cells |
 | --- | --- |
-| 0.30 m | 6: c10p34, c10p65, c4p102, c4p54, c5p51, c5p95 |
-| 0.35 m | 4: c0p108, c0p58, c9p27, c9p52 |
-| 0.45 m | 2: c5p27, c5p52 |
-| 0.50 m | 2: c0p40, c0p74 |
+| (none, at any of the 55 sizes from 0.30 to 3.00 m, either generator) | 0 |
 
-14 in total, at 4 of the 55 sizes, none above 0.50 m and none at the
-default. `bench/studio/domain.py`'s note on WOBBLE_TOLERANCE traces them
-to the rim's own plus or minus 125.4 degree notch, where the boundary
-steps in from 10.9136 m to 9.4519 m while a cell's inner boundary is a
-straight chord that passes outside it: that is the cost of tolerating a
-rim wobble rather than refusing the export outright. A folded
-cell is still cut, still capped and still drawn, with one lobe of its cap
-inside out, and it enters none of the coverage counts above: the sliver
-test reads an algebraic area and a fold's two lobes cancel in it, so
-`report["folded"]` naming the cell by key is the entire disclosure. The
-studio's Data panel lists it beside the coverage line for exactly that
-reason. The default size stays at 0.9 m, which is clean on every count.
+**Updated 2026-08-19 (rim remainder, the first-exit rule).** The table
+above is retired, not merely re-measured: the full 55-size sweep folds
+**0** cells at **0** sizes, and `TRIAL_2_SLIVERS` (`c1p67`, `c1p118` at
+0.30 m) empties from 2 to **0** the same way, both checked directly
+against the geometry (`tessellation._is_simple` on every ring), not
+merely against `report["folded"]` agreeing with itself. The table this
+replaces was itself stale before this wave touched it -- it predated the
+2026-08-18 row-uniform-courses fix (below), and the real pre-wave count
+on the committed Trial 2 domain was 6 folded cells at 3 sizes (0.30 m:
+`c4p57`, `c4p100`; 0.35 m: `c6p39`, `c6p70`; 0.45 m: `c2p39`, `c2p70`),
+not the 14 cells at 4 sizes shown above. The mechanism, corrected in the
+same wave (see the 980.4 mm paragraph below): `domain.radius_at` used to
+take the OUTERMOST ray/rim crossing, which on the plus or minus 125.4
+degree notch -- a stretch where the tolerated wobble makes the rim
+genuinely multi-valued over a 0.2337 degree window -- could return a
+point on the far side of a gap the ray had already left the plan
+through, folding a course cell's cap around it. `radius_at` now returns
+the FIRST EXIT instead (docs/superpowers/specs/2026-08-19-rim-remainder-
+design.md): the near branch, not the far one, which removes the fold at
+its source rather than merely disclosing it. A folded cell was still
+cut, still capped and still drawn, with one lobe of its cap inside out,
+and it entered none of the coverage counts above: the sliver test reads
+an algebraic area and a fold's two lobes cancel in it, so
+`report["folded"]` naming the cell by key was the entire disclosure. The
+studio's Data panel still lists the folded and sliver counts beside the
+coverage line, both now zero at every size. The default size stays at
+0.9 m, which was clean on every count even before this fix.
 
 **Updated 2026-08-17 (cutting truth wave, K3).** The paragraph this
 replaces described the rim's clipped silhouette and crescent notches as a
@@ -514,27 +526,48 @@ names (`c1p67`, `c1p118`) are dropped this way.
 
 Diagnosis first, and it refined the hypothesis rather than confirming it
 outright (full numbers: `.superpowers/sdd/2026-08-18-rim-spikes/
-diagnosis.md`). The single worst case measured on this real export --
-505.7 mm -- is NOT a point landing outside the true rim at all:
-`domain.radius_at`'s outermost-crossing rule can place a corner exactly
-onto a real, but unrelated, part of the true rim (literally a neighbouring
-boundary vertex's own position, at one of 4 of the real mesh's 240
-boundary vertices where two edges sit nearly radial from the axis at
-once), which passes every containment test this codebase has -- point in
-polygon and render-mesh containment alike -- because it genuinely is on
-the mesh, just the wrong part of it. That case is left out of scope here,
-same as the wave before it left `domain.radius_at`'s own crossing rule
-alone: fixing it means changing which crossing the rim itself resolves to,
-not where a cap point already known to be off the mesh gets sampled or
-drawn. What IS fixed is the population `cutting.Surface.lift` already
-detects as genuinely off the render mesh (subdivision-level cap points
-straddling a DP-simplified chord across a concave stretch of the notch):
-measured on the real export at 0.9 m, 481 of 35613 cap points needed the
-move, reaching 46.4 mm at the worst and 1.3 mm at the median (`clamped_
-points` stays 0). Full bundle payload 11.29 MB and wall time 2.06 s at
-0.9 m -- inside the 3x/2x budget gate against the pre-fix figures above,
-and faster in practice on this run. The K2 seat-gap worst drops further,
-from 118.8 mm to 80.5 mm on the same export (median 22.5 mm, was 18.2 mm).
+diagnosis.md`, itself carrying a 2026-08-19 correction note -- read
+below alongside it, not instead of it). **Corrected 2026-08-19:** this
+paragraph originally named the single worst case on this real export as
+505.7 mm. The 2026-08-19 rim-remainder probe re-measured that same case
+by hand and found 505.7 mm was never the error at all -- it is the plain
+distance from vertex 221 to vertex 222, two points neither of which is
+where `domain.radius_at`'s old outermost-crossing rule actually placed
+the corner (46.6% of the way along the next segment, 222 to 223). The
+real worst mispositioning on this export is **980.4 mm**, at rim
+vertices 184 and 220 (their mirror pair, 183 and 221, sit at 489.9 mm).
+The mechanism named below it -- "two edges sit nearly radial from the
+axis at once" -- was also wrong: the offending segment sits 72.6 to
+72.8 degrees from the ray, nearly PERPENDICULAR to it, and no "reject
+near-radial segments" filter touches this at any threshold, measured.
+The real mechanism (probe report section 2,
+`.superpowers/sdd/2026-08-19-rim-remainder-probe/report.md`): the
+tolerated wobble at the plus or minus 125.4 degree notch makes the plan
+boundary genuinely MULTI-VALUED over a 0.2337 degree window, so a ray in
+that window crosses the rim three times and the plan's own interior
+along it is two disjoint intervals. The outermost rule returned the far
+branch -- a genuine point of the true rim, but on the far side of a gap
+the ray had already left the plan through -- which is what produced the
+wrong-vertex substitution, not a near-radial edge. This is no longer left
+out of scope: `domain.radius_at` now returns the FIRST EXIT rather than
+the outermost crossing (docs/superpowers/specs/2026-08-19-rim-remainder-
+design.md), the near branch rather than the far one, resolving the case
+this paragraph used to set aside. What K3 fixed, and remains fixed, is a
+different population: the subdivision-level cap points `cutting.Surface.
+lift` detects as genuinely off the render mesh, straddling a
+DP-simplified chord across a concave stretch of the notch. Measured on
+the real export at 0.9 m, before the first-exit fix, 481 of 35613 cap
+points needed that move, reaching 46.4 mm at the worst and 1.3 mm at the
+median (`clamped_points` stays 0). **Updated 2026-08-19 (rim remainder,
+the first-exit rule):** re-measured on the same export with
+`radius_at` returning the near branch, 442 of 35613 cap points need the
+move, reaching **8.679 mm** at the worst -- an 81% cut to the worst
+overshoot. At 0.4 m the same population moves from 1077 points reaching
+40.186 mm to **344 points reaching 6.812 mm**, an 83% cut. Full bundle
+payload 11.29 MB and wall time 2.06 s at 0.9 m -- inside the 3x/2x budget
+gate against the pre-fix figures above, and faster in practice on this
+run. The K2 seat-gap worst drops further, from 118.8 mm to 80.5 mm on the
+same export (median 22.5 mm, was 18.2 mm).
 
 The same wave also fixed row uniformity: `generators._divisions` divided
 each course into equal ANGULAR steps, which only gives equal piece

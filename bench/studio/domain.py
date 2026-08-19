@@ -238,12 +238,21 @@ def radius_at(domain: Dict, theta: float) -> float:
     1e-12 m, and the smallest group with ODD parity wins: the radius at
     which the ray first genuinely leaves the plan. On a star shaped plan
     that is the only crossing there is, so this returns the same number
-    the old outermost rule did, and a ray grazing a corner still returns
-    the rim for the same reason an ordinary exit does, an even group
-    never flips the parity. Where a tolerated rim wobble makes the plan
-    genuinely multi-valued along some ray, this returns the near branch,
-    not a branch on the far side of a gap the ray has already left the
-    plan through.
+    the old outermost rule did, to within a last ulp (this wave's own
+    repins prove the drift is real rather than theoretical: at a corner
+    graze the old rule took the max of two crossings agreeing to within
+    a float's own precision, this rule takes the single counted one,
+    measured at most a few times 1e-15 m apart on clean geometry). A ray
+    that passes through a corner and genuinely leaves the plan there
+    still returns the rim: the corner registers as an ODD group of one,
+    an ordinary exit like any other. A ray that only TOUCHES a corner, or
+    the tip of an inward point, without ever crossing to the plan's other
+    side, registers as an EVEN group instead, and an even group never
+    flips the parity, so the touch is skipped rather than mistaken for an
+    exit. Where a tolerated rim wobble makes the plan genuinely
+    multi-valued along some ray, this returns the near branch, not a
+    branch on the far side of a gap the ray has already left the plan
+    through.
     """
 
     ax, ay = domain["axis"]

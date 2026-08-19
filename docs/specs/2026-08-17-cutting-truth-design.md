@@ -131,3 +131,20 @@ any point. What the fix actually reduced is OUTLINE POINTS per piece:
 course 0's 62 pieces carried 538 outline points between them before this
 fix and 358 after, on the real Trial 2 export at 0.9 m. "Fragmentation"
 was real, but it was the outline, not the piece count.
+
+(c) Added 2026-08-19, by the rim-remainder wave. Correction (a) above,
+and the "Out of scope" list further up ("Any change to the analysis
+itself: the thrust surface, forces and FEA read exactly as before; only
+the SOLID built around the surface changes"), both stand on
+`domain.radius_at`'s outermost-crossing rule staying fixed: (a) names
+"the same worst case the old clamp reached... up to 52.3 mm outside the
+true rim" as still true after K3, precisely because the crossing choice
+itself was left untouched. That premise is superseded: the 2026-08-19
+rim-remainder wave replaces the outermost-crossing rule with a FIRST
+EXIT rule (`domain.radius_at`, `bench/studio/domain.py`) -- a deliberate
+change to which crossing the rim itself resolves to, not merely to what
+happens to a point once it is placed. The case (a) describes is resolved
+at its source by that change. See
+`docs/superpowers/specs/2026-08-19-rim-remainder-design.md` for the
+binding rule and measured numbers, and `docs/BENCH.md`'s rim section for
+the corrected figures.

@@ -7,6 +7,7 @@ it genuinely not star shaped about its own centroid.
 
 from __future__ import annotations
 
+import json
 import math
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def studio():
@@ -685,3 +687,218 @@ def test_dense_sampling_inside_the_notch_window_stays_inside_the_polygon():
         radius = 0.999 * d.radius_at(domain, theta)
         point = [axis[0] + radius * math.cos(theta), axis[1] + radius * math.sin(theta)]
         assert t.point_in_ring(point, ring, loop), (theta, point)
+
+
+def _backward_wobble_windows(thetas):
+    """The angular windows where the rim genuinely doubles back, LOCATED
+    from the stored thetas rather than named by index: this reimplements
+    plan_domain's own sense/backward-step logic (domain.py's
+    plan_domain, not duplicated by guesswork) against whatever thetas a
+    domain carries, so a fixture regeneration that moves the notch moves
+    this pin with it, without an edit here.
+
+    Each backward step (a walked step under STEP_EPSILON, once the whole
+    loop's own turn direction -- its sense -- is read from the total
+    turn, exactly as plan_domain reads it) brackets one window: the raw
+    theta span between that step's own two endpoints, the angles the rim
+    revisits. This is the same window the probe report (section 2) names
+    by hand for Trial 2 (125.1977 to 125.4314 degrees, mirrored at
+    -125.4314 to -125.1977).
+    """
+    d = studio()
+    n = len(thetas)
+    steps = []
+    turn = 0.0
+    for i in range(n):
+        step = thetas[(i + 1) % n] - thetas[i]
+        while step <= -math.pi:
+            step += d.TWO_PI
+        while step > math.pi:
+            step -= d.TWO_PI
+        steps.append(step)
+        turn += step
+    sense = -1.0 if turn < 0.0 else 1.0
+    walked = [sense * step for step in steps]
+
+    windows = []
+    for i, step in enumerate(walked):
+        if step < -d.STEP_EPSILON:
+            a, b = thetas[i], thetas[(i + 1) % n]
+            windows.append((min(a, b), max(a, b)))
+    return windows
+
+
+def test_the_committed_trial_2_domain_stays_contained_in_both_wobble_windows():
+    """The containment bar made permanent against a future rule
+    regression: not a synthetic miniature (that is
+    test_dense_sampling_inside_the_notch_window_stays_inside_the_polygon,
+    above) but the real, COMMITTED tests/studio/fixtures/trial-2-
+    tessellation.json domain -- the one make_fixtures.py measured off the
+    real Trial 2 export and every other Trial-2 pin in this suite already
+    trusts.
+
+    The windows are LOCATED (_backward_wobble_windows, above), not
+    hardcoded by vertex index, so this keeps finding the notch even if
+    the fixture is ever regenerated and the notch moves. >= 500 thetas
+    per window, f = 0.999, via domain.plan_point (not a hand rolled
+    radius*cos/sin, so this exercises the same call the studio's own
+    pattern generators make): every point must land inside the true loop
+    (tessellation.point_in_ring). Measured before writing this test
+    (probe report sections 4 and 8, task-2-review.md section 7): under
+    the shipped first-exit rule, 0 of 1000 targeted samples fall outside
+    across both windows; under the old outermost rule, 22 of 1000 do
+    (verified independently in the session scratchpad by swapping
+    domain.radius_at for the pre-wave outermost/along_edge body and
+    re-running this exact sampling loop) -- so this pin genuinely fails
+    against the rule this wave replaced, not merely against a rule that
+    was never shipped.
+    """
+    d = studio()
+    t = tessellation_module()
+    fixture = json.loads(
+        (FIXTURES / "trial-2-tessellation.json").read_text(encoding="utf-8")
+    )
+    domain = fixture["domain"]
+    loop = domain["loop"]
+    ring = list(range(len(loop)))
+
+    windows = _backward_wobble_windows(domain["thetas"])
+    assert len(windows) == domain["backward_steps"] == 2, (
+        "the located windows must match the domain's own backward_steps "
+        "count, or this is not finding what plan_domain found"
+    )
+
+    total = 0
+    for lo, hi in windows:
+        for k in range(500):
+            theta = lo + (hi - lo) * k / 499.0
+            point = d.plan_point(domain, 0.999, theta)
+            total += 1
+            assert t.point_in_ring(point, ring, loop), (theta, point)
+    assert total == 1000
+
+
+def _innermost_radius_at(domain, theta):
+    """The runner-up rule the design spec rejected (probe report R1,
+    section 3, "Why R6 rather than R1"; task-2-review.md Minor 2):
+    innermost along_ray among the OLD along_edge-tolerance test's
+    survivors, with no grouping and no parity check at all. A tangency
+    (the ray merely touching the rim, rather than genuinely leaving
+    through it) is just another crossing to a rule built this way, which
+    is exactly the failure mode the shipped rule was chosen to avoid.
+    Reimplemented independently here, not read back from either
+    domain.radius_at or the notched-polygon tests' own _old_radius_at
+    (which is the OUTERMOST pre-wave rule, a different rule from this
+    one).
+    """
+    ax, ay = domain["axis"]
+    dx, dy = math.cos(theta), math.sin(theta)
+    loop = domain["loop"]
+    best = None
+    for i in range(len(loop)):
+        p = loop[i]
+        q = loop[(i + 1) % len(loop)]
+        ex, ey = q[0] - p[0], q[1] - p[1]
+        denominator = dx * ey - dy * ex
+        if abs(denominator) < 1e-15:
+            continue
+        px, py = p[0] - ax, p[1] - ay
+        along_ray = (px * ey - py * ex) / denominator
+        along_edge = (px * dy - py * dx) / denominator
+        if along_ray < 0.0 or not (-1e-12 <= along_edge <= 1.0 + 1e-12):
+            continue
+        if best is None or along_ray < best:
+            best = along_ray
+    return best
+
+
+def _needle_domain():
+    """A square rim (radius 5, axis at the origin) with a thin needle
+    poking inward from its right edge, the needle's tip sitting exactly
+    on the ray at theta = 0.
+
+    Walked from (-5, 5) anticlockwise, the right edge is split into four
+    points instead of two: (5, -5) -> (5, 2) -> (1, 0) [the tip] ->
+    (5, 3) -> (5, 5). That cuts a thin wedge into the square from the
+    right edge, entering at y = 2, narrowing to a point at the tip
+    (1, 0), and leaving again at y = 3 -- both flanking points ABOVE the
+    ray, and neither below it, so the needle sits entirely on one side
+    of the ray and only touches it at the tip. This is deliberately a
+    GRAZE, not a crossing: see the test below for the point-in-ring check
+    that proves the ray's own path to the true rim at radius 5 is never
+    actually blocked by the needle.
+
+    theta = 0 rather than some other angle is deliberate: cos(0) = 1.0
+    and sin(0) = 0.0 EXACTLY in IEEE754, so the half-open side test's
+    dx*(z.y-ay) - dy*(z.x-ax) reduces to plain z.y with no float-rounding
+    fudge the way a vertical ray through cos(pi/2) would carry -- the
+    parity argument in the test docstring below is then exact, not
+    approximate.
+    """
+    loop = [
+        [-5.0, 5.0], [-5.0, -5.0], [5.0, -5.0],
+        [5.0, 2.0], [1.0, 0.0], [5.0, 3.0],
+        [5.0, 5.0],
+    ]
+    return {"axis": [0.0, 0.0], "loop": loop}
+
+
+def test_an_inward_needle_returns_the_rim_not_its_own_tangent_tip():
+    """The property the design spec chose the first-exit rule over the
+    innermost rule for (docs/superpowers/specs/2026-08-19-rim-remainder-
+    design.md, "Why not the runner-up (innermost)"; probe report section
+    7, "Why R6 rather than R1"; task-2-review.md Minor 2, which measured
+    5.0 against 1.0000000000001226 on a similar hand built fixture and
+    offered a needle fixture to this task). Not exercised by geometry
+    this repo has shipped so far (Trial 2's own wobble is a shallow
+    lobe, not a needle), so this is a property pin, not a regression pin.
+
+    Why this genuinely discriminates, reasoned here rather than merely
+    asserted: at theta = 0, dx = 1.0 and dy = 0.0 exactly (see
+    _needle_domain), so the half-open side test side(z) = dx*(z.y-ay) -
+    dy*(z.x-ax) reduces to plain z.y (axis is the origin). The tip
+    (1, 0) has y = 0.0 exactly, so it sits on the "not > 0.0" side, the
+    half-open convention's own negative side. Its two neighbours,
+    (5, 2) and (5, 3), both have y > 0.0: the POSITIVE side. So the edge
+    INTO the tip (positive side -> the tip's zero side: different signs,
+    counted) and the edge OUT of the tip (the tip's zero side ->
+    positive side: different signs too, also counted) both register a
+    crossing, and both land at along_ray = 1.0, the tip's own radius --
+    an EVEN group of two. The parity rule (domain.radius_at) skips an
+    even group by construction and moves on to the only other group, the
+    single genuine exit through the right edge at radius 5.0 (an ODD
+    group of one). A rule that just takes the smallest along_ray with no
+    grouping and no parity -- the innermost rule the spec rejected,
+    reimplemented independently above as _innermost_radius_at -- has no
+    way to see that the tip's two crossings cancel each other, and
+    returns the tangency itself: 1.0. That is precisely an inward needle
+    collapsing the domain radius to its own tip, the failure mode
+    described in the design spec's "Why not the runner-up" and the
+    probe's own section 7.
+    """
+    d = studio()
+    t = tessellation_module()
+    domain = _needle_domain()
+    loop = domain["loop"]
+    ring = list(range(len(loop)))
+    theta = 0.0
+
+    # The needle is a true graze, not a real notch: confirm the ray's own
+    # path from the axis to the rim never actually leaves the polygon,
+    # so radius 5.0 is genuinely the rim and not an artefact of a
+    # containment check that happens not to look between 1 and 5.
+    for x in (0.0, 1.0, 2.0, 3.0, 4.0, 4.99):
+        assert t.point_in_ring([x, 0.0], ring, loop), x
+
+    shipped = d.radius_at(domain, theta)
+    assert shipped == pytest.approx(5.0, abs=1e-12)
+    assert shipped != pytest.approx(1.0, abs=1e-6), (
+        "the shipped rule must not collapse to the needle's own tip"
+    )
+
+    tangency = _innermost_radius_at(domain, theta)
+    assert tangency == pytest.approx(1.0, abs=1e-12), (
+        "the fixture must genuinely present a tangency to a rule that "
+        "would take it, or this test proves nothing about the two rules "
+        "diverging"
+    )
