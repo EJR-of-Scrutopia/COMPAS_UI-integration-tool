@@ -509,9 +509,11 @@ contributor to the ragged rim silhouette Param's own complaint names
 edges") -- a corner sampled honestly on the true rim but still drawn
 millimetres away from it, on a straight edge to its correctly-placed
 neighbour, reads as roughness. It is not the dominant cause: the worst,
-most visible spikes trace to a separate, larger (up to 505.7 mm) and
-unrelated mechanism, described two paragraphs below, that this fix does
-not touch. `cutting.Surface.lift` now carries the projected
+most visible spikes trace to a separate, larger (up to 980.4 mm, as
+re-measured on 2026-08-19; the 505.7 mm first reported here was a
+vertex-to-vertex distance, not the error) and unrelated mechanism,
+described two paragraphs below, which the 2026-08-19 first-exit rule
+has since resolved. `cutting.Surface.lift` now carries the projected
 (x, y) through in its own returned dict (not only z/normal/weights), and
 `pieces._lift` ships it as the point's own drawn position, so a corner
 that needed the boundary-polyline projection now sits ON the rim, not
