@@ -599,9 +599,20 @@ def build_tessellation_for(
     # multi-polyline projection then picks whichever loop is actually
     # nearest, so a drawn point pushed just off the mesh near an opening
     # projects onto THAT opening's boundary instead of the outer one. The
-    # same try/except ValueError guard as before: a branch-vertex mesh
+    # same try/except guard as before: a branch-vertex mesh
     # (openings.extract_loops' own refusal, verbatim the same message
     # domain.boundary_ring raised) still just skips attachment.
+    #
+    # Fix round 1, finding M1 (2026-08-19): narrowed from a blanket
+    # `except ValueError` to `except refusals.PlanRefused` -- both of
+    # extract_loops' own raises (no boundary, a branching vertex) were
+    # retyped to that subclass by fix 7, so this narrowing changes
+    # nothing about what is actually caught today. It keeps this site
+    # honest about its own intent ("a curated, expected refusal on this
+    # one mesh just skips attachment") rather than the swallow-anything
+    # shape fix 7 exists to remove elsewhere: a future non-curated
+    # ValueError inside extract_loops (a genuine bug) now propagates
+    # instead of being silently folded into boundary_loop_count = 0.
     try:
         loops = openings.extract_loops(arrays["faces"])
         surface.boundary = [
@@ -609,7 +620,7 @@ def build_tessellation_for(
             for loop in loops
         ]
         boundary_loop_count = len(loops)
-    except ValueError:
+    except refusals.PlanRefused:
         boundary_loop_count = 0
     authored = tessellation.read_tessellation(
         contract, tessellation_sidecar(export_name))
@@ -1085,13 +1096,19 @@ def build_bundle(
         },
     }
     # Cache decision (P5): an uncut bundle is NOT written to disk. Every
-    # REQUIRED_BUNDLE_KEYS entry lives under "tessellation", which is None
-    # here, so a cached copy would need its own staleness carve-out to
-    # avoid load_or_build_bundle treating it as stale forever and rebuilding
-    # it on every read anyway -- at which point the cache buys nothing. An
-    # uncut build is also cheap: no cut ran, only the plan/domain check that
-    # refused it, far below a real cut's own cost. Simplest honest choice:
-    # never cache it, always recompute it fresh.
+    # REQUIRED_BUNDLE_KEYS entry under "tessellation" -- the great majority
+    # of the tuple -- is None here, so a cached copy would still need its
+    # own staleness carve-out to avoid load_or_build_bundle treating it as
+    # stale forever and rebuilding it on every read anyway -- at which
+    # point the cache buys nothing. (Fix round 1, finding M2, 2026-08-19:
+    # this is no longer true of EVERY entry -- fix 8's provenance.render_
+    # subdivision is present on an uncut bundle too, since it rides
+    # alongside render_mesh rather than inside the tessellation summary --
+    # but that one entry would not save an uncut document from the gate on
+    # its own: every tessellation.* entry still fails it.) An uncut build
+    # is also cheap: no cut ran, only the plan/domain check that refused
+    # it, far below a real cut's own cost. Simplest honest choice: never
+    # cache it, always recompute it fresh.
     if uncut_reason is None:
         # Fix 9 (bundle honesty, 2026-08-19): re-check build_generation
         # (captured at the top of this call, before the cut) against the
@@ -1108,12 +1125,53 @@ def build_bundle(
         # to every LATER caller by load_or_build_bundle's own cache hit,
         # not just handed once to the caller who happened to trigger this
         # build.
+        #
+        # Fix round 1, finding I2 (2026-08-19): json.dumps(document) is
+        # serialised BEFORE this check, not after, so the ONLY work still
+        # sitting inside the window between the re-check and the write is
+        # mkdir plus write_text -- milliseconds, not the up-to-roughly-a-
+        # second a large cached bundle's own serialisation costs (measured
+        # by the review: 11 MB in 0.16 s; this repo's largest cached
+        # bundles run to 87 MB). A residual window still exists: a
+        # generation bump landing between the lock release below and the
+        # write completing could still leave a stale document on disk,
+        # one that could in principle survive app._invalidate_studio_
+        # cache's own file sweep if the bump and the sweep interleave
+        # there too. RULING: accepted, not closed. Holding _cut_memo_lock
+        # across the file write itself (the way to close it fully) is the
+        # wrong remedy -- that lock also guards every memo lookup, every
+        # register_interactive and every superseded call, and the
+        # module's own comment above _cut_memo already rules out anything
+        # slow sitting behind it. This hoist is a strict, large
+        # improvement regardless (the exposed window shrinks from the
+        # whole build -- seconds, on a real cut -- to a single mkdir plus
+        # write), and what remains is self-healing: the NEXT request's own
+        # freshness gate (load_or_build_bundle's REQUIRED_BUNDLE_KEYS /
+        # REQUIRED_BUNDLE_VALUES check) rebuilds anything this residual
+        # window leaves stale rather than serving it forever, the same
+        # recovery path a genuinely torn or corrupted write already
+        # depends on. Closing it fully would need a SECOND generation
+        # check after the write, unlinking the file on a second mismatch --
+        # deferred as not worth the added complexity for a window this
+        # small following this change.
+        payload = json.dumps(document)
         with _cut_memo_lock:
             stale_build = build_generation != _cut_memo_generation
         if not stale_build:
             target = bundle_path(slug, material, pattern, size, thickness)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(json.dumps(document), encoding="utf-8")
+            target.write_text(payload, encoding="utf-8")
+        else:
+            # Fix round 1, finding M3 (2026-08-19): the skip was silent --
+            # the caller is still served correctly (this is what the
+            # control test already proves), but nothing said so anywhere.
+            # One line, matching the precedent app.get_bundle already sets
+            # for the sibling CutSuperseded case (bench/studio/app.py).
+            print(
+                "bundle: {} build went stale mid-build (a re-upload "
+                "invalidated it before the write); serving the result "
+                "uncached, not writing it to disk".format(export_name)
+            )
     return document
 
 

@@ -590,6 +590,34 @@ def generate(
         raw, opening_report = openings.clip_cells(
             raw, [h["loop"] for h in holes], size
         )
+        if not raw:
+            # Curated refusal (fix round 1, finding I1, 2026-08-19):
+            # clip_cells can drop every surviving branch -- swallowed
+            # whole by an opening, a degenerate clip walk, or a sliver
+            # under SLIVER_FRACTION of its own cell's own area -- and
+            # returns an empty list with no guard of its own (see its
+            # own docstring). Before this check, an empty raw fed
+            # straight into tessellation.build_tessellation below, whose
+            # own "a tessellation with no cells cannot cut anything"
+            # ValueError (tessellation.py:409) is NOT retyped to
+            # refusals.PlanRefused -- build_tessellation also serves the
+            # AUTHORED path (tessellation.from_document's own caller),
+            # where a malformed sidecar producing no cells is bad input,
+            # not a refusal on valid geometry, and must stay a plain
+            # ValueError (a 400 naming the problem, per
+            # test_a_malformed_authored_tessellation_still_raises_
+            # plain_valueerror in test_bundle.py). On the GENERATED path
+            # this function owns, though, an opening leaving no material
+            # to cut is a real geometry outcome -- the same category
+            # every other named refusal in this function already is --
+            # so it is caught HERE, before build_tessellation ever sees
+            # the empty list, and reported in the curated vocabulary
+            # instead of propagating as an uncaught bug.
+            raise refusals.PlanRefused(
+                "the openings leave no material to cut at this size; try "
+                "a smaller piece size or author the tessellation in "
+                "Grasshopper and import it instead."
+            )
     tess = tessellation.build_tessellation(
         raw, pattern, "generated", size, _course_count(domain, size)
     )

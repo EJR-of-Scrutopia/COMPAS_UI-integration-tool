@@ -1390,6 +1390,70 @@ def test_a_plain_valueerror_from_generate_is_not_swallowed_as_a_refusal(
     )
 
 
+def test_a_clip_pass_that_swallows_every_cell_is_a_curated_refusal(
+    tmp_path, monkeypatch
+):
+    """Fix round 1, finding I1: openings.clip_cells can drop every
+    surviving branch -- a cell wholly swallowed by an opening, a
+    degenerate clip walk, or a sliver under SLIVER_FRACTION of its own
+    cell's own area -- and return an empty cell list with no guard of its
+    own. Before generators.generate's own new check (right after the
+    clip_cells call), that empty list fed straight into tessellation.
+    build_tessellation, whose own "a tessellation with no cells cannot
+    cut anything" ValueError (tessellation.py:409) is NOT retyped to
+    refusals.PlanRefused (build_tessellation also serves the AUTHORED
+    path, where a malformed sidecar producing no cells is bad input, not
+    a refusal -- see test_a_malformed_authored_tessellation_still_
+    raises_plain_valueerror above), so it used to propagate past
+    build_tessellation_for's narrowed catch as an uncaught bug rather
+    than a polite uncut bundle: exactly the regression the task-2 review
+    named as finding I1.
+
+    Reaching this through real, geometrically valid geometry needs an
+    opening that swallows literally every generated cell without also
+    containing the axis (which would refuse earlier, at
+    domain.plan_domain's own axis-in-opening check) -- the review itself
+    could not build one within review scope, marking it PLAUSIBLE only.
+    openings.clip_cells is monkeypatched here to return its own genuinely
+    empty shape directly instead: the same deterministic technique the
+    fix-7 test above uses to force an exact triggering condition, rather
+    than hunting for adversarial geometry that happens to produce it.
+    holed_contract() is real, cuttable geometry with one genuine opening
+    (used unmodified elsewhere in this file), so the "if holes:" branch
+    this check lives inside is genuinely exercised; only clip_cells'
+    OWN return value is forced.
+    """
+    bundle, upload, studies = fake_export(tmp_path, monkeypatch)
+    (upload / "Holed-contract.json").write_text(
+        json.dumps(holed_contract()), encoding="utf-8"
+    )
+    (upload / "Holed-compas.json").write_text("{}", encoding="utf-8")
+
+    def swallow_everything(cells, hole_loops, target_size):
+        return [], {
+            "openings": len(hole_loops),
+            "cells_in_openings": len(cells),
+            "cells_clipped": [],
+            "opening_slivers": [cell["key"] for cell in cells],
+            "opening_clip_failures": [],
+        }
+
+    monkeypatch.setattr(bundle.openings, "clip_cells", swallow_everything)
+
+    document = bundle.build_bundle("Holed", "concrete", "bonded-courses", 1.0)
+    assert document["pieces"] == []
+    assert document["tessellation"] is None
+    assert document["binding"] is None
+    reason = document["uncut_reason"]
+    assert reason == (
+        "the openings leave no material to cut at this size; try a "
+        "smaller piece size or author the tessellation in Grasshopper "
+        "and import it instead."
+    ), reason
+    target = bundle.bundle_path("holed", "concrete", "bonded-courses", 1.0, 0.2)
+    assert not target.exists(), "an uncut bundle must not be cached to disk"
+
+
 def mixed_quad_tri_contract():
     """tiny_contract(), with face 0 ([0, 1, 4, 3]) split into two
     triangles along its own diagonal (vertex 0 to vertex 4): the same
@@ -1568,3 +1632,62 @@ def test_reset_studio_state_clears_the_interactive_and_inflight_registries(
     ), "the reset must remove the leaked registration's influence"
     assert "Leaked" not in bundle._interactive_live
     assert leaked_key not in bundle._cut_inflight
+
+
+# Fix round 1, finding M4: the direct reset_studio_state() proof above is a
+# genuine demonstration of the FUNCTION, but its own red proof (an
+# AttributeError, since the function did not exist yet) only proves the
+# function was missing, not that a leak had a consequence -- and it says
+# nothing about whether tests/studio/conftest.py actually calls the
+# function BETWEEN tests. The two ordered tests below are a companion pin
+# on that WIRING: the first leaves a registration live and does not retire
+# it itself (the autouse fixture's own teardown, running immediately after
+# it returns, is what is meant to clear it); the second, which MUST run
+# immediately after it (pytest runs a module's tests in file-declaration
+# order -- no randomisation plugin is registered in this venv, verified
+# directly: `pip list` inside the suite's own .venv lists pytest 9.1.1,
+# anyio's pytest plugin, and a large compas/fastapi dependency set, with
+# no pytest-randomly, pytest-random-order or similar reordering plugin
+# anywhere in it), asserts the registration is already gone before its
+# own body runs. Verified red-then-green by hand against
+# the OLD conftest (tests/studio/conftest.py calling bundle.clear_cut_memo()
+# alone, which never touched _interactive_live -- see that function's own
+# comment): with the old conftest restored, running just these two tests in
+# file order fails exactly here,
+# `AssertionError: the previous test's registration for "SharedLeak" leaked
+# across the autouse fixture's own teardown`; with reset_studio_state()
+# wired in (the current conftest), the same two tests pass. That hand
+# verification is not itself part of the suite (a suite cannot pin its own
+# fixture's history), but the pair below is a live regression guard: if a
+# future change ever reverted the autouse fixture to clear_cut_memo() alone,
+# this pair -- unlike the direct proof above, which tests bundle.py in
+# isolation and would keep passing regardless of what conftest.py does --
+# would start failing again.
+def test_a_registration_from_this_test_leaks_into_the_next_one_by_construction(
+    tmp_path, monkeypatch
+):
+    """Half one of the M4 pin: register an interactive token for export
+    "SharedLeak" and deliberately do not retire it. See the module comment
+    immediately above for why this is split across two ordered tests
+    rather than demonstrated within one.
+    """
+    bundle, _, _ = fake_export(tmp_path, monkeypatch)
+    bundle.register_interactive("SharedLeak", ("SharedLeak", "bonded-courses", 0.9))
+
+
+def test_the_previous_registration_did_not_survive_into_this_test(
+    tmp_path, monkeypatch
+):
+    """Half two of the M4 pin: must run immediately after
+    test_a_registration_from_this_test_leaks_into_the_next_one_by_
+    construction (file order) for this assertion to mean anything -- see
+    the module comment above both tests. Pre-fix (the old conftest,
+    clear_cut_memo() alone), "SharedLeak" would still be live here and
+    this assertion would fail: a real, demonstrated cross-test leak
+    consequence, not merely a function existing to call.
+    """
+    bundle, _, _ = fake_export(tmp_path, monkeypatch)
+    assert "SharedLeak" not in bundle._interactive_live, (
+        "the previous test's registration for \"SharedLeak\" leaked "
+        "across the autouse fixture's own teardown"
+    )
