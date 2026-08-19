@@ -45,7 +45,9 @@ SIZE = 0.9  # the size the studio's piece-size slider opens to (index.html)
 
 def main() -> int:
     contract = geometry.load_contract(
-        REPO / "bench" / "demo" / "upload from grasshopper" / (EXPORT + "-contract.json")
+        # The demo exports were retired on 2026-08-18; the real Trial 2
+        # contract lives in the retired folder now.
+        REPO / "bench" / "retired-2026-08-18" / (EXPORT + "-contract.json")
     )
     arrays = geometry.mesh_arrays(contract)
     centroids = geometry.face_centroids(arrays["vertices"], arrays["faces"])
