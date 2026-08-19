@@ -7,6 +7,7 @@ neighbours have something to disagree about.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import sys
@@ -78,6 +79,75 @@ def test_one_piece_per_cell_in_placement_order():
     # authoring order, and it is correct: do not "fix" it back.
     assert [piece["key"] for piece in made] == ["c00", "c10", "c11", "c01"]
     assert [piece["course"] for piece in made] == [0, 0, 1, 1]
+
+
+class _Cancelled(Exception):
+    """A stand-in for bundle.py's own CutSuperseded (cut cancellation,
+    2026-08-19): pieces.py must never import or know that type exists, so
+    this test brings its own to prove the raise really is the caller's
+    business, unmodified."""
+
+
+def test_checkpoint_is_called_at_least_once_per_cell():
+    """The checkpoint callable fires once at the TOP of every iteration of
+    the per-cell loop, before that cell's own triangulation begins -- so a
+    counting callable on this four-cell fixture sees at least one call per
+    cell, including any cell the loop goes on to drop as degenerate (none
+    are, on this fixture; the >= is the honest bound, not ==, because a
+    future fixture with drops would still satisfy it)."""
+
+    p = studio("pieces")
+    surface, _, _ = dome_surface()
+    tess = four_cells()
+    calls = []
+    made, _ = p.segment_pieces(
+        tess, surface, [[0.0, 0.0]], checkpoint=lambda: calls.append(1)
+    )
+    assert len(calls) >= len(tess["cells"])
+    assert len(made) == len(tess["cells"])
+
+
+def test_a_raising_checkpoint_aborts_the_loop_without_mutating_the_input():
+    """segment_pieces only ever reads tess; the exception a checkpoint
+    raises on the second cell must propagate unmodified, and the caller's
+    own tess dict must come back byte for byte the same as before the
+    call -- not half rewritten by whatever the first cell's own work
+    touched before the abort."""
+
+    p = studio("pieces")
+    surface, _, _ = dome_surface()
+    tess = four_cells()
+    before = copy.deepcopy(tess)
+    calls = []
+
+    def checkpoint():
+        calls.append(1)
+        if len(calls) == 2:
+            raise _Cancelled("superseded")
+
+    with pytest.raises(_Cancelled):
+        p.segment_pieces(tess, surface, [[0.0, 0.0]], checkpoint=checkpoint)
+    # Aborted on the second cell: the loop never reached a third call.
+    assert len(calls) == 2
+    assert tess == before
+
+
+def test_checkpoint_none_is_byte_identical_to_no_checkpoint_at_all():
+    """checkpoint=None (the default) must produce the exact same output as
+    never passing the parameter at all: the whole point of a default that
+    matches "not called," not merely a default that happens to also work."""
+
+    p = studio("pieces")
+    surface_implicit, _, _ = dome_surface()
+    made_implicit, report_implicit = p.segment_pieces(
+        four_cells(), surface_implicit, [[0.0, 0.0]]
+    )
+    surface_explicit, _, _ = dome_surface()
+    made_explicit, report_explicit = p.segment_pieces(
+        four_cells(), surface_explicit, [[0.0, 0.0]], checkpoint=None
+    )
+    assert made_explicit == made_implicit
+    assert report_explicit == report_implicit
 
 
 def test_a_joint_facet_is_flat():

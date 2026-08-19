@@ -21,7 +21,7 @@ Stdlib only: the bundle path imports this.
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import cutting
 import domain as domain_module
@@ -349,8 +349,23 @@ def _ring(domain: Dict, f: float) -> List[List[float]]:
     return out
 
 
-def bonded_courses(domain: Dict, size: float) -> List[Dict]:
-    """Staggered courses, rim to crown, at the target piece size."""
+def bonded_courses(
+    domain: Dict, size: float, checkpoint: Optional[Callable[[], None]] = None
+) -> List[Dict]:
+    """Staggered courses, rim to crown, at the target piece size.
+
+    checkpoint (cut cancellation, 2026-08-19): an optional zero-argument
+    callable, invoked once per course at the top of the loop below that
+    actually builds each course's own pieces -- not the divisions pass
+    just above it, which only samples ANGLE_SAMPLES points per course
+    regardless of how many pieces that course holds. The build loop is
+    where the real, piece-count-scaling cost sits (one _arc call, with its
+    own boundary simplification, per piece), the same order of magnitude
+    as pieces.segment_pieces's own per-cell loop, so this is where a
+    single per-course checkpoint honestly covers the course's expensive
+    work. None (the default) means this behaves exactly as before this
+    parameter existed.
+    """
 
     courses = _course_count(domain, size)
 
@@ -374,6 +389,8 @@ def bonded_courses(domain: Dict, size: float) -> List[Dict]:
 
     cells: List[Dict] = []
     for course in range(courses):
+        if checkpoint is not None:
+            checkpoint()
         outer_f = 1.0 - course / courses
         inner_f = 1.0 - (course + 1) / courses
         count, _offset, angles = all_divisions[course]
@@ -402,12 +419,22 @@ def bonded_courses(domain: Dict, size: float) -> List[Dict]:
     return cells
 
 
-def monolithic_bands(domain: Dict, size: float) -> List[Dict]:
-    """One continuous cell per course. Sprayed concrete has no castings."""
+def monolithic_bands(
+    domain: Dict, size: float, checkpoint: Optional[Callable[[], None]] = None
+) -> List[Dict]:
+    """One continuous cell per course. Sprayed concrete has no castings.
+
+    checkpoint: see bonded_courses's own docstring -- the same optional
+    zero-argument callable, invoked once per course at the top of this
+    loop, the only one this builder has, where each course's own ring (or
+    pair of rings, for a course with a hole) is actually built.
+    """
 
     courses = _course_count(domain, size)
     cells: List[Dict] = []
     for course in range(courses):
+        if checkpoint is not None:
+            checkpoint()
         outer_f = 1.0 - course / courses
         inner_f = 1.0 - (course + 1) / courses
         cell = {
@@ -479,7 +506,29 @@ def _separate_opening_regions(report: Dict, hole_loops: List, points: List) -> N
     report["opening_regions"] = opening_regions
 
 
-def generate(pattern: str, domain: Dict, size: float) -> Dict:
+def generate(
+    pattern: str,
+    domain: Dict,
+    size: float,
+    checkpoint: Optional[Callable[[], None]] = None,
+) -> Dict:
+    """Build a cut of the named pattern over domain, at the target size.
+
+    checkpoint (cut cancellation, 2026-08-19): an optional zero-argument
+    callable threaded straight through to whichever builder GENERATORS
+    dispatches to (bonded_courses or monolithic_bands), which invokes it
+    once per course -- see either builder's own docstring for exactly
+    where and why. generate() never calls it directly itself: this
+    function's own work outside the builder call (openings.clip_cells,
+    tessellation.build_tessellation) is not per-course, and doesn't
+    reliably run at all (clip_cells only when the domain has holes), so
+    there is no honest per-course point to add a second call here. None
+    (the default) means generate() and both builders behave exactly as
+    they did before this parameter existed: never called. Raising out of
+    checkpoint propagates unmodified; generate() never mutates domain, so
+    an aborted call leaves the caller's own domain dict untouched.
+    """
+
     builder = GENERATORS.get(pattern)
     if builder is None:
         planned = PLANNED.get(pattern)
@@ -516,7 +565,7 @@ def generate(pattern: str, domain: Dict, size: float) -> Dict:
             "pattern or author the tessellation in Grasshopper."
         )
 
-    raw = builder(domain, size)
+    raw = builder(domain, size, checkpoint=checkpoint)
     opening_report = None
     if holes:
         raw, opening_report = openings.clip_cells(

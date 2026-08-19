@@ -62,7 +62,7 @@ stacks there.
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import cutting
 import tessellation
@@ -633,6 +633,7 @@ def segment_pieces(
     tess: Dict,
     surface: cutting.Surface,
     support_points: Sequence[Sequence[float]],
+    checkpoint: Optional[Callable[[], None]] = None,
 ) -> Tuple[List[Dict], Dict]:
     """One drawn piece per cell, in placement order, with its cut disclosed.
 
@@ -642,6 +643,20 @@ def segment_pieces(
     that shares that joint, not just one of them. That is the same rule
     the ring and wedge binning this replaces used, kept because four later
     tasks read this flag.
+
+    checkpoint (cut cancellation, 2026-08-19): an optional zero-argument
+    callable invoked once at the top of every iteration of the per-cell
+    loop below, before that cell's own triangulation and lifting begin --
+    the same cell this loop is about to spend its own time on, including
+    one that will go on to be dropped as degenerate. Called with no
+    arguments and expected to return nothing; if it raises, the exception
+    propagates out of segment_pieces unmodified, and nothing this function
+    has built so far (out, report, or the caller's own tess dict, which
+    this function only ever reads) is written anywhere the caller can see.
+    None (the default) means segment_pieces behaves exactly as it did
+    before this parameter existed: not called at all. This module stays
+    free of any opinion about WHY a caller would raise there -- bundle.py
+    is where that decision and its exception type live.
     """
 
     chosen = choose_rounds(tess, surface)
@@ -678,6 +693,8 @@ def segment_pieces(
     out: List[Dict] = []
 
     for cell in tess["cells"]:
+        if checkpoint is not None:
+            checkpoint()
         try:
             points, triangles, chains = _cap(tess, cell, rounds)
         except UntriangulatableCell:

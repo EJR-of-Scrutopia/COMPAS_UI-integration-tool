@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import sys
@@ -210,6 +211,70 @@ def test_a_bigger_target_size_makes_fewer_pieces():
     small = g.generate("bonded-courses", disc_domain(), 0.5)
     large = g.generate("bonded-courses", disc_domain(), 2.0)
     assert len(small["cells"]) > len(large["cells"])
+
+
+class _Cancelled(Exception):
+    """A stand-in for bundle.py's own CutSuperseded (cut cancellation,
+    2026-08-19): generators.py must never import or know that type
+    exists, so this test brings its own to prove the raise really is the
+    caller's business, unmodified."""
+
+
+def test_checkpoint_is_called_at_least_once_per_course_bonded_courses():
+    """disc_domain() at size 1.0 makes 5 courses (test_courses_come_from_
+    the_target_size above); a counting callable threaded through generate
+    must see at least one call per course."""
+
+    g = studio("generators")
+    calls = []
+    tess = g.generate(
+        "bonded-courses", disc_domain(), 1.0, checkpoint=lambda: calls.append(1)
+    )
+    assert tess["courses"] == 5
+    assert len(calls) >= tess["courses"]
+
+
+def test_checkpoint_is_called_at_least_once_per_course_monolithic_bands():
+    g = studio("generators")
+    calls = []
+    tess = g.generate(
+        "monolithic-bands", disc_domain(), 1.0, checkpoint=lambda: calls.append(1)
+    )
+    assert len(calls) >= tess["courses"]
+
+
+def test_a_raising_checkpoint_aborts_generate_without_mutating_the_domain():
+    """generate() only ever reads domain; the exception a checkpoint
+    raises on the second course must propagate unmodified, and the
+    caller's own domain dict must come back byte for byte the same as
+    before the call."""
+
+    g = studio("generators")
+    domain = disc_domain()
+    before = copy.deepcopy(domain)
+    calls = []
+
+    def checkpoint():
+        calls.append(1)
+        if len(calls) == 2:
+            raise _Cancelled("superseded")
+
+    with pytest.raises(_Cancelled):
+        g.generate("bonded-courses", domain, 1.0, checkpoint=checkpoint)
+    # Aborted on the second course: the loop never reached a third call.
+    assert len(calls) == 2
+    assert domain == before
+
+
+def test_checkpoint_none_is_byte_identical_to_no_checkpoint_at_all():
+    """checkpoint=None (the default) must produce the exact same cut as
+    never passing the parameter at all."""
+
+    g = studio("generators")
+    implicit = g.generate("bonded-courses", disc_domain(), 1.0)
+    explicit = g.generate("bonded-courses", disc_domain(), 1.0, checkpoint=None)
+    assert implicit["points"] == explicit["points"]
+    assert [c["key"] for c in implicit["cells"]] == [c["key"] for c in explicit["cells"]]
 
 
 def _measure_arc_length(domain, f, theta_a, theta_b, steps=4000):
