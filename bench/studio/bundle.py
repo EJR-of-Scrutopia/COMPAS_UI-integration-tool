@@ -23,6 +23,7 @@ import cutting
 import domain
 import generators
 import geometry
+import openings
 import pieces
 import subdivision
 import tessellation
@@ -262,10 +263,22 @@ def build_tessellation_for(export_name, contract, arrays, render, pattern, size)
     # (domain.boundary_ring demands exactly that), and a surface with no
     # boundary attached simply keeps the old nearest-face clamp as its
     # only fallback, which is no worse than every export had before K3.
+    #
+    # Multi-loop (2026-08-19): every closed boundary loop is attached, not
+    # just the outer rim -- openings.extract_loops walks the mesh's whole
+    # boundary (every connected component), so a surface with openings
+    # attaches the outer rim AND every opening's own rim. cutting.Surface's
+    # multi-polyline projection then picks whichever loop is actually
+    # nearest, so a drawn point pushed just off the mesh near an opening
+    # projects onto THAT opening's boundary instead of the outer one. The
+    # same try/except ValueError guard as before: a branch-vertex mesh
+    # (openings.extract_loops' own refusal, verbatim the same message
+    # domain.boundary_ring raised) still just skips attachment.
     try:
-        ring = domain.boundary_ring(arrays["faces"])
+        loops = openings.extract_loops(arrays["faces"])
         surface.boundary = [
-            [arrays["vertices"][i][0], arrays["vertices"][i][1]] for i in ring
+            [[arrays["vertices"][i][0], arrays["vertices"][i][1]] for i in loop]
+            for loop in loops
         ]
     except ValueError:
         pass
@@ -412,6 +425,19 @@ def build_bundle(
             "backward_steps": tess.get("backward_steps"),
             "report": binding["report"],
         }
+        # Multi-loop (2026-08-19): the openings block, same ride-along
+        # mechanism as backward_turn/backward_steps above, but absent
+        # rather than None when the cut has none -- these five only exist
+        # on tess at all when generators.generate actually ran the clip
+        # pass (see generate's own "only when openings were actually
+        # clipped" comment), so a plan with no openings must not gain five
+        # new null fields it never had before this task.
+        for key in (
+            "openings", "cells_in_openings", "cells_clipped",
+            "opening_slivers", "opening_clip_failures",
+        ):
+            if key in tess:
+                tessellation_summary[key] = tess[key]
         overlap = set(tessellation_summary) & set(report)
         if overlap:
             # A raise, not an assert: python -O strips an assert, and the

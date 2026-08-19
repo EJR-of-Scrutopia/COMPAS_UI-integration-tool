@@ -101,6 +101,57 @@ def bay_contract():
     }
 
 
+def holed_contract():
+    """A 9x9 grid of unit quads on a paraboloid, apex over the grid's own
+    centre, with the off-centre 2x2 block of faces (2, 2), (2, 3), (3, 2),
+    (3, 3) dropped -- one interior opening, well clear of the plan's own
+    axis. Same geometry as tests/studio/test_generators.py's own
+    holed_paraboloid_domain() fixture (see that docstring for the
+    measurement that the axis lands outside the hole), expressed as a
+    full equilibrium/formGraph contract, bay_contract's own construction
+    above, so it can drive the real bundle build end to end: multi-loop
+    cutting's whole point is that a plan like this now cuts natively
+    instead of refusing.
+    """
+    side, n = 9, 10
+    center = side / 2.0
+
+    def z(x, y):
+        return 2.0 - ((x - center) ** 2) / 20.0 - ((y - center) ** 2) / 20.0
+
+    verts = [
+        {"x": float(i), "y": float(j), "z": z(float(i), float(j))}
+        for j in range(n) for i in range(n)
+    ]
+    drop = {(2, 2), (2, 3), (3, 2), (3, 3)}
+    faces = []
+    fid = 0
+    for j in range(side):
+        for i in range(side):
+            if (i, j) in drop:
+                continue
+            faces.append({
+                "id": fid,
+                "vertices": [
+                    j * n + i, j * n + i + 1,
+                    (j + 1) * n + i + 1, (j + 1) * n + i,
+                ],
+            })
+            fid += 1
+    edges = []
+    for face in faces:
+        v = face["vertices"]
+        for k in range(4):
+            edges.append({"u": v[k], "v": v[(k + 1) % 4]})
+    return {
+        "equilibrium": {
+            "vertices": verts, "edges": edges, "loads": [],
+            "resolvedSupportNodeIds": [0],
+        },
+        "formGraph": {"faces": faces},
+    }
+
+
 def authored_tiny_contract():
     """tiny_contract with an authored tessellation embedded in the contract
     itself, so build_bundle routes through tessellation.from_document
@@ -192,6 +243,31 @@ def test_a_plan_the_engine_refuses_ships_a_200_with_uncut_reason(tmp_path, monke
     assert document["pattern"] == "bonded-courses", (
         "no cut pattern exists, so the document falls back to the requested one"
     )
+
+
+def test_a_holed_contract_cuts_natively_with_pieces(tmp_path, monkeypatch):
+    """Multi-loop cutting's own point, proven at the app level: a plan
+    with one star-shaped outer rim and an interior opening -- refused
+    outright before this wave -- now cuts natively, drawn pieces and all,
+    and the openings block rides the tessellation summary out to the
+    client.
+    """
+    client, _ = make_client(tmp_path, monkeypatch)
+    upload = tmp_path / "upload"
+    (upload / "Holed-contract.json").write_text(
+        json.dumps(holed_contract()), encoding="utf-8"
+    )
+    (upload / "Holed-compas.json").write_text("{}", encoding="utf-8")
+    response = client.get(
+        "/api/studies/Holed/bundle",
+        params={"material": "concrete", "pattern": "bonded-courses", "size": 1.0},
+    )
+    assert response.status_code == 200
+    document = response.json()
+    assert document["uncut_reason"] is None
+    assert document["pieces"], "a native holed cut must ship drawn pieces"
+    assert document["tessellation"] is not None
+    assert document["tessellation"]["openings"] == 1
 
 
 def test_an_authored_bundles_size_round_trips_through_the_api(tmp_path, monkeypatch):

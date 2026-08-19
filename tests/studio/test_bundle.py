@@ -154,6 +154,53 @@ def bay_contract():
     }
 
 
+def holed_contract():
+    """A 9x9 grid of unit quads on a paraboloid, apex over the grid's own
+    centre, with the off-centre 2x2 block of faces (2, 2), (2, 3), (3, 2),
+    (3, 3) dropped -- one interior opening, well clear of the plan's own
+    axis. The same geometry test_app.py's own holed_contract() drives
+    through the API (see that docstring), here exercising build_bundle
+    directly.
+    """
+    side, n = 9, 10
+    center = side / 2.0
+
+    def z(x, y):
+        return 2.0 - ((x - center) ** 2) / 20.0 - ((y - center) ** 2) / 20.0
+
+    verts = [
+        {"x": float(i), "y": float(j), "z": z(float(i), float(j))}
+        for j in range(n) for i in range(n)
+    ]
+    drop = {(2, 2), (2, 3), (3, 2), (3, 3)}
+    faces = []
+    fid = 0
+    for j in range(side):
+        for i in range(side):
+            if (i, j) in drop:
+                continue
+            faces.append({
+                "id": fid,
+                "vertices": [
+                    j * n + i, j * n + i + 1,
+                    (j + 1) * n + i + 1, (j + 1) * n + i,
+                ],
+            })
+            fid += 1
+    edges = []
+    for face in faces:
+        v = face["vertices"]
+        for k in range(4):
+            edges.append({"u": v[k], "v": v[(k + 1) % 4]})
+    return {
+        "equilibrium": {
+            "vertices": verts, "edges": edges, "loads": [],
+            "resolvedSupportNodeIds": [0],
+        },
+        "formGraph": {"faces": faces},
+    }
+
+
 def test_a_cut_refusal_ships_uncut_not_written_to_disk(tmp_path, monkeypatch):
     """P5 (presentation batch, 2026-08-18): build_bundle's own half of the
     contract get_bundle relies on (test_app.py pins the HTTP shape). The
@@ -357,6 +404,44 @@ def test_the_bundle_ships_the_tessellation_and_its_report(tmp_path, monkeypatch)
     assert document["tessellation"]["clamped_points"] == 0
     assert document["tessellation"]["projected_points"] > 0
     assert document["tessellation"]["projected_max_m"] < 1e-9
+
+
+def test_the_openings_block_rides_the_summary(tmp_path, monkeypatch):
+    """Multi-loop (2026-08-19): the five openings fields ride the
+    tessellation summary the same way backward_turn_degrees/backward_steps
+    do -- but ABSENT rather than None when the cut has no openings, since
+    unlike backward_turn (measured on every generated domain) these five
+    only exist on tess at all when generators.generate actually ran the
+    clip pass. Tiny (fake_export's own fixture, used unmodified in
+    test_the_bundle_ships_the_tessellation_and_its_report above) has no
+    opening at all, so it is the no-openings half of this same assertion.
+    """
+    bundle, upload, _ = fake_export(tmp_path, monkeypatch)
+    keys = (
+        "openings", "cells_in_openings", "cells_clipped",
+        "opening_slivers", "opening_clip_failures",
+    )
+
+    no_openings = bundle.build_bundle("Tiny", "concrete", "bonded-courses", 0.9)
+    for key in keys:
+        assert key not in no_openings["tessellation"], (
+            "a cut with no openings must not gain {!r}".format(key)
+        )
+
+    (upload / "Holed-contract.json").write_text(
+        json.dumps(holed_contract()), encoding="utf-8"
+    )
+    (upload / "Holed-compas.json").write_text("{}", encoding="utf-8")
+    holed = bundle.build_bundle("Holed", "concrete", "bonded-courses", 1.0)
+    assert holed["uncut_reason"] is None
+    for key in keys:
+        assert key in holed["tessellation"], key
+    assert holed["tessellation"]["openings"] == 1
+    assert holed["tessellation"]["cells_clipped"] != []
+    # opening_regions rides along too, but nested inside the tessellation
+    # report -- the same generic "report" pass-through the five direct
+    # keys above ride alongside, not a sixth top level field of its own.
+    assert len(holed["tessellation"]["report"]["opening_regions"]) == 1
 
 
 def test_the_cache_key_carries_size_and_pattern(tmp_path):

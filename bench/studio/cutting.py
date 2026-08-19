@@ -303,6 +303,26 @@ def subdivide(points, triangles, chains, rounds: int):
     return points, triangles, chains
 
 
+def _as_boundary_loops(boundary) -> List[Sequence[Sequence[float]]]:
+    """self.boundary, normalized to a list of one or more closed polylines.
+
+    self.boundary keeps its original single-loop shape untouched: a flat
+    list of [x, y] points (every caller before this task, and every test
+    in this file and test_pieces.py, sets it that way). Multi-loop
+    (2026-08-19): a caller attaching more than one rim (bundle.py's outer
+    rim plus every opening's own rim) sets a LIST of such polylines
+    instead. The two shapes are told apart by their first element: a
+    coordinate (a plain number) means a single flat polyline, the
+    one-element case; a nested sequence means a list of polylines already.
+    """
+
+    if not boundary:
+        return []
+    if isinstance(boundary[0][0], (int, float)):
+        return [boundary]
+    return list(boundary)
+
+
 class Surface:
     """The render mesh as a height field with barycentric field weights.
 
@@ -324,6 +344,18 @@ class Surface:
         # Surface built directly, the way this module's own tests and
         # pieces.py's fixtures do, keeps the old nearest-face clamp as its
         # only fallback, unchanged.
+        #
+        # Multi-loop (2026-08-19): a single-loop surface still attaches one
+        # flat polyline here, a plain list of [x, y] points, exactly as
+        # before -- every existing caller and test keeps setting it that
+        # way. A surface with openings attaches a LIST of such polylines
+        # instead (the outer rim plus every opening's own rim), so an
+        # off-mesh probe near an opening projects onto that opening's true
+        # boundary rather than the outer one. _as_boundary_loops (below)
+        # tells the two shapes apart wherever self.boundary is read, so the
+        # single-polyline form is simply the one-element case of the
+        # multi-loop one; the attribute's name and its single-loop
+        # semantics are unchanged.
         self.boundary: Optional[Sequence[Sequence[float]]] = None
         spread = max(
             max(v[0] for v in vertices) - min(v[0] for v in vertices),
@@ -446,29 +478,38 @@ class Surface:
     def _nearest_boundary_point(self, x: float, y: float) -> Tuple[float, float]:
         """The point of self.boundary nearest (x, y), in plan.
 
-        self.boundary is a closed polygon (no point repeated at the end),
-        so the segment from the last point back to the first is included
-        by wrapping the index, the same convention domain.py's loop uses.
+        Each polyline self.boundary carries (see _as_boundary_loops) is a
+        closed polygon (no point repeated at the end), so the segment from
+        its last point back to its first is included by wrapping the
+        index, the same convention domain.py's loop uses.
+
+        Multi-loop (2026-08-19): with more than one polyline attached (an
+        outer rim plus every opening's own rim), the nearest point is
+        measured against every one of them and the global nearest wins, so
+        a probe pushed off the mesh near an opening projects onto THAT
+        opening's own boundary instead of the outer rim, which is exactly
+        what made the old single-polyline projection wrong here (see
+        test_an_off_mesh_point_projects_onto_the_nearest_opening_rim).
         """
 
-        boundary = self.boundary
         best_distance = None
-        best_point = (boundary[0][0], boundary[0][1])
-        n = len(boundary)
-        for i in range(n):
-            a = boundary[i]
-            b = boundary[(i + 1) % n]
-            ex, ey = b[0] - a[0], b[1] - a[1]
-            length2 = ex * ex + ey * ey
-            if length2 < 1e-24:
-                near = (a[0], a[1])
-            else:
-                along = min(1.0, max(0.0, ((x - a[0]) * ex + (y - a[1]) * ey) / length2))
-                near = (a[0] + along * ex, a[1] + along * ey)
-            distance = (x - near[0]) ** 2 + (y - near[1]) ** 2
-            if best_distance is None or distance < best_distance:
-                best_distance = distance
-                best_point = near
+        best_point = None
+        for boundary in _as_boundary_loops(self.boundary):
+            n = len(boundary)
+            for i in range(n):
+                a = boundary[i]
+                b = boundary[(i + 1) % n]
+                ex, ey = b[0] - a[0], b[1] - a[1]
+                length2 = ex * ex + ey * ey
+                if length2 < 1e-24:
+                    near = (a[0], a[1])
+                else:
+                    along = min(1.0, max(0.0, ((x - a[0]) * ex + (y - a[1]) * ey) / length2))
+                    near = (a[0] + along * ex, a[1] + along * ey)
+                distance = (x - near[0]) ** 2 + (y - near[1]) ** 2
+                if best_distance is None or distance < best_distance:
+                    best_distance = distance
+                    best_point = near
         return best_point
 
     def _reach(self, x: float, y: float, face) -> float:

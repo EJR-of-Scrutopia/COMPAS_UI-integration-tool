@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -299,6 +300,75 @@ def test_lift_leaves_x_y_at_the_original_request_for_the_last_resort_clamp():
     found = surface.lift(1.5, 0.5)
     assert found["clamped"] is True
     assert (found["x"], found["y"]) == (1.5, 0.5)
+
+
+def test_an_off_mesh_point_projects_onto_the_nearest_opening_rim():
+    """Multi-loop (2026-08-19): cutting.Surface.boundary grows a
+    multi-polyline attachment -- the outer rim plus every opening's own
+    rim -- and lift's off-mesh projection must pick the nearest point
+    across ALL of them, not just the first (or only) one.
+
+    A square frame mesh: the outer rim runs 0..10, a square hole (the
+    "opening") sits at 4..6 in the middle, four trapezoidal faces tile the
+    annulus between them, and the inner square is genuinely uncovered by
+    any face. Both the outer and the inner (opening) rim are attached. A
+    probe just inside the hole -- off the render mesh entirely, since the
+    frame's own faces stop at x = 6 -- sits 0.1 m from the inner rim and
+    4.1 m from the nearest outer edge: if the projection ran against the
+    outer rim alone (the old single-polyline behaviour, unable to see a
+    second attached loop at all), or picked the first attached polyline
+    regardless of distance, it would land nowhere near this point.
+    """
+
+    c = studio()
+    vertices = [
+        [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], [0.0, 10.0, 0.0],
+        [4.0, 4.0, 0.0], [6.0, 4.0, 0.0], [6.0, 6.0, 0.0], [4.0, 6.0, 0.0],
+    ]
+    faces = [
+        [0, 1, 5, 4],   # bottom
+        [1, 2, 6, 5],   # right
+        [2, 3, 7, 6],   # top
+        [3, 0, 4, 7],   # left
+    ]
+    surface = c.Surface(vertices, faces)
+    outer = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]
+    inner = [[4.0, 4.0], [6.0, 4.0], [6.0, 6.0], [4.0, 6.0]]
+    surface.boundary = [outer, inner]
+
+    def distance_to_polyline(x, y, polyline):
+        best = None
+        n = len(polyline)
+        for i in range(n):
+            a, b = polyline[i], polyline[(i + 1) % n]
+            ex, ey = b[0] - a[0], b[1] - a[1]
+            length2 = ex * ex + ey * ey
+            along = 0.0 if length2 < 1e-24 else min(
+                1.0, max(0.0, ((x - a[0]) * ex + (y - a[1]) * ey) / length2)
+            )
+            near = (a[0] + along * ex, a[1] + along * ey)
+            d = math.hypot(x - near[0], y - near[1])
+            if best is None or d < best:
+                best = d
+        return best
+
+    # Just inside the hole, off the render mesh entirely (the right face
+    # stops at x = 6): 0.1 m from the inner (opening) rim's own edge.
+    probe_x, probe_y = 5.9, 5.0
+    found = surface.lift(probe_x, probe_y)
+
+    assert found["projected"] is True
+    assert found["projected_m"] == pytest.approx(0.1, abs=1e-9)
+    assert (found["x"], found["y"]) == pytest.approx((6.0, 5.0))
+
+    to_inner = distance_to_polyline(found["x"], found["y"], inner)
+    to_outer = distance_to_polyline(found["x"], found["y"], outer)
+    assert to_inner == pytest.approx(0.0, abs=1e-9)
+    assert to_inner < to_outer, (
+        "the projected point must land on the inner (opening) rim, not "
+        "the outer one: {} m from the inner rim, {} m from the outer"
+        .format(to_inner, to_outer)
+    )
 
 
 def test_ear_clip_takes_the_largest_ear_and_avoids_slivers():
