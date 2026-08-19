@@ -2974,7 +2974,9 @@ async function importExportPair() {
       (entry) => entry.kind === "tessellation");
     const importedLine = (result.pair_complete
       ? "imported " + prefix
-      : "stored " + prefix + "; pair incomplete")
+      : result.derivation_error
+        ? "stored " + prefix + "; " + result.derivation_error
+        : "stored " + prefix + "; pair incomplete")
       + (hadTessellation ? " with an authored cut" : "");
     status.textContent = importedLine;
     logStudio(importedLine);
@@ -2983,11 +2985,20 @@ async function importExportPair() {
         prefix + ": authored tessellation stored, the study cuts from "
         + "your cells.", "info");
     }
-    // A one-line note the moment a compas-only upload lands: item 3's
-    // "analysis layers are unavailable for it", visible even before the
-    // study finishes loading (renderDataPanel carries the same note for
-    // as long as the study stays loaded -- see its own P4 section).
-    if (result.derived_contract) {
+    // Fix 11 (fix-batch, 2026-08-19): derive_contract's own failure is
+    // soft server-side (app.py stores the upload anyway and threads the
+    // message back as derivation_error, never a 400) -- pre-fix, the
+    // client dropped it on the floor and a malformed thrustMesh read as
+    // the exact same "pair incomplete" text a genuinely-missing second
+    // file produces. The server's own message reaches the banner
+    // verbatim, no rewriting.
+    if (result.derivation_error) {
+      showBanner(prefix + ": " + result.derivation_error, "error");
+    } else if (result.derived_contract) {
+      // A one-line note the moment a compas-only upload lands: item 3's
+      // "analysis layers are unavailable for it", visible even before the
+      // study finishes loading (renderDataPanel carries the same note for
+      // as long as the study stays loaded -- see its own P4 section).
       showBanner(
         prefix + ": geometry only (no *-contract.json uploaded), analysis "
         + "layers are unavailable for this export.", "info");

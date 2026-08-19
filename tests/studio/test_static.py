@@ -233,6 +233,31 @@ def test_import_failures_all_reach_the_banner():
     assert "layers are unavailable for this export" in import_body
 
 
+def test_derivation_error_reaches_the_banner_verbatim():
+    # Task 3 (fix-batch, 2026-08-19). Fix 11: app.py's upload route already
+    # computes derivation_error (derive_contract's own failure is soft --
+    # the upload is stored anyway, see app.py's own comment on
+    # candidate_error) and threads it into the response, but
+    # importExportPair never read the field: a malformed thrustMesh read as
+    # the exact same "pair incomplete" text a genuinely-missing second file
+    # produces, with no way to tell the two apart.
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    import_body = _function_body(js, "importExportPair")
+    assert "result.derivation_error" in import_body
+    # The generic message must still be reachable for the genuinely
+    # no-error case -- fix 11 adds a branch, it does not replace it.
+    assert '"stored " + prefix + "; pair incomplete"' in import_body
+    banner_at = import_body.index("if (result.derivation_error)")
+    banner_body = import_body[
+        banner_at:import_body.index("else if (result.derived_contract)", banner_at)]
+    # Verbatim: the server's own text reaches showBanner untouched, no
+    # rewriting/truncating/re-summarizing.
+    assert (
+        'showBanner(prefix + ": " + result.derivation_error, "error")'
+        in banner_body
+    )
+
+
 def test_geometry_only_studies_disclose_it_in_the_data_panel():
     # P4 item 2: "the Data panel says no analysis is present in this
     # export". bundle.py threads the derived contract's own
@@ -3451,6 +3476,9 @@ def test_select_changes_settle_on_their_own_shorter_timer():
     js = (STATIC / "studio.js").read_text(encoding="utf-8")
     assert "RELOAD_SETTLE_MS = 1500" in js
     assert "SELECT_SETTLE_MS = 300" in js
+    # Fix 12 (fix-batch, 2026-08-19): the block comment above the constant
+    # explaining WHY the selects get their own shorter timer was unpinned.
+    assert "deliberately a fifth of RELOAD_SETTLE_MS" in js
     schedule_body = _function_body(js, "scheduleSelectReload")
     assert "clearTimeout" in schedule_body and "setTimeout" in schedule_body
     assert "SELECT_SETTLE_MS" in schedule_body
