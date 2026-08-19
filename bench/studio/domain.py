@@ -231,17 +231,20 @@ CROSSING_RULE = "first-exit-2026-08-19"
 # this identifier whenever radius_at's own answer changes for some input
 # it already accepts (a new tie-break, a different epsilon, a different
 # parity rule -- anything that changes WHICH crossing counts as the rim,
-# not just how it is computed). Exists because bundle.REQUIRED_BUNDLE_KEYS
-# is presence-only: it can tell a cached bundle apart from one missing a
-# field, but not a bundle built under a DIFFERENT crossing rule whose
-# fields are all already present under the newer rule too -- the
-# 2026-08-19 rim wave's own final review finding, closed by cut
-# cancellation's task 2. bundle.py stamps this value into every fresh
-# bundle's tessellation summary as crossing_rule, and
-# REQUIRED_BUNDLE_KEYS gains tessellation.crossing_rule, so a bundle cut
-# under an earlier rule (this field absent, or carrying an older value)
-# fails the freshness gate and is rebuilt rather than served forever
-# under geometry a fresh cut would no longer produce.
+# not just how it is computed). Exists because presence alone cannot see
+# a pure geometry-rule change -- the 2026-08-19 rim wave's own final
+# review finding, closed by cut cancellation's task 2. bundle.py stamps
+# this value into every fresh bundle's tessellation summary as
+# crossing_rule; bundle.REQUIRED_BUNDLE_KEYS gains tessellation.
+# crossing_rule (a bundle cut before this task, with no such field at
+# all, is stale), and bundle.REQUIRED_BUNDLE_VALUES pins the field's
+# VALUE against this constant (fix round 1, review finding I4,
+# 2026-08-19: presence alone let a bundle cut under an EARLIER value of
+# this same field pass unchanged, so bumping this constant a second time
+# would otherwise invalidate nothing at all). Bump this constant, and a
+# bundle carrying the old value -- not merely a bundle missing the field
+# outright -- fails the freshness gate and is rebuilt rather than served
+# forever under geometry a fresh cut would no longer produce.
 
 
 def radius_at(domain: Dict, theta: float) -> float:

@@ -17,7 +17,7 @@ import os
 import tempfile
 import threading
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import cutting
 import domain
@@ -104,12 +104,36 @@ REQUIRED_BUNDLE_KEYS = (
     # under the outermost crossing rule the rim-remainder wave replaced
     # passed every gate above unchanged while still carrying that rule's
     # geometry. tessellation.crossing_rule makes the rule itself part of
-    # the freshness check: a bundle whose stamp does not match the rule
-    # this code currently implements (missing entirely, on anything cut
-    # before this task) is stale in the same way one missing any field
-    # above already is.
+    # the freshness check for the ONE transition this entry was written
+    # for (missing entirely, on anything cut before this task); its VALUE
+    # is checked against domain.CROSSING_RULE separately, by
+    # REQUIRED_BUNDLE_VALUES below, so a FUTURE bump of the constant also
+    # invalidates a cache carrying an earlier value (review finding I4,
+    # fix round 1, 2026-08-19: presence alone cannot tell an earlier value
+    # apart from the current one).
     "tessellation.crossing_rule",
 )
+
+# A field can be present and still say the wrong thing: REQUIRED_BUNDLE_
+# KEYS above only proves a key EXISTS, so a bundle cut under an EARLIER
+# value of a field that value-carrying entries above claim to guard would
+# still pass every one of those entries once that value first ships. Fix
+# round 1 (review finding I4, 2026-08-19): domain.CROSSING_RULE's own
+# comment instructs a future maintainer to bump the constant whenever
+# radius_at's answer changes, and the presence-only gate alone cannot
+# make good on that a second time, since a bundle cut under ANY earlier
+# rule already has the crossing_rule field, just carrying an earlier
+# value. REQUIRED_BUNDLE_VALUES closes the gap: each dotted path here
+# (read with the same dotted-path convention REQUIRED_BUNDLE_KEYS uses)
+# must EQUAL the paired expected value -- read fresh from the same module
+# attribute the field's own comment already names -- not merely exist,
+# for a cached bundle to be considered fresh (see load_or_build_bundle's
+# own gate below, which checks this only for paths REQUIRED_BUNDLE_KEYS
+# has already confirmed present, so _key_path_value below never has to
+# handle a missing path).
+REQUIRED_BUNDLE_VALUES = {
+    "tessellation.crossing_rule": domain.CROSSING_RULE,
+}
 
 
 def _has_key_path(document: Dict, path: str) -> bool:
@@ -119,6 +143,19 @@ def _has_key_path(document: Dict, path: str) -> bool:
             return False
         node = node[part]
     return True
+
+
+def _key_path_value(document: Dict, path: str):
+    """The value at a dotted path REQUIRED_BUNDLE_KEYS has already
+    confirmed present (see REQUIRED_BUNDLE_VALUES' own comment); used
+    only by load_or_build_bundle's freshness gate, after that check has
+    already run, so this never has to handle a missing path itself.
+    """
+
+    node = document
+    for part in path.split("."):
+        node = node[part]
+    return node
 
 
 def bundle_path(slug: str, material: str, pattern: str, size: float, thickness: float) -> Path:
@@ -248,24 +285,39 @@ def clear_cut_memo() -> None:
 
 class _CutHolder:
     """One in-flight cut build for a single key (cut cancellation,
-    2026-08-19): a threading.Event plus a result slot and an error slot.
-    The builder thread -- the first caller to find its key absent from
-    both _cut_memo and _cut_inflight -- fills exactly one of the two slots
-    and then sets event; every other caller for the SAME key in the
-    meantime (a joiner) waits on event and reads whichever slot the
-    builder filled, instead of each running its own, fully redundant
-    compute of the same expensive cut (see _cut_for). The slots are
-    written exactly once, strictly before event is set, so a joiner
+    2026-08-19): a threading.Event plus a result slot, an error slot, and
+    (fix round 1, review finding C2) the memo generation this build
+    started under. The builder thread -- the first caller to find its key
+    absent from both _cut_memo and _cut_inflight -- fills exactly one of
+    the two slots and then sets event; every other caller for the SAME
+    key in the meantime (a joiner) waits on event and reads whichever
+    slot the builder filled, instead of each running its own, fully
+    redundant compute of the same expensive cut (see _cut_for). The slots
+    are written exactly once, strictly before event is set, so a joiner
     reading them after event.wait() returns needs no lock of its own:
     Event's own internal lock is the happens-before edge.
+
+    generation (fix round 1, review finding C2): the SAME value _cut_for
+    already reads into its own local "generation" variable, captured in
+    the identical critical section that creates this holder. A joiner
+    reads it back once its own wait ends and compares it against the
+    CURRENT _cut_memo_generation at that moment: if a clear_cut_memo ran
+    at any point during the wait, the joiner's own caller loaded its
+    contract/arrays/render AFTER that clear (see _cut_for's own join
+    branch), so a result computed before it is a cut for geometry that no
+    longer matches what this caller is about to assemble into a document.
+    This mirrors the memo's own generation rule (bundle.py's module
+    comment on _cut_memo, "a stale cut cannot outlive its export") for
+    joiners too, not just for the memo write.
     """
 
-    __slots__ = ("event", "result", "error")
+    __slots__ = ("event", "result", "error", "generation")
 
-    def __init__(self) -> None:
+    def __init__(self, generation: int) -> None:
         self.event = threading.Event()
         self.result = None
         self.error: Optional[BaseException] = None
+        self.generation = generation
 
 
 # Builds currently under way, one holder per cut key, so a second request
@@ -308,6 +360,22 @@ class CutSuperseded(Exception):
     bundle JSON write at the tail of build_bundle, both sit strictly after
     every checkpoint call in the cut they depend on), so a superseded
     build writes NOTHING: no memo entry, no file on disk.
+
+    Fix round 1 (review finding C1, 2026-08-19): a caller that JOINS a
+    build which ends this way does not necessarily inherit it. An
+    interactive joiner (its own interactive_token) genuinely is
+    superseded too whenever the build it joined is (see superseded's own
+    docstring: the joiner shares the builder's key, and the same newer,
+    different-key registration that supersedes the builder also
+    supersedes any live registration sharing its key), so it re-raises
+    this exception, unchanged from before this fix. A token-less joiner
+    (staging, or any other caller with no interactive_token at all)
+    cannot be legitimately cancelled by interactive supersession at
+    all -- that is the whole isolation promise this module makes -- so
+    _cut_for catches this specific case on the join path and retries
+    instead of raising: the token-less caller becomes the new builder (or
+    joins a fresh one, if another retrying caller got there first) and
+    completes with a real result.
     """
 
 
@@ -507,11 +575,29 @@ def _cut_for(export_name, contract, arrays, render, pattern, size, interactive_t
     Single-flight: a second call for a key already building here (its own
     interactive_token irrelevant to this part -- joining is keyed on the
     cut key alone) waits on the first build's own _CutHolder rather than
-    running its own, fully redundant compute, and shares its result or
-    re-raises its error. A joined result respects the same generation
-    rule the memo write below already enforces: it is whatever the
-    builder actually produced, whether or not a concurrent clear_cut_memo
-    kept it from being memoised.
+    running its own, fully redundant compute, and shares its result --
+    subject to the two checks below, both of which retry (loop back to
+    the top, exactly as if this call were arriving fresh) rather than
+    trusting a joined outcome that is no longer this caller's own to
+    trust. Several callers retrying at once still coalesce into one fresh
+    build, the same join this function already gives any other cold key.
+
+    Fix round 1 (review findings C1 and C2, 2026-08-19): a joiner retries
+    instead of adopting the holder's own outcome in exactly two cases --
+    (1) the holder's generation (the memo generation its OWN build
+    started under, see _CutHolder's own docstring) no longer matches the
+    CURRENT one: a clear_cut_memo ran during the wait, so the joiner's
+    own caller already loaded a possibly different export than the one
+    this holder was cut from, and adopting its result (success OR error
+    alike) would answer for the wrong geometry; (2) the holder's error is
+    CutSuperseded and THIS caller has no interactive_token of its own: a
+    token-less caller cannot be legitimately cancelled by interactive
+    supersession (see CutSuperseded's own docstring), so a cancellation
+    that belonged to whichever interactive request was building is not
+    this caller's to inherit. An interactive joiner's own CutSuperseded
+    is not retried: it is, at that same moment, genuinely superseded too
+    (see superseded's own docstring), so it re-raises exactly as before
+    this fix.
     """
 
     key = (export_name, pattern, size)
@@ -524,65 +610,101 @@ def _cut_for(export_name, contract, arrays, render, pattern, size, interactive_t
                     "before it finished".format(export_name)
                 )
 
-    with _cut_memo_lock:
-        generation = _cut_memo_generation
-        if key in _cut_memo:
-            _cut_memo.move_to_end(key)
-            return _cut_memo[key]
-        holder = _cut_inflight.get(key)
-        if holder is not None:
-            joining = True
-        else:
-            holder = _CutHolder()
-            _cut_inflight[key] = holder
-            joining = False
-
-    if joining:
-        # A build for this exact key is already running, under another
-        # caller's own interactive_token (or none at all -- the joiner's
-        # own token plays no part in whether ITS wait is honoured, only
-        # in whether the BUILDER it is waiting on later gets superseded).
-        # Waited on outside the lock: the wait can be the whole several-
-        # second cost of a real cut, and nothing else keyed on
-        # _cut_memo_lock may sit blocked behind it.
-        holder.event.wait()
-        if holder.error is not None:
-            raise holder.error
-        return holder.result
-
-    try:
-        tess, surface, binding = build_tessellation_for(
-            export_name, contract, arrays, render, pattern, size,
-            checkpoint=checkpoint)
-        supports = geometry.support_ids(contract)
-        support_points = [
-            [arrays["vertices"][i][0], arrays["vertices"][i][1]] for i in supports
-        ]
-        made, report = pieces.segment_pieces(
-            tess, surface, support_points, checkpoint=checkpoint)
-        result = (tess, binding, supports, made, report)
-    except Exception as error:
+    while True:
         with _cut_memo_lock:
-            del _cut_inflight[key]
+            generation = _cut_memo_generation
+            if key in _cut_memo:
+                _cut_memo.move_to_end(key)
+                return _cut_memo[key]
+            holder = _cut_inflight.get(key)
+            if holder is not None:
+                joining = True
+            else:
+                holder = _CutHolder(generation)
+                _cut_inflight[key] = holder
+                joining = False
+
+        if joining:
+            # A build for this exact key is already running, under
+            # another caller's own interactive_token (or none at all --
+            # the joiner's own token plays no part in whether ITS wait is
+            # honoured, only in whether the BUILDER it is waiting on
+            # later gets superseded). Waited on outside the lock: the
+            # wait can be the whole several-second cost of a real cut,
+            # and nothing else keyed on _cut_memo_lock may sit blocked
+            # behind it.
+            holder.event.wait()
+            with _cut_memo_lock:
+                stale = holder.generation != _cut_memo_generation
+            if stale:
+                # Fix round 1, C2: a clear_cut_memo happened somewhere
+                # across this holder's own lifetime, before or during
+                # this wait. Whatever it produced (success or error
+                # alike) was cut under geometry this caller's own
+                # contract/arrays/render may no longer match -- see
+                # _CutHolder's own docstring. Retry from the top: by now
+                # the holder is guaranteed removed from _cut_inflight
+                # (the builder's finally block below always removes it
+                # before setting the event), so this becomes a fresh
+                # build, or joins one just started by another retrying
+                # caller.
+                continue
+            if holder.error is not None:
+                if interactive_token is None and isinstance(holder.error, CutSuperseded):
+                    # Fix round 1, C1: this caller carries no interactive
+                    # token, so it cannot be legitimately cancelled by
+                    # interactive supersession at all (see CutSuperseded's
+                    # own docstring). The build it joined was cancelled on
+                    # behalf of whichever interactive request registered
+                    # it, not on this caller's behalf. Retry: same
+                    # coalescing as the generation case above.
+                    continue
+                raise holder.error
+            return holder.result
+
+        try:
+            tess, surface, binding = build_tessellation_for(
+                export_name, contract, arrays, render, pattern, size,
+                checkpoint=checkpoint)
+            supports = geometry.support_ids(contract)
+            support_points = [
+                [arrays["vertices"][i][0], arrays["vertices"][i][1]] for i in supports
+            ]
+            made, report = pieces.segment_pieces(
+                tess, surface, support_points, checkpoint=checkpoint)
+            result = (tess, binding, supports, made, report)
+        except BaseException as error:
+            # Fix round 1, I3: BaseException, not Exception -- the holder
+            # promises its error slot is Optional[BaseException], and a
+            # joiner's wait below has no timeout, so any exception this
+            # catch clause missed (KeyboardInterrupt, SystemExit, any
+            # other non-Exception) would leave the holder in
+            # _cut_inflight forever, hanging every later caller for this
+            # key. The finally block below still runs the SAME cleanup
+            # (remove from _cut_inflight, set the event) regardless of
+            # which branch of this try ran, so this except exists only to
+            # capture the error object itself before the bare raise
+            # propagates it out through the finally.
             holder.error = error
-            holder.event.set()
-        raise
-    else:
-        with _cut_memo_lock:
-            del _cut_inflight[key]
-            # A clear that ran while this cut was being built means the
-            # export may have changed under it: the result is still
-            # returned to its own caller and to every joiner waiting on
-            # this same holder (built from the inputs this caller loaded)
-            # but never memoised, so a stale cut cannot outlive its
-            # export.
-            if generation == _cut_memo_generation:
-                _cut_memo[key] = result
-                while len(_cut_memo) > CUT_MEMO_LIMIT:
-                    _cut_memo.popitem(last=False)
+            raise
+        else:
             holder.result = result
-            holder.event.set()
-        return result
+        finally:
+            with _cut_memo_lock:
+                del _cut_inflight[key]
+                # A clear that ran while this cut was being built means
+                # the export may have changed under it: the result is
+                # still returned to its own caller (built from the
+                # inputs that caller loaded) but never memoised, so a
+                # stale cut cannot outlive its export. holder.error is
+                # None on the success path only, so this never memoises
+                # an error result.
+                if holder.error is None and generation == _cut_memo_generation:
+                    _cut_memo[key] = holder.result
+                    while len(_cut_memo) > CUT_MEMO_LIMIT:
+                        _cut_memo.popitem(last=False)
+                holder.event.set()
+        return holder.result
 
 
 def _render_mesh(vertices: List[list], faces: List[list]) -> Dict[str, list]:
@@ -876,6 +998,16 @@ def load_or_build_bundle(
     if (
         cached is not None
         and all(_has_key_path(cached, key) for key in REQUIRED_BUNDLE_KEYS)
+        # Fix round 1 (review finding I4): presence alone is not enough
+        # for a field whose VALUE, not merely its existence, can go
+        # stale -- see REQUIRED_BUNDLE_VALUES' own comment. Runs only
+        # after the presence check above has already confirmed every one
+        # of these paths exists (short-circuited by the "and" chain), so
+        # _key_path_value never has to handle a missing path.
+        and all(
+            _key_path_value(cached, path) == expected
+            for path, expected in REQUIRED_BUNDLE_VALUES.items()
+        )
         and _pieces_are_uniquely_keyed(cached)
     ):
         return cached

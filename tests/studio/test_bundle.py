@@ -1017,3 +1017,317 @@ def test_a_bundle_cached_under_an_earlier_crossing_rule_is_stale(tmp_path, monke
         "than re-cut"
     )
     assert loaded["tessellation"]["crossing_rule"] == "first-exit-2026-08-19"
+
+
+def test_a_bundle_cached_under_an_outdated_crossing_rule_value_is_stale(tmp_path, monkeypatch):
+    """Fix round 1, review finding I4 (Important): REQUIRED_BUNDLE_KEYS
+    alone is presence-only -- a cached bundle whose crossing_rule field
+    EXISTS but carries an OUTDATED VALUE (from a previous CROSSING_RULE
+    bump, not merely a bundle cut before the field existed at all, which
+    the test above already covers) would pass every entry in that tuple
+    unchanged, so a future bump of the constant would silently invalidate
+    nothing. REQUIRED_BUNDLE_VALUES closes that: load_or_build_bundle's
+    freshness gate compares the VALUE, not just presence.
+    """
+    bundle, _, _ = fake_export(tmp_path, monkeypatch)
+    fresh = bundle.build_bundle("Tiny", "concrete", "bonded-courses", 0.9)
+    cached_path = bundle.bundle_path("tiny", "concrete", "bonded-courses", 0.9, 0.2)
+    stale = json.loads(json.dumps(fresh))
+    stale["tessellation"]["crossing_rule"] = "outermost-legacy"
+    cached_path.write_text(json.dumps(stale), encoding="utf-8")
+    loaded = bundle.load_or_build_bundle("Tiny", "concrete", "bonded-courses", 0.9)
+    assert loaded["tessellation"]["crossing_rule"] == "first-exit-2026-08-19", (
+        "a bundle carrying an OUTDATED crossing_rule VALUE was served "
+        "rather than re-cut"
+    )
+
+
+def test_required_bundle_values_pins_the_crossing_rule():
+    """REQUIRED_BUNDLE_VALUES' one entry today, and what it must equal --
+    a direct pin so a future edit that lets the two drift apart (the
+    constant bumped in domain.py without updating the dict, or vice
+    versa) fails here rather than only showing up as a silent staleness
+    miss."""
+    bundle = studio()[1]
+    domain = _studio_module("domain")
+    assert bundle.REQUIRED_BUNDLE_VALUES == {
+        "tessellation.crossing_rule": domain.CROSSING_RULE
+    }
+
+
+def test_a_builder_raising_baseexception_does_not_leak_the_holder(tmp_path, monkeypatch):
+    """Fix round 1, review finding I3 (Important): the holder's error slot
+    is documented as Optional[BaseException], but the original except
+    clause caught only Exception, so a BaseException (KeyboardInterrupt,
+    SystemExit, or anything else outside the Exception hierarchy) escaped
+    the cleanup entirely and left the holder in _cut_inflight forever --
+    permanent, since a joiner's wait is deliberately untimed. _cut_for now
+    cleans up in a finally block that runs regardless of what was raised.
+
+    Single-threaded and deterministic: no Event handshake is needed here,
+    since the whole point is what happens AFTER the raise, in the same
+    thread that raised it.
+    """
+    bundle, upload, studies = fake_export(tmp_path, monkeypatch)
+    pieces = _studio_module("pieces")
+
+    real_segment_pieces = pieces.segment_pieces
+    calls = []
+
+    def fake_segment_pieces(tess, surface, support_points, checkpoint=None):
+        calls.append(1)
+        if len(calls) == 1:
+            raise KeyboardInterrupt("simulated interrupt mid-cut")
+        return real_segment_pieces(tess, surface, support_points, checkpoint=checkpoint)
+
+    monkeypatch.setattr(pieces, "segment_pieces", fake_segment_pieces)
+
+    key = ("Tiny", "bonded-courses", 0.9)
+    with pytest.raises(KeyboardInterrupt):
+        bundle.build_bundle("Tiny", "concrete", "bonded-courses", 0.9)
+
+    assert key not in bundle._cut_inflight, (
+        "the holder must not leak after a BaseException"
+    )
+
+    # A fresh request for the same key must compute normally, not hang
+    # forever waiting on a holder whose event was never set.
+    document = bundle.build_bundle("Tiny", "concrete", "bonded-courses", 0.9)
+    assert document["pieces"], "the next request for this key must compute normally"
+    assert len(calls) == 2
+
+
+def test_an_interactive_joiner_is_also_superseded_when_its_builder_is(tmp_path, monkeypatch):
+    """Fix round 1: pins the half of review finding C1 that must NOT
+    change. An INTERACTIVE joiner (its own token, the SAME key as the
+    build it joins) is not exempt the way a token-less joiner now is:
+    when the build it joined is superseded, the joiner is, at that same
+    moment, also genuinely superseded (see the review's own coherence
+    argument, interleaving path 5, and bundle.CutSuperseded's own
+    docstring), so it correctly re-raises CutSuperseded rather than
+    silently retrying. Both the builder's own caller and the joiner's own
+    caller must see the cancellation.
+    """
+    import threading
+
+    bundle, upload, studies = fake_export(tmp_path, monkeypatch)
+    pieces = _studio_module("pieces")
+
+    started = threading.Event()
+    release = threading.Event()
+    real_segment_pieces = pieces.segment_pieces
+
+    def fake_segment_pieces(tess, surface, support_points, checkpoint=None):
+        started.set()
+        assert release.wait(timeout=5), "release was never set"
+        if checkpoint is not None:
+            checkpoint()
+        return real_segment_pieces(tess, surface, support_points, checkpoint=checkpoint)
+
+    monkeypatch.setattr(pieces, "segment_pieces", fake_segment_pieces)
+
+    key = ("Tiny", "bonded-courses", 0.9)
+    outcomes = {}
+
+    def call_builder():
+        token = bundle.register_interactive("Tiny", key)
+        try:
+            outcomes["builder"] = bundle.build_bundle(
+                "Tiny", "concrete", "bonded-courses", 0.9, interactive_token=token)
+        except Exception as error:
+            outcomes["builder"] = error
+
+    t_builder = threading.Thread(target=call_builder)
+    t_builder.start()
+    assert started.wait(timeout=5), "the builder never started"
+
+    def call_interactive_joiner():
+        # The SAME key, a strictly newer token: joins, does not build.
+        token = bundle.register_interactive("Tiny", key)
+        try:
+            outcomes["joiner"] = bundle.build_bundle(
+                "Tiny", "concrete", "bonded-courses", 0.9, interactive_token=token)
+        except Exception as error:
+            outcomes["joiner"] = error
+
+    t_joiner = threading.Thread(target=call_interactive_joiner)
+    t_joiner.start()
+
+    # A newer, DIFFERENT key for the same export: supersedes both the
+    # builder and the joiner sharing its key.
+    bundle.register_interactive("Tiny", ("Tiny", "monolithic-bands", 1.2))
+    release.set()
+    t_builder.join(timeout=5)
+    t_joiner.join(timeout=5)
+    assert not t_builder.is_alive() and not t_joiner.is_alive()
+
+    assert isinstance(outcomes["builder"], bundle.CutSuperseded), outcomes["builder"]
+    assert isinstance(outcomes["joiner"], bundle.CutSuperseded), outcomes["joiner"]
+
+
+def test_a_token_less_joiner_recomputes_after_the_build_it_joined_is_superseded(
+    tmp_path, monkeypatch
+):
+    """Fix round 1, review finding C1 (Critical): a token-less caller (the
+    staging path's own shape -- see app.py's start_run() work(), which
+    never passes an interactive_token) that JOINS an in-flight
+    INTERACTIVE build must not inherit that build's CutSuperseded when the
+    interactive build is later cancelled. The spec's isolation clause
+    promises a token-less build can never be cancelled by interactive
+    supersession; before this fix, joining a build that later gets
+    cancelled was exactly the path that promise did not hold on (the
+    review's probe A reproduced it: "FAIL SPEC: a staging-shaped build
+    completes despite supersession"). The token-less joiner must instead
+    fall through and compute the cut itself once the joined build dies,
+    completing with a real result.
+    """
+    import threading
+
+    bundle, upload, studies = fake_export(tmp_path, monkeypatch)
+    pieces = _studio_module("pieces")
+
+    started = threading.Event()
+    release = threading.Event()
+    real_segment_pieces = pieces.segment_pieces
+    calls = []
+
+    def fake_segment_pieces(tess, surface, support_points, checkpoint=None):
+        calls.append(1)
+        mine = len(calls)
+        if mine == 1:
+            started.set()
+            assert release.wait(timeout=5), "release was never set"
+            if checkpoint is not None:
+                checkpoint()  # raises CutSuperseded once released
+        return real_segment_pieces(tess, surface, support_points, checkpoint=checkpoint)
+
+    monkeypatch.setattr(pieces, "segment_pieces", fake_segment_pieces)
+
+    key = ("Tiny", "bonded-courses", 0.9)
+    outcomes = {}
+
+    def call_interactive_builder():
+        token = bundle.register_interactive("Tiny", key)
+        try:
+            outcomes["builder"] = bundle.build_bundle(
+                "Tiny", "concrete", "bonded-courses", 0.9, interactive_token=token)
+        except Exception as error:
+            outcomes["builder"] = error
+
+    t_builder = threading.Thread(target=call_interactive_builder)
+    t_builder.start()
+    assert started.wait(timeout=5), "the interactive builder never started"
+
+    def call_staging_joiner():
+        # No interactive_token at all: the staging path's own shape.
+        outcomes["joiner"] = bundle.build_bundle(
+            "Tiny", "concrete", "bonded-courses", 0.9, interactive_token=None)
+
+    t_joiner = threading.Thread(target=call_staging_joiner)
+    t_joiner.start()
+
+    # A newer, DIFFERENT key for the same export: supersedes the
+    # interactive builder (and, before this fix, the joiner too).
+    bundle.register_interactive("Tiny", ("Tiny", "monolithic-bands", 1.2))
+    release.set()
+    t_builder.join(timeout=5)
+    t_joiner.join(timeout=5)
+    assert not t_builder.is_alive() and not t_joiner.is_alive()
+
+    assert isinstance(outcomes["builder"], bundle.CutSuperseded), (
+        "the interactive builder itself must still be superseded"
+    )
+    assert not isinstance(outcomes["joiner"], BaseException), (
+        "a token-less joiner must not inherit the builder's "
+        "CutSuperseded: {}".format(outcomes["joiner"])
+    )
+    assert outcomes["joiner"]["uncut_reason"] is None
+    assert outcomes["joiner"]["pieces"], (
+        "a token-less joiner must complete with a real result once the "
+        "build it joined is superseded"
+    )
+
+
+def test_a_joiner_recomputes_after_a_reupload_clears_the_memo_mid_build(
+    tmp_path, monkeypatch
+):
+    """Fix round 1, review finding C2 (Critical): a joiner must respect
+    the same generation-counter protection the memo already has (see the
+    module comment above _cut_memo, "a stale cut cannot outlive its
+    export"). Before this fix, a request that arrived after a re-upload
+    (which calls clear_cut_memo) could still JOIN a build that started
+    BEFORE the clear, and build_bundle would then write a document
+    combining that stale cut with the joiner's own, freshly loaded
+    (post-clear) geometry to the disk cache -- the review's own probe B
+    reproduced exactly this (analysis mesh at the new height, pieces cut
+    at the old one, both written to disk). The joiner must instead notice
+    the generation mismatch and recompute against the geometry its own
+    caller actually loaded.
+    """
+    import threading
+
+    bundle, upload, studies = fake_export(tmp_path, monkeypatch)
+    pieces = _studio_module("pieces")
+
+    started = threading.Event()
+    release = threading.Event()
+    real_segment_pieces = pieces.segment_pieces
+
+    def fake_segment_pieces(tess, surface, support_points, checkpoint=None):
+        started.set()
+        assert release.wait(timeout=5), "release was never set"
+        return real_segment_pieces(tess, surface, support_points, checkpoint=checkpoint)
+
+    monkeypatch.setattr(pieces, "segment_pieces", fake_segment_pieces)
+
+    results = {}
+
+    def call_builder():
+        results["builder"] = bundle.build_bundle(
+            "Tiny", "concrete", "bonded-courses", 0.9, interactive_token=None)
+
+    t1 = threading.Thread(target=call_builder)
+    t1.start()
+    assert started.wait(timeout=5), "the builder never started"
+
+    # A re-upload while the builder is still blocked mid-cut: new, taller
+    # geometry (the centre vertex moves from z=1.0 to z=6.0), and the
+    # clear_cut_memo it triggers (app._invalidate_studio_cache's own
+    # call, reproduced directly here since this test drives bundle.py,
+    # not the route).
+    tall = tiny_contract()
+    for vertex in tall["equilibrium"]["vertices"]:
+        vertex["z"] = vertex.get("z", 0.0) + 5.0
+    (upload / "Tiny-contract.json").write_text(json.dumps(tall), encoding="utf-8")
+    bundle.clear_cut_memo()
+
+    def call_joiner():
+        results["joiner"] = bundle.build_bundle(
+            "Tiny", "concrete", "bonded-courses", 0.9, interactive_token=None)
+
+    t2 = threading.Thread(target=call_joiner)
+    t2.start()
+
+    release.set()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+    assert not t1.is_alive() and not t2.is_alive(), "a thread never finished"
+
+    def max_piece_z(document):
+        return max(point[2] for piece in document["pieces"] for point in piece["mid"])
+
+    assert max_piece_z(results["builder"]) < 2.0, (
+        "the builder's own cut must reflect the OLD geometry it loaded"
+    )
+    assert max_piece_z(results["joiner"]) > 4.0, (
+        "the joiner must recompute against the NEW geometry its own "
+        "caller loaded, not adopt the pre-clear builder's stale cut"
+    )
+
+    cached_path = bundle.bundle_path("tiny", "concrete", "bonded-courses", 0.9, 0.2)
+    on_disk = json.loads(cached_path.read_text(encoding="utf-8"))
+    assert max_piece_z(on_disk) > 4.0, (
+        "the disk cache must carry the post-upload geometry, not a "
+        "mixed document built from the joiner's new mesh and the "
+        "builder's stale, pre-clear cut"
+    )
