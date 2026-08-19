@@ -391,45 +391,28 @@ def test_the_committed_trial_2_domain_still_cuts_the_same():
 # be clean.
 SWEEP_SIZES = (0.30, 0.35, 0.45, 0.50, 0.90, 1.50, 3.00)
 
-# Measured, not asserted into existence. What a tolerated rim wobble still
-# costs after _arc's seam is fixed: cells whose rim arc drops through the
-# plus or minus 125.4 degree notch while their inner boundary is a straight
-# chord that passes outside it. At every other swept size, on both
-# generators, nothing folds. See domain.WOBBLE_TOLERANCE's own note.
-#
-# Row-uniform courses fix (2026-08-18): _divisions now places head joints
-# at equal ARC LENGTH rather than equal angle (generators._divisions), so
-# which exact theta values land inside the same plus/minus 125.4 degree
-# notch -- and therefore which specific cells fold there -- moved. Re-swept
-# on the same committed domain: 0.50 m is now clean (was 2 folded cells
-# before this fix); 0.30, 0.35 and 0.45 m still fold, at different cells
-# than before. Full 55-size sweep (both generators, 0.30 to 3.00 m in
-# 0.05 m steps) confirms these three sizes are the only ones affected on
-# bonded-courses, and monolithic-bands is clean at every size on the
-# slider -- it never calls _divisions at all (see monolithic_bands's own
-# code), so ask 2's division-uniformity fix cannot move anything about it,
-# and measurement confirms it does not.
-TRIAL_2_FOLDS = {
-    (0.30, "bonded-courses"): ["c4p57", "c4p100"],
-    (0.35, "bonded-courses"): ["c6p39", "c6p70"],
-    (0.45, "bonded-courses"): ["c2p39", "c2p70"],
-}
+# Measured, not asserted into existence. Rim remainder (2026-08-19):
+# domain.radius_at used to take the OUTERMOST ray-segment crossing, so
+# wherever the tolerated rim wobble made the boundary genuinely
+# multi-valued (the plus or minus 125.4 degree notch), an f = 1 rim point
+# could land on the far side of a gap the ray had already left the plan
+# through, and a course's straight inner-boundary chord could then pass
+# outside the rim it was meant to follow, folding the cell. radius_at now
+# returns the first exit -- the smallest odd-parity crossing, the near
+# branch, never a point past a gap the ray has already left the plan
+# through -- and that was the entire mechanism: re-swept on the same
+# committed domain, both generators, all 55 sizes from 0.30 to 3.00 m,
+# nothing folds anywhere. See domain.WOBBLE_TOLERANCE's own note and
+# docs/superpowers/specs/2026-08-19-rim-remainder-design.md.
+TRIAL_2_FOLDS = {}
 
-# Row-uniform courses fix (2026-08-18): at 0.30 m (the slider's finest
-# position, 21 courses on this domain) two cells land near enough to the
-# same plus/minus 125.4 degree notch, from two independently-computed
-# courses' own nearby-but-different division angles, that their welded
-# outline crosses itself with two lobes close enough in area to read as a
-# near-zero ALGEBRAIC area rather than a comfortable positive one --
-# build_tessellation's own if/elif (a cell is either a sliver or folded,
-# never both, the sliver check running first) claims them as slivers, not
-# folds. Not present anywhere on the OLD angle-uniform rule's own 0.30 m
-# cut (which instead folded a different six cells, all without tripping
-# the sliver check); not present at any of the other 54 sizes on the
-# slider under the new rule either.
-TRIAL_2_SLIVERS = {
-    (0.30, "bonded-courses"): ["c1p67", "c1p118"],
-}
+# Rim remainder (2026-08-19): the same first-exit rule that empties
+# TRIAL_2_FOLDS above also empties this. The near-zero-algebraic-area
+# sliver pair the row-uniform courses fix (2026-08-18) produced at 0.30 m
+# was itself downstream of the outermost rule's own far-branch placement
+# at the notch; measured on the full 55-size sweep under the first-exit
+# rule, both generators, no size produces a sliver.
+TRIAL_2_SLIVERS = {}
 
 
 def _folded_by_measurement(tess):
@@ -570,10 +553,19 @@ def test_course_zero_outline_simplifies_against_the_boundary():
     _uniform_arc_divisions's ceil (rather than the old round-to-nearest)
     means a course's own piece count is no longer identical to before
     either. Re-measured on the same committed domain and size: course 0
-    now carries 63 pieces and 370 outline points between them (5.87 per
+    then carried 63 pieces and 370 outline points between them (5.87 per
     piece) -- still well under the pre-simplification 538/8.68 baseline,
     confirming the boundary simplification this test is really about is
     still doing its job under the new division rule.
+
+    Rim remainder fix (2026-08-19): domain.radius_at now returns the
+    first exit rather than the outermost crossing (see
+    docs/superpowers/specs/2026-08-19-rim-remainder-design.md), which
+    moves the two course-0 cells at the notch (c0p22, c0p40) onto the
+    near branch instead of the far one. Re-measured on the same committed
+    domain and size: still 63 pieces, now 372 outline points between them
+    (5.90 per piece) -- two points added by the notch's own real step,
+    still comfortably under the pre-simplification baseline.
     """
 
     g = studio("generators")
@@ -584,7 +576,7 @@ def test_course_zero_outline_simplifies_against_the_boundary():
     course0 = [cell for cell in tess["cells"] if cell["course"] == 0]
     assert len(course0) == 63
     total = sum(len(cell["outline"]) for cell in course0)
-    assert total == 370
+    assert total == 372
     assert total < 538 * 0.8, "a real reduction in rim outline density, not a rounding accident"
 
 

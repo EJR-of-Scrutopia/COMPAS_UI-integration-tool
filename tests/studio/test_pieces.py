@@ -1007,7 +1007,16 @@ def test_rim_points_project_to_the_boundary_on_the_real_trial_2_plan():
     # same fixture, same size, after that fix: 0.046405 m. Still the same
     # order as the K3 baseline (both are governed by the same real rim
     # notch), not a coincidental match to the old number.
-    assert report["projected_max_m"] == pytest.approx(0.046405, abs=1e-4)
+    #
+    # Rim remainder fix (2026-08-19): domain.radius_at now returns the
+    # first exit rather than the outermost crossing (see
+    # docs/superpowers/specs/2026-08-19-rim-remainder-design.md), so an
+    # f = 1 outline point can no longer land on the far side of the
+    # notch's own gap -- most of what needed this projection at all was
+    # exactly that population. Re-measured on this same fixture, same
+    # size: 0.008679 m, an 81 percent cut in the worst overshoot, not a
+    # rounding accident.
+    assert report["projected_max_m"] == pytest.approx(0.008679, abs=1e-4)
 
 
 def _nearest_point_on_loop(loop, x, y):
@@ -1080,28 +1089,52 @@ def test_no_drawn_cap_point_sits_outside_the_true_rim_on_the_real_trial_2_plan()
 
 
 def test_an_untriangulatable_cell_is_dropped_not_crashed():
-    """Rim-rectangular fix (2026-08-18): row-uniform courses (equal arc
-    length division) moves which real mesh geometry lands inside which
-    piece. On the real Trial 2 domain at 0.30 m (the piece-size slider's
-    finest position), two course-1 cells near the same rim notch
-    domain.WOBBLE_TOLERANCE already names (c1p67, c1p118) come out both
-    near-zero area AND topologically self-crossing -- degenerate enough
-    that cutting.ear_clip finds no ear at all, not merely a self-crossing
-    ring it can still triangulate inside out (the ordinary "folded" case
-    tessellation.py's own report already names and draws). Before this
-    fix, that raised out of pieces.segment_pieces and crashed the whole
-    cut; now it is caught, the piece is dropped, and its key is disclosed
-    in report["degenerate_dropped"] -- the same guard-degeneracy
-    machinery, one step earlier, before any outline point has even been
-    lifted.
+    """Rim-rectangular fix (2026-08-18): a cell whose own ring is too
+    degenerate for cutting.ear_clip to find any ear at all -- not merely a
+    self-crossing ring it can still triangulate inside out, the ordinary
+    "folded" case tessellation.py's own report already names and draws --
+    used to raise out of pieces.segment_pieces and crash the whole cut.
+    Now it is caught, the piece is dropped, and its key is disclosed in
+    report["degenerate_dropped"], the same guard-degeneracy machinery, one
+    step earlier, before any outline point has even been lifted.
+
+    Rim remainder (2026-08-19): this used to be pinned against the real
+    Trial 2 domain at 0.30 m, where two course-1 cells near the rim notch
+    (c1p67, c1p118) came out both near-zero area and topologically
+    self-crossing. domain.radius_at now returns the first exit rather
+    than the outermost crossing (see docs/superpowers/specs/2026-08-19-
+    rim-remainder-design.md), and that alone was the entire mechanism:
+    measured directly, neither cell -- nor any other, at any of the 55
+    swept sizes -- is untriangulatable any more (see
+    .superpowers/sdd/2026-08-19-rim-remainder-probe/report.md section 5).
+    The drop-not-crash contract itself was never about that particular
+    geometry, so it is pinned here instead against a synthetic hand-built
+    cell: four points on a single straight line, an outline that welds to
+    zero width. Every one of its vertices reads as collinear with both of
+    its neighbours (cutting.ear_clip's own straight-vertex
+    simplification, _COLLINEAR_TOL), so no non-collinear point survives
+    to triangulate and ear_clip raises -- the exact shape of failure
+    choose_rounds and segment_pieces both have to survive without
+    crashing (test_choose_rounds_skips_an_untriangulatable_cell_instead_
+    of_crashing above pins the same guard one level earlier, directly
+    against choose_rounds).
     """
 
-    g = studio("generators")
     p = studio("pieces")
-    domain = trial2_domain()
-    surface = trial2_surface(domain)
-    tess = g.generate("bonded-courses", domain, 0.30)
+    t = studio("tessellation")
+    surface = flat_surface()
+    tess = t.build_tessellation(
+        [
+            {"key": "good", "course": 0,
+             "outline": [[1.0, 1.0], [2.0, 1.0], [2.0, 2.0], [1.0, 2.0]],
+             "holes": []},
+            {"key": "bad", "course": 0,
+             "outline": [[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0]],
+             "holes": []},
+        ],
+        "test", "generated", 1.0, 1,
+    )
     made, report = p.segment_pieces(tess, surface, [])
     assert made
-    assert set(report["degenerate_dropped"]) >= {"c1p67", "c1p118"}
-    assert all(piece["key"] not in report["degenerate_dropped"] for piece in made)
+    assert report["degenerate_dropped"] == ["bad"]
+    assert [piece["key"] for piece in made] == ["good"]

@@ -394,13 +394,21 @@ class Surface:
         # 0.0523 m at the worst, and all but one of them inside the two
         # clusters at plus and minus 125.4 degrees where the rim notch is.
         #
-        # The cause is upstream and deliberate. domain.radius_at takes the
-        # OUTERMOST ray crossing, so wherever the tolerated rim wobble makes
-        # the plan boundary multi-valued along a ray, an f = 1 outline point
-        # is placed on the far crossing, past the near one, and therefore
-        # past the real surface. That choice is what stops a ray grazing a
-        # corner from falling back inside the rim, and it is not changed
-        # here.
+        # The cause was upstream and deliberate. domain.radius_at used to
+        # take the OUTERMOST ray crossing, so wherever the tolerated rim
+        # wobble made the plan boundary multi-valued along a ray, an f = 1
+        # outline point could be placed on the far crossing, past the near
+        # one, and therefore past the real surface. That choice is what
+        # stopped a ray grazing a corner from falling back inside the rim,
+        # and it was not changed here (K3, 2026-08-17).
+        #
+        # Rim remainder (2026-08-19): radius_at now returns the first exit
+        # instead (docs/superpowers/specs/2026-08-19-rim-remainder-design.
+        # md), the near branch rather than a branch on the far side of a
+        # gap the ray has already left the plan through, so most of what
+        # used to need this projection at all no longer does -- measured on
+        # the real Trial 2 export at 0.9 m, the worst overshoot this
+        # fallback still reaches for fell from 46.4 mm to 8.7 mm.
         #
         # K3 (cutting truth, 2026-08-17): the point is projected to the
         # NEAREST point of the real rim (self.boundary, the analysis mesh's

@@ -394,16 +394,24 @@ def test_the_bundle_ships_the_tessellation_and_its_report(tmp_path, monkeypatch)
     # K3 (cutting truth, 2026-08-17): both fields must be present, not
     # crash for want of a boundary polyline ever mattering on this export.
     # tiny_contract's rim has no backward step and no notch, so nothing
-    # here needs the old nearest-face clamp at all -- but a handful of
-    # boundary-corner outline points still land a float's width outside
-    # the primary containment test (radius_at's own ray cast is a
-    # different computation from the render mesh's stored vertex
-    # coordinates), and the projection mechanism correctly catches those
-    # too: measured here at 1e-16 m, machine epsilon, nowhere near
-    # cutting.CHORD_TARGET.
+    # here needs the old nearest-face clamp at all. Under the old
+    # outermost crossing rule, a handful of boundary-corner outline points
+    # still landed a float's width outside the primary containment test
+    # (radius_at's own ray cast is a different computation from the
+    # render mesh's stored vertex coordinates -- a corner graze took the
+    # max of two crossings agreeing to within an ulp), and the projection
+    # mechanism correctly caught those too, at 1e-16 m, machine epsilon,
+    # nowhere near cutting.CHORD_TARGET.
+    #
+    # Rim remainder (2026-08-19): radius_at now returns the single counted
+    # crossing at a graze rather than the max of two near-duplicates (see
+    # docs/superpowers/specs/2026-08-19-rim-remainder-design.md), and on
+    # this exact square that last-ulp drift now lands every corner exactly
+    # on the mesh: measured here, both fields read as a true, clean zero,
+    # not a residual hiding a bug that skipped the check silently.
     assert document["tessellation"]["clamped_points"] == 0
-    assert document["tessellation"]["projected_points"] > 0
-    assert document["tessellation"]["projected_max_m"] < 1e-9
+    assert document["tessellation"]["projected_points"] == 0
+    assert document["tessellation"]["projected_max_m"] == 0.0
 
 
 def test_the_openings_block_rides_the_summary(tmp_path, monkeypatch):

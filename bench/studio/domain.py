@@ -52,21 +52,23 @@ WOBBLE_TOLERANCE = math.radians(5.0)
 # of 240).
 #
 # What a tolerated wobble still costs, swept over all 55 slider sizes from
-# 0.30 to 3.00 m on this export: no coverage holes, no broken boundary, no
-# orphan faces at any size, but 14 folded cells, at four of the 55 sizes
-# (6 at 0.30, 4 at 0.35, 2 at 0.45, 2 at 0.50), every one of them in the
-# plus or minus 125.4 degree notch. A rim course cell there follows the
-# rim's own step in from 10.9136 m to 9.4519 m while its inner boundary is
-# a straight chord, and the chord passes outside the rim, so the outline
-# crosses itself. That is accepted rather than refused, because the report
-# names those cells by key: see build_tessellation's folded list, which is
-# the check that actually sees a fold (the sliver test reads an algebraic
-# area, and a fold's two lobes cancel in it). Before that list existed the
-# claim made here -- that the coverage report already names the offenders
-# cell by cell -- was not true of a fold: it produced no report entry of
-# any kind. This is an empirical threshold on one family of geometry, not
-# a proof that every 5-degree wobble is harmless or every larger one is a
-# real bay.
+# 0.30 to 3.00 m on this export, both generators: no coverage holes, no
+# broken boundary, no orphan faces, no folded cells and no slivers, at any
+# size. That is the first-exit rule (radius_at, 2026-08-19), which returns
+# the near branch wherever the tolerated wobble makes the plan boundary
+# genuinely multi-valued along a ray, rather than the far side of a gap
+# the ray has already left the plan through -- see
+# docs/superpowers/specs/2026-08-19-rim-remainder-design.md and
+# .superpowers/sdd/2026-08-19-rim-remainder-probe/report.md. Under the
+# outermost rule this same sweep folded 6 cells at 3 of the 55 sizes (all
+# in the plus or minus 125.4 degree notch: a rim course cell there
+# followed the rim's own step in from 10.9136 m to 9.4519 m while its
+# inner boundary was a straight chord that passed outside the rim, so the
+# outline crossed itself), a cost the first-exit rule removes rather than
+# merely disclosing. This remains an empirical threshold on one family of
+# geometry, not a proof that every 5-degree wobble is harmless or every
+# larger one is a real bay, and not a claim that no crossing rule could
+# ever fold a cell on a wobble this tolerance would still accept.
 
 
 def boundary_ring(faces: Sequence[Sequence[int]]) -> List[int]:
@@ -225,39 +227,59 @@ def plan_domain(
 
 
 def radius_at(domain: Dict, theta: float) -> float:
-    """Distance from the axis to the rim along theta, exactly.
+    """Distance from the axis to the rim along theta: the first exit.
 
     The rim is a polygon, so this is a ray against each of its segments
     rather than an interpolation between corner radii, which would cut
-    the corners off. On a star shaped plan exactly one segment answers;
-    the outermost hit is taken so that a ray grazing a corner, where two
-    segments both report a crossing, still returns the rim.
+    the corners off. Crossings are counted with a half-open side test (a
+    rim vertex sitting exactly on the ray belongs to the negative side,
+    so the rim passing through it counts once and the rim merely
+    touching it counts twice or not at all), grouped by radius within
+    1e-12 m, and the smallest group with ODD parity wins: the radius at
+    which the ray first genuinely leaves the plan. On a star shaped plan
+    that is the only crossing there is, so this returns the same number
+    the old outermost rule did, and a ray grazing a corner still returns
+    the rim for the same reason an ordinary exit does, an even group
+    never flips the parity. Where a tolerated rim wobble makes the plan
+    genuinely multi-valued along some ray, this returns the near branch,
+    not a branch on the far side of a gap the ray has already left the
+    plan through.
     """
 
     ax, ay = domain["axis"]
     dx, dy = math.cos(theta), math.sin(theta)
     loop = domain["loop"]
-    best = None
-    for i in range(len(loop)):
+    n = len(loop)
+    hits = []
+    for i in range(n):
         p = loop[i]
-        q = loop[(i + 1) % len(loop)]
+        q = loop[(i + 1) % n]
+        sp = dx * (p[1] - ay) - dy * (p[0] - ax)
+        sq = dx * (q[1] - ay) - dy * (q[0] - ax)
+        if (sp > 0.0) == (sq > 0.0):
+            continue
         ex, ey = q[0] - p[0], q[1] - p[1]
         denominator = dx * ey - dy * ex
         if abs(denominator) < 1e-15:
             continue
         px, py = p[0] - ax, p[1] - ay
         along_ray = (px * ey - py * ex) / denominator
-        along_edge = (px * dy - py * dx) / denominator
-        if along_ray < 0.0 or not (-1e-12 <= along_edge <= 1.0 + 1e-12):
-            continue
-        if best is None or along_ray > best:
-            best = along_ray
-    if best is None:
+        if along_ray >= 0.0:
+            hits.append(along_ray)
+    if not hits:
         raise ValueError(
             "no rim crossing at theta {:.6f}; the axis is outside the "
-            "plan".format(theta)
-        )
-    return best
+            "plan".format(theta))
+    hits.sort()
+    i = 0
+    while i < len(hits):
+        j = i
+        while j + 1 < len(hits) and hits[j + 1] - hits[i] <= 1e-12:
+            j += 1
+        if (j - i + 1) % 2 == 1:
+            return hits[i]
+        i = j + 1
+    return hits[-1]
 
 
 def plan_point(domain: Dict, f: float, theta: float) -> List[float]:

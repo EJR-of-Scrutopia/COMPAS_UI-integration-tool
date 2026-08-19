@@ -225,10 +225,12 @@ def _lift(surface: cutting.Surface, plan) -> Dict:
         # Before this fix this used plan[0]/plan[1] unconditionally, so a
         # cap point genuinely off the render mesh sampled its z/normal/
         # weights on the true rim but still shipped at its own unprojected
-        # (x, y): the corner sat where domain.radius_at's outermost-
-        # crossing rule placed it, not where it was actually sampled. See
-        # cutting.Surface.lift and .superpowers/sdd/2026-08-18-rim-spikes/
-        # diagnosis.md.
+        # (x, y): the corner sat where domain.radius_at's own crossing rule
+        # placed it (the outermost crossing, until the 2026-08-19 rim
+        # remainder wave replaced it with the first exit -- see
+        # docs/superpowers/specs/2026-08-19-rim-remainder-design.md), not
+        # where it was actually sampled. See cutting.Surface.lift and
+        # .superpowers/sdd/2026-08-18-rim-spikes/diagnosis.md.
         "point": [found["x"], found["y"], found["z"]],
         "normal": found["normal"],
         "weights": found["weights"],

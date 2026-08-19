@@ -148,11 +148,16 @@ def test_a_point_off_the_surface_is_clamped_and_counted():
 def test_a_clamp_says_how_far_it_reached_in_metres():
     """A count of clamped points cannot be read without a magnitude.
 
-    On the real Trial 2 export at 0.9 m the clamp reaches 52 mm at its
-    worst, ten times CHORD_TARGET, because domain.radius_at deliberately
-    takes the outermost rim crossing where the tolerated wobble makes the
-    boundary multi-valued. Half a metre here, on a unit square, is the same
-    number measured on geometry small enough to check by hand.
+    On the real Trial 2 export at 0.9 m the clamp used to reach 52 mm at
+    its worst, ten times CHORD_TARGET, because domain.radius_at
+    deliberately took the outermost rim crossing where the tolerated
+    wobble made the boundary multi-valued (the rim remainder wave,
+    2026-08-19, replaced that rule with the first exit -- see
+    docs/superpowers/specs/2026-08-19-rim-remainder-design.md -- which
+    cut the worst overshoot to 8.7 mm). Half a metre here, on a unit
+    square, is the same number measured on geometry small enough to check
+    by hand, and this fixture's own unit square is unaffected by that
+    rule change either way.
     """
 
     c = studio()

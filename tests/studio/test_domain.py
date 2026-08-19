@@ -481,3 +481,207 @@ def test_the_axis_inside_an_opening_refuses_verbatim():
             "pattern has no crown to close on. Author the tessellation "
             "in Grasshopper and import it instead."
         )
+
+
+# --- Rim remainder (2026-08-19): radius_at becomes the first exit --------
+#
+# domain.radius_at used to take the OUTERMOST ray-segment crossing. Where a
+# tolerated rim wobble makes the boundary genuinely multi-valued along a
+# ray (a small lobe that doubles back over a narrow angular window), the
+# outermost crossing sits on the far side of a gap the ray has already
+# left the plan through. The replacement counts crossings with a
+# half-open side convention, groups crossings coincident within 1e-12 m,
+# and returns the smallest radius whose group has ODD parity: the radius
+# at which the ray first genuinely leaves the plan. See
+# docs/superpowers/specs/2026-08-19-rim-remainder-design.md and
+# .superpowers/sdd/2026-08-19-rim-remainder-probe/report.md.
+
+
+def _old_radius_at(domain, theta):
+    """The pre-wave algorithm, reimplemented independently here (an exact
+    copy of the outermost-crossing, along_edge-tolerance body
+    domain.radius_at carried before this wave) rather than calling
+    domain.radius_at, so the tests below can show the new rule agreeing
+    with, or genuinely diverging from, the old one -- reading the same
+    computation back at itself would prove nothing.
+    """
+    ax, ay = domain["axis"]
+    dx, dy = math.cos(theta), math.sin(theta)
+    loop = domain["loop"]
+    best = None
+    for i in range(len(loop)):
+        p = loop[i]
+        q = loop[(i + 1) % len(loop)]
+        ex, ey = q[0] - p[0], q[1] - p[1]
+        denominator = dx * ey - dy * ex
+        if abs(denominator) < 1e-15:
+            continue
+        px, py = p[0] - ax, p[1] - ay
+        along_ray = (px * ey - py * ex) / denominator
+        along_edge = (px * dy - py * dx) / denominator
+        if along_ray < 0.0 or not (-1e-12 <= along_edge <= 1.0 + 1e-12):
+            continue
+        if best is None or along_ray > best:
+            best = along_ray
+    return best
+
+
+def _segment_hit(axis, theta, p, q):
+    """Pure line-segment-against-ray intersection, no crossing-rule logic
+    at all: the shared core both the old and new radius_at build on. Used
+    only to compute an expected radius independently, from a named
+    segment, rather than reading it back from either implementation.
+    """
+    ax, ay = axis
+    dx, dy = math.cos(theta), math.sin(theta)
+    ex, ey = q[0] - p[0], q[1] - p[1]
+    denominator = dx * ey - dy * ex
+    px, py = p[0] - ax, p[1] - ay
+    return (px * ey - py * ex) / denominator
+
+
+def _flat_domain(loop, axis=(0.0, 0.0)):
+    """The minimum a hand built domain dict needs for radius_at and
+    point_in_ring: axis and loop. Neither reads the other keys
+    plan_domain's own return value carries.
+    """
+    return {"axis": list(axis), "loop": [list(p) for p in loop]}
+
+
+def test_a_ray_through_a_corner_grazes_and_still_returns_the_rim():
+    """A ray passing exactly through a convex corner of a square is the
+    corner-graze case the old docstring named and the new rule handles by
+    construction: two edges meet at the corner, one ending there (the
+    corner's own side value is exactly 0, the half-open convention's own
+    negative side) and one starting there whose OTHER end sits on the
+    positive side, so exactly one of the two edges flips parity and the
+    corner registers once, not zero or two times -- an even group would
+    never flip the parity at all.
+
+    Unit square centred on the axis, corners at (+-0.5, +-0.5); the ray at
+    theta = pi/4 runs along the diagonal and exits exactly at (0.5, 0.5).
+    The expected radius is computed here from the corner's own
+    coordinates (math.hypot), not read back from the function under test.
+    """
+    d = studio()
+    loop = [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]]
+    domain = _flat_domain(loop)
+    expected = math.hypot(0.5, 0.5)
+    assert d.radius_at(domain, math.pi / 4.0) == pytest.approx(expected, abs=1e-12)
+    # Not an accident of a symmetric fixture: the duplicated old rule
+    # (above) is measured to return the identical value here too. A plain
+    # graze is exactly the case the two rules must agree on; the notched
+    # fixture below is where they genuinely diverge.
+    assert _old_radius_at(domain, math.pi / 4.0) == pytest.approx(expected, abs=1e-12)
+
+
+def _notched_polygon():
+    """A hand built miniature of Trial 2's own lobe (probe report section
+    2: triangle 181-182-183, an outward tip the walk reaches by stepping
+    forward in angle and then briefly backward before continuing on): six
+    vertices, walked anticlockwise, axis at the origin.
+
+    V0 (theta 0 deg, r 10) -> V1 (theta 3 deg, r 11, the false tip,
+    forward) -> V2 (theta 1 deg, r 9, the notch: BACKWARD in angle from
+    V1's own 3 deg, though still forward of V0's 0 deg) -> V3 (theta 4
+    deg, r 10, forward again, back to the baseline) -> V4 (theta 180 deg,
+    r 10) -> V5 (theta 270 deg, r 10) -> back to V0.
+
+    Over the angular window 1 to 3 degrees the walk visits this stretch
+    twice (once via V0-V1, once via V2-V3), so a ray in that window
+    crosses the rim three times: the near branch (segment V2-V3), a
+    middle crossing (segment V1-V2), and the far branch (segment V0-V1).
+    Verified simple (no self-intersection) and its three crossings
+    measured, in the session scratchpad, before this was written into a
+    test: at theta = 2 deg the crossings come out (segment index, radius)
+    (0, 10.641884), (1, 9.898492), (2, 9.307541) -- an odd count of three
+    distinct radii, no coincident graze anywhere in the window, so the
+    first-exit rule returns the smallest immediately, and the old
+    outermost rule returns the largest.
+    """
+    pts_polar = [
+        (0.0, 10.0), (3.0, 11.0), (1.0, 9.0), (4.0, 10.0),
+        (180.0, 10.0), (270.0, 10.0),
+    ]
+    loop = [
+        [r * math.cos(math.radians(t)), r * math.sin(math.radians(t))]
+        for t, r in pts_polar
+    ]
+    return _flat_domain(loop)
+
+
+def test_a_multi_valued_rim_returns_the_near_branch_not_the_far_lobe():
+    """Inside the notch's own angular window, the first-exit rule returns
+    the NEAR branch, not the far lobe the old outermost rule preferred.
+    Verified below, not merely asserted: the old rule (duplicated as
+    _old_radius_at) is measured on this exact fixture to return the far
+    branch, a value nowhere near the near branch this test pins -- this
+    test genuinely fails against the rule this wave replaces.
+    """
+    d = studio()
+    domain = _notched_polygon()
+    theta = math.radians(2.0)
+    loop = domain["loop"]
+
+    expected_near = _segment_hit(domain["axis"], theta, loop[2], loop[3])  # V2->V3
+    expected_far = _segment_hit(domain["axis"], theta, loop[0], loop[1])   # V0->V1
+    assert expected_near < expected_far, "the fixture must be genuinely multi-valued"
+
+    assert d.radius_at(domain, theta) == pytest.approx(expected_near, abs=1e-12)
+
+    old_value = _old_radius_at(domain, theta)
+    assert old_value == pytest.approx(expected_far, abs=1e-12)
+    assert abs(old_value - expected_near) > 0.5, (
+        "the old rule must land nowhere near the near branch, or this "
+        "fixture proves nothing about the two rules genuinely diverging"
+    )
+
+
+def _regular_ngon(n, radius=3.0):
+    return [
+        [radius * math.cos(2.0 * math.pi * i / n), radius * math.sin(2.0 * math.pi * i / n)]
+        for i in range(n)
+    ]
+
+
+def test_first_exit_matches_outermost_on_star_shaped_plans():
+    """On any star shaped plan the new rule and the old rule must agree:
+    the spec's own claim (docs/superpowers/specs/2026-08-19-rim-remainder-
+    design.md, "The rule that ships"). Checked on the unit square and a
+    regular 12-gon, 720 sampled thetas across the full turn, against the
+    OLD algorithm duplicated above as _old_radius_at (not domain.radius_at
+    read back at itself).
+    """
+    d = studio()
+    square = _flat_domain([[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]])
+    twelvegon = _flat_domain(_regular_ngon(12))
+
+    for domain in (square, twelvegon):
+        for i in range(720):
+            theta = 2.0 * math.pi * i / 720.0
+            new = d.radius_at(domain, theta)
+            old = _old_radius_at(domain, theta)
+            assert new == pytest.approx(old, abs=1e-12), (domain["loop"], theta)
+
+
+def test_dense_sampling_inside_the_notch_window_stays_inside_the_polygon():
+    """f = 0.999 containment, targeted at the one place a coarse sweep
+    would straddle: 500 samples across the notch's own 1 to 3 degree
+    window (see _notched_polygon), each placed at 0.999 of the first-exit
+    radius, must all still lie inside the true polygon
+    (tessellation.point_in_ring). Measured before writing this test: the
+    old outermost rule leaves 4 of these same 500 samples outside the
+    polygon; the first-exit rule leaves 0.
+    """
+    d = studio()
+    t = tessellation_module()
+    domain = _notched_polygon()
+    loop = domain["loop"]
+    axis = domain["axis"]
+    ring = list(range(len(loop)))
+
+    for i in range(500):
+        theta = math.radians(1.0 + 2.0 * i / 499.0)
+        radius = 0.999 * d.radius_at(domain, theta)
+        point = [axis[0] + radius * math.cos(theta), axis[1] + radius * math.sin(theta)]
+        assert t.point_in_ring(point, ring, loop), (theta, point)
