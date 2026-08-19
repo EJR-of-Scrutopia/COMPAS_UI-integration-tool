@@ -142,13 +142,19 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
             # whole point (it says where to look), so it is carried through
             # unchanged rather than paraphrased or swallowed into a 500.
             #
-            # P5 (presentation batch, 2026-08-18): domain.boundary_ring and
+            # P5 (presentation batch, 2026-08-18): domain.plan_domain and
             # generators.generate no longer reach this handler at all. Their
-            # ValueError -- an oculus, a hole, a re-entrant plan the engine's
-            # single-star-shaped-loop constraint refuses -- is valid geometry,
-            # not a malformed request, so build_bundle catches it itself
-            # (see bundle.CutRefused) and ships a 200 with uncut_reason set
+            # ValueError -- a re-entrant OUTER rim the engine's star-shaped
+            # constraint refuses -- is valid geometry, not a malformed
+            # request, so build_bundle catches it itself (see
+            # bundle.CutRefused) and ships a 200 with uncut_reason set
             # rather than raising through to here.
+            #
+            # Multi-loop (2026-08-19): an oculus or a hole is NOT one of
+            # these cases any more -- openings.py classifies it apart from
+            # the outer rim and the cut clips around it natively. See
+            # bundle.CutRefused's own docstring for the current, complete
+            # list of what still refuses.
             raise HTTPException(400, str(error))
 
     @app.post("/api/runs", status_code=202)

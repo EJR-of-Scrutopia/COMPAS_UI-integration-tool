@@ -5,15 +5,20 @@ and clipping the result to the vault would need a general polygon clipper;
 drawing them in a domain whose f = 1 is already the real rim needs none,
 because a generated outline can never leave the surface in the first place.
 
-The precondition is that the plan boundary is star shaped about the axis,
-meaning every ray from the axis crosses it exactly once. A vault with an
-oculus or a deep bay is not, and no polar pattern can cover it. A small
-local wobble in the rim is not the same thing as a bay: it turns the
-angular order back for a few boundary vertices without ever making the
-plan fail to be coverable by a polar pattern in practice, and every real
-export measured so far has one. WOBBLE_TOLERANCE draws that line. That is
-reported rather than approximated: see plan_domain's failure key, and the
-imported tessellation route in tessellation.py.
+The precondition is that the OUTER plan boundary is star shaped about the
+axis, meaning every ray from the axis crosses it exactly once. A deep bay
+in that outer rim is not, and no polar pattern can cover it. An interior
+opening -- an oculus, a touchdown ring -- is a different thing entirely
+(multi-loop, 2026-08-19): openings.py classifies it apart from the outer
+rim, and the generated cut clips its cells around the opening's own true
+boundary, so a plan with one or more such openings still cuts natively as
+long as its outer rim is star shaped. A small local wobble in the outer
+rim is not the same thing as a bay: it turns the angular order back for a
+few boundary vertices without ever making the plan fail to be coverable
+by a polar pattern in practice, and every real export measured so far has
+one. WOBBLE_TOLERANCE draws that line. That is reported rather than
+approximated: see plan_domain's failure key, and the imported
+tessellation route in tessellation.py.
 
 Stdlib only: bundle.py imports this and the guard test forbids solver
 stacks on that path.

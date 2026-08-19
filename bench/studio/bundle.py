@@ -238,6 +238,22 @@ class CutRefused(ValueError):
     input, not a valid plan the engine declines to cover, and stays a 400
     (see get_bundle in app.py and test_a_malformed_authored_tessellation_
     is_a_400_naming_the_cell in test_app.py).
+
+    Multi-loop (2026-08-19): an oculus or a hole is no longer, on its own,
+    a CutRefused case. openings.py classifies it apart from the outer rim
+    and generate's clip pass trims cells around its true boundary, so a
+    plan with one or more interior openings cuts natively as long as its
+    OUTER rim is still star shaped (see domain.py's own module docstring,
+    updated the same task). What still lands here: the outer rim itself
+    not star shaped, or a re-entrant/branching rim (generators.generate,
+    domain.boundary_ring); no loop containing the others, loops
+    overlapping in plan, or an opening self-crossing in plan
+    (domain.plan_domain, via openings.classify); the axis falling inside
+    an opening, so the polar pattern has no crown to close on
+    (domain.plan_domain); and monolithic-bands asked to cross an opening
+    its ring cells cannot yet clip (generators.generate). Each is a named,
+    tested refusal (see docs/superpowers/specs/2026-08-19-multiloop-
+    cutting-design.md, "What still refuses, verbatim").
     """
 
 
