@@ -25,6 +25,7 @@ import generators
 import geometry
 import openings
 import pieces
+import refusals
 import subdivision
 import tessellation
 
@@ -112,6 +113,14 @@ REQUIRED_BUNDLE_KEYS = (
     # fix round 1, 2026-08-19: presence alone cannot tell an earlier value
     # apart from the current one).
     "tessellation.crossing_rule",
+    # Fix batch, bundle honesty (2026-08-19): provenance.render_
+    # subdivision discloses whether _render_mesh's subdivision pass ran
+    # or was skipped for want of an all-quad analysis mesh (see
+    # _render_subdivision_note's own docstring). A bundle cached before
+    # this task carries no such field at all -- the same missing-field
+    # staleness every entry above already guards -- so it is served with
+    # no disclosure at all rather than rebuilt to gain one.
+    "provenance.render_subdivision",
 )
 
 # A field can be present and still say the wrong thing: REQUIRED_BUNDLE_
@@ -277,6 +286,10 @@ _cut_memo: "collections.OrderedDict" = collections.OrderedDict()
 
 
 def clear_cut_memo() -> None:
+    # Deliberately reaches no further than the memo and its generation --
+    # see reset_studio_state()'s own docstring (below, once _cut_inflight
+    # and _interactive_live exist to clear) for why a live path like
+    # app._invalidate_studio_cache must not also clear _cut_inflight.
     global _cut_memo_generation
     with _cut_memo_lock:
         _cut_memo_generation += 1
@@ -461,6 +474,45 @@ def superseded(export: str, token: int, key: tuple) -> bool:
     return latest_token > token and latest_key != key
 
 
+def reset_studio_state() -> None:
+    """Test-only: every registry a studio test can leak into another one,
+    cleared together (fix 10, bundle honesty, 2026-08-19).
+
+    clear_cut_memo() above deliberately never touches _cut_inflight or
+    _interactive_live -- it is called from a LIVE path
+    (app._invalidate_studio_cache, on every real export re-upload) where
+    a build can genuinely still be in flight when it runs, and clearing
+    _cut_inflight out from under one would break the invariant its own
+    module comment states ("a key is either memoised, in flight, or
+    neither, never something in between"): a second caller for the same
+    key would start a fully redundant second build, and whichever of the
+    two finished first would delete _cut_inflight[key] out from under
+    the other, whose own `del _cut_inflight[key]` in its finally block
+    would then raise KeyError.
+
+    tests/studio/conftest.py's autouse fixture has no such problem: every
+    concurrency test in this repo joins or releases whatever thread it
+    started (the Event handshake pattern) before its own test function
+    returns, so nothing is genuinely still building by the time this
+    runs between tests. What CAN leak between tests, because clear_cut_
+    memo was never asked to touch it, is state a completed (or
+    deliberately unfinished, by test construction) build left behind:
+    register_interactive's own _interactive_live entry for an export a
+    later test reuses, or an in-flight holder a test planted directly.
+    This clears both, plus the memo itself (the same two statements
+    clear_cut_memo already performs), under the same lock, so nothing
+    left behind by one test can influence a superseded() or joining
+    decision in the next.
+    """
+
+    global _cut_memo_generation
+    with _cut_memo_lock:
+        _cut_memo_generation += 1
+        _cut_memo.clear()
+        _cut_inflight.clear()
+        _interactive_live.clear()
+
+
 class CutRefused(ValueError):
     """The cutting engine's own refusal on otherwise valid geometry.
 
@@ -488,14 +540,23 @@ class CutRefused(ValueError):
     OUTER rim is still star shaped (see domain.py's own module docstring,
     updated the same task). What still lands here: the outer rim itself
     not star shaped, or a re-entrant/branching rim (generators.generate,
-    domain.boundary_ring); no loop containing the others, loops
+    openings.extract_loops); no loop containing the others, loops
     overlapping in plan, or an opening self-crossing in plan
-    (domain.plan_domain, via openings.classify); the axis falling inside
-    an opening, so the polar pattern has no crown to close on
-    (domain.plan_domain); and monolithic-bands asked to cross an opening
-    its ring cells cannot yet clip (generators.generate). Each is a named,
-    tested refusal (see docs/superpowers/specs/2026-08-19-multiloop-
-    cutting-design.md, "What still refuses, verbatim").
+    (openings.classify, reached from domain.plan_domain); the axis
+    falling inside an opening, so the polar pattern has no crown to close
+    on (domain.plan_domain); and monolithic-bands asked to cross an
+    opening its ring cells cannot yet clip (generators.generate). Each is
+    a named, tested refusal (see docs/superpowers/specs/2026-08-19-
+    multiloop-cutting-design.md, "What still refuses, verbatim").
+
+    Fix batch, bundle honesty (2026-08-19): every one of those sites now
+    raises refusals.PlanRefused, a ValueError subclass, instead of a
+    plain ValueError -- see that module's own docstring for why. build_
+    tessellation_for's catch below narrowed to match: only a PlanRefused
+    becomes this class any more, so a plain ValueError (a genuine bug
+    the curated vocabulary above does not name) propagates unmodified
+    instead of being reported as though it were one more polite
+    refusal.
     """
 
 
@@ -561,11 +622,21 @@ def build_tessellation_for(
                 geometry.face_centroids(arrays["vertices"], arrays["faces"]),
             )
             tess = generators.generate(pattern, plan, size, checkpoint=checkpoint)
-        except ValueError as error:
+        except refusals.PlanRefused as error:
             # See CutRefused's own docstring: this is the one place the
             # distinction between "the engine refuses valid geometry" and
             # "the input is malformed" can actually be drawn, because it is
             # the one place that knows which of the two branches raised.
+            #
+            # Fix batch, bundle honesty (2026-08-19): narrowed from a
+            # blanket `except ValueError` to `except refusals.PlanRefused`
+            # -- every CURATED refusal site in domain.py, generators.py
+            # and openings.py now raises that subclass (see refusals.
+            # PlanRefused's own docstring for the full list), so a plain
+            # ValueError reaching this line is a genuine bug in the engine
+            # itself, not a refusal on valid geometry, and must propagate
+            # rather than being caught here and reported as an honest
+            # uncut bundle.
             raise CutRefused(str(error)) from error
     # Final fix wave (2026-08-19): the count of loops the attachment above
     # actually found, honest and always computable regardless of which
@@ -766,10 +837,45 @@ def _render_mesh(vertices: List[list], faces: List[list]) -> Dict[str, list]:
         }
 
 
+def _render_subdivision_note(faces: List[list]) -> str:
+    """Fix 8 (bundle honesty, 2026-08-19): disclosure, not behaviour, for
+    _render_mesh's own silent fallback above. subdivide_quads raises the
+    moment ANY single face is not a quad, and _render_mesh's try/except
+    swallows that for the WHOLE mesh -- a real, correct choice (see
+    _render_mesh's own docstring), but one that used to read identically
+    to an ordinary quad export that simply had nothing more to
+    subdivide: nothing in the bundle said which had happened. Counts
+    non-quad faces on the ANALYSIS mesh (the same faces subdivide_quads
+    itself iterates and raises on, not the render mesh, which is either
+    the subdivided result or -- on this exact fallback -- the analysis
+    mesh's own faces unchanged), so the count named here is exactly the
+    number of faces that forced the fallback, not a proxy for it.
+    """
+
+    non_quad = sum(1 for face in faces if len(face) != 4)
+    if non_quad == 0:
+        return "applied"
+    return "skipped -- {} non-quad faces".format(non_quad)
+
+
 def build_bundle(
     export_name: str, material: str, pattern: str, size: float, thickness: float = 0.2,
     interactive_token: Optional[int] = None,
 ) -> Dict:
+    # Fix 9 (bundle honesty, 2026-08-19): the generation this build
+    # started under, captured before any of the (possibly slow) work
+    # below runs -- the same capture-before/compare-after idiom _cut_for
+    # already uses for its own memo write (see its own "generation"
+    # local and the module comment above _cut_memo, "a stale cut cannot
+    # outlive its export"). Re-checked under _cut_memo_lock immediately
+    # before the single disk write at the tail of this function: a
+    # build that survived a mid-build clear_cut_memo (a real export
+    # re-upload, via app._invalidate_studio_cache) used to write its
+    # stale document to disk anyway, AFTER the invalidation had already
+    # run -- this is what stops that.
+    with _cut_memo_lock:
+        build_generation = _cut_memo_generation
+
     pairs = geometry.available_exports(UPLOAD_DIR)
     if export_name not in pairs:
         raise ValueError(
@@ -781,6 +887,7 @@ def build_bundle(
     contract = geometry.load_contract(pairs[export_name]["contract"])
     arrays = geometry.mesh_arrays(contract)
     render = _render_mesh(arrays["vertices"], arrays["faces"])
+    render_subdivision = _render_subdivision_note(arrays["faces"])
 
     uncut_reason = None
     try:
@@ -965,6 +1072,13 @@ def build_bundle(
                 contract.get("provenance", {}).get("derived")
                 if isinstance(contract.get("provenance"), dict) else None
             ),
+            # Fix 8 (bundle honesty, 2026-08-19): "applied" or "skipped
+            # -- {n} non-quad faces" -- see _render_subdivision_note's
+            # own docstring. Computed unconditionally alongside render
+            # above, regardless of whether the cut itself succeeded: the
+            # render mesh (and so this note) exists on every bundle,
+            # uncut ones included.
+            "render_subdivision": render_subdivision,
             "note": "staging and verification are null until their runs "
                     "exist; staging is also dropped, not embedded, when its "
                     "stage plan names cells this cut does not draw",
@@ -979,9 +1093,27 @@ def build_bundle(
     # refused it, far below a real cut's own cost. Simplest honest choice:
     # never cache it, always recompute it fresh.
     if uncut_reason is None:
-        target = bundle_path(slug, material, pattern, size, thickness)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(document), encoding="utf-8")
+        # Fix 9 (bundle honesty, 2026-08-19): re-check build_generation
+        # (captured at the top of this call, before the cut) against the
+        # CURRENT generation, under the same lock clear_cut_memo bumps it
+        # under. A mismatch means a re-upload invalidated the export at
+        # some point during this build -- app._invalidate_studio_cache's
+        # own clear_cut_memo() call, the same one _cut_for's own joiners
+        # already respect (see its docstring's "a clear that ran while
+        # this cut was being built" comment) -- so this document was
+        # built from geometry that may no longer be current. The caller
+        # still gets it (served uncached, exactly as an uncut bundle
+        # already is above), but it is never written to bundle_path: a
+        # stale document sitting at that path would otherwise be served
+        # to every LATER caller by load_or_build_bundle's own cache hit,
+        # not just handed once to the caller who happened to trigger this
+        # build.
+        with _cut_memo_lock:
+            stale_build = build_generation != _cut_memo_generation
+        if not stale_build:
+            target = bundle_path(slug, material, pattern, size, thickness)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(document), encoding="utf-8")
     return document
 
 

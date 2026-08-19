@@ -28,6 +28,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Sequence, Tuple
 
+import refusals
 import tessellation
 
 TOL = tessellation.TOL
@@ -53,7 +54,10 @@ def extract_loops(faces: Sequence[Sequence[int]]) -> List[List[int]]:
             users[key] = users.get(key, 0) + 1
     edges = [key for key, used in users.items() if used == 1]
     if not edges:
-        raise ValueError("this mesh has no boundary, so it has no rim to fit")
+        # Curated refusal (fix batch, bundle honesty, 2026-08-19): see
+        # refusals.PlanRefused's own docstring. Message unchanged.
+        raise refusals.PlanRefused(
+            "this mesh has no boundary, so it has no rim to fit")
 
     neighbours: Dict[int, List[int]] = {}
     for a, b in edges:
@@ -61,7 +65,10 @@ def extract_loops(faces: Sequence[Sequence[int]]) -> List[List[int]]:
         neighbours.setdefault(b, []).append(a)
     for vertex, found in neighbours.items():
         if len(found) != 2:
-            raise ValueError(
+            # Curated refusal (fix batch, bundle honesty, 2026-08-19):
+            # see refusals.PlanRefused's own docstring. Message
+            # unchanged.
+            raise refusals.PlanRefused(
                 "boundary vertex {} has {} boundary neighbours, not 2; the "
                 "rim branches here".format(vertex, len(found))
             )
@@ -179,7 +186,9 @@ def classify(
             outer_index = i
             break
     if outer_index is None:
-        raise ValueError(
+        # Curated refusal (fix batch, bundle honesty, 2026-08-19): see
+        # refusals.PlanRefused's own docstring. Message unchanged.
+        raise refusals.PlanRefused(
             "the plan has {} boundary loops but no single loop contains "
             "the others; this surface has no outer rim to course "
             "from.".format(len(loops))
@@ -189,7 +198,10 @@ def classify(
         for j in range(i + 1, len(loops)):
             point = _overlap_point(loops[i], loops[j], vertices)
             if point is not None:
-                raise ValueError(
+                # Curated refusal (fix batch, bundle honesty, 2026-08-19):
+                # see refusals.PlanRefused's own docstring. Message
+                # unchanged.
+                raise refusals.PlanRefused(
                     "boundary loops overlap in plan near ({:.2f}, {:.2f}); "
                     "an overhanging surface has no single-height plan to "
                     "cut.".format(point[0], point[1])
@@ -201,7 +213,10 @@ def classify(
     for hole in hole_rings:
         point = _self_crossing_point(hole, vertices)
         if point is not None:
-            raise ValueError(
+            # Curated refusal (fix batch, bundle honesty, 2026-08-19):
+            # see refusals.PlanRefused's own docstring. Message
+            # unchanged.
+            raise refusals.PlanRefused(
                 "an opening's boundary crosses itself in plan near "
                 "({:.2f}, {:.2f}); this opening cannot be trimmed "
                 "to.".format(point[0], point[1])

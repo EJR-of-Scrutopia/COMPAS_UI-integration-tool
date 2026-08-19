@@ -21,13 +21,22 @@ REPO = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture(autouse=True)
-def _clear_cut_memo():
-    """Every studio test starts and ends with an empty in-process cut memo.
+def _reset_studio_state():
+    """Every studio test starts and ends with a clean slate: an empty
+    in-process cut memo, no in-flight build holders, no interactive
+    registrations.
 
-    bundle._cut_memo is a process global keyed only on (export_name,
-    pattern, size), so a cut memoised by one test leaks into the next one
-    that happens to reuse the same key against its own tmp_path upload
-    dir. Same sys.path dance test_bundle.py's own studio() helper does,
+    bundle._cut_memo, bundle._cut_inflight and bundle._interactive_live
+    are all process globals keyed only on (export_name, pattern, size) or
+    on export name alone, so anything one test leaves in any of them
+    leaks into the next one that happens to reuse the same key against
+    its own tmp_path upload dir. Fix 10 (bundle honesty, 2026-08-19):
+    bundle.reset_studio_state() clears all three together -- see its own
+    docstring for why this is a SEPARATE, test-only function rather than
+    an extension of bundle.clear_cut_memo() itself, which stays exactly
+    as narrow as it always was because it also runs from a live path
+    (app._invalidate_studio_cache, on every real export re-upload).
+    Same sys.path dance test_bundle.py's own studio() helper does,
     tolerating ImportError so a suite run without the studio package on
     the path (or without its dependencies) still collects.
     """
@@ -40,6 +49,6 @@ def _clear_cut_memo():
     except ImportError:
         yield
         return
-    bundle.clear_cut_memo()
+    bundle.reset_studio_state()
     yield
-    bundle.clear_cut_memo()
+    bundle.reset_studio_state()

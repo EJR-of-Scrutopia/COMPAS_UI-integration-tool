@@ -26,6 +26,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import cutting
 import domain as domain_module
 import openings
+import refusals
 import tessellation
 
 TWO_PI = 2.0 * math.pi
@@ -531,6 +532,20 @@ def generate(
 
     builder = GENERATORS.get(pattern)
     if builder is None:
+        # NOT retyped to refusals.PlanRefused (fix batch, bundle honesty,
+        # 2026-08-19; classification decision, task-2-report.md): these
+        # two messages are about the ARGUMENT, not the geometry -- there
+        # is no domain, no plan, nothing "this geometry cannot be cut
+        # politely" about a caller naming a pattern that does not exist
+        # (a typo) or exists only on the roadmap (PLANNED). app._validate
+        # already rejects both with its own 400 before build_bundle is
+        # ever reached over the real API (bench/studio/app.py:108-113),
+        # so a plain ValueError reaching here at all means a DIRECT
+        # caller (bundle.py, staging.py, a test) misused the function
+        # signature -- API misuse, not a refusal on valid geometry, and
+        # it must keep propagating as the bug it is rather than being
+        # caught by bundle.build_tessellation_for's PlanRefused-only
+        # catch and reported as an honest uncut bundle.
         planned = PLANNED.get(pattern)
         if planned is not None:
             raise ValueError(
@@ -545,7 +560,9 @@ def generate(
         )
     if not domain["star_shaped"]:
         failure = domain["failure"]
-        raise ValueError(
+        # Curated refusal (fix batch, bundle honesty, 2026-08-19): see
+        # refusals.PlanRefused's own docstring. Message unchanged.
+        raise refusals.PlanRefused(
             "this plan is not star shaped about its axis (the rim turns back "
             "on itself at vertex {}, {} times, {:.2f} degrees of backward "
             "turn total), so no polar pattern can cover it. Author the "
@@ -560,7 +577,9 @@ def generate(
     # openings is exactly the behaviour those callers already pin.
     holes = domain.get("holes", [])
     if holes and pattern == "monolithic-bands":
-        raise ValueError(
+        # Curated refusal (fix batch, bundle honesty, 2026-08-19): see
+        # refusals.PlanRefused's own docstring. Message unchanged.
+        raise refusals.PlanRefused(
             "sprayed bands cannot yet cross openings; cut a jointed "
             "pattern or author the tessellation in Grasshopper."
         )

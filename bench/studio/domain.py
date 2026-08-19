@@ -30,6 +30,7 @@ import math
 from typing import Dict, List, Sequence
 
 import openings
+import refusals
 import tessellation
 
 TWO_PI = 2.0 * math.pi
@@ -72,7 +73,21 @@ WOBBLE_TOLERANCE = math.radians(5.0)
 
 
 def boundary_ring(faces: Sequence[Sequence[int]]) -> List[int]:
-    """The ordered vertex loop around the mesh, from its singly used edges."""
+    """The ordered vertex loop around the mesh, from its singly used edges.
+
+    Superseded in the production cutting path by openings.extract_loops
+    (multi-loop, 2026-08-19): plan_domain below calls that instead, so
+    this function's own three raises are never reached from a real cut
+    any more, only from tests that call it directly (test_domain.py,
+    test_openings.py). Left as plain ValueError rather than retyped to
+    refusals.PlanRefused (fix batch, bundle honesty, 2026-08-19): a
+    curated-refusal TYPE only matters at the one place it is read
+    (bundle.build_tessellation_for's own try/except), and this function
+    sits nowhere on that path -- retyping a dead branch would only blur
+    which refusals are live engine constraints (openings.extract_loops'
+    own no-boundary and branch-vertex messages, verbatim the same text)
+    and which is retired scaffolding kept for its own unit tests.
+    """
 
     users: Dict[tuple, int] = {}
     for face in faces:
@@ -206,7 +221,12 @@ def plan_domain(
     for hole in holes:
         hole_loop = hole["loop"]
         if tessellation.point_in_ring(axis, list(range(len(hole_loop))), hole_loop):
-            raise ValueError(
+            # Curated refusal (fix batch, bundle honesty, 2026-08-19): see
+            # refusals.PlanRefused's own docstring. Message unchanged --
+            # every existing pin on this text is a pytest.raises(
+            # ValueError, ...) or a plain `except ValueError`, both of
+            # which still match a ValueError subclass.
+            raise refusals.PlanRefused(
                 "the plan's axis falls inside an opening, so the polar "
                 "pattern has no crown to close on. Author the "
                 "tessellation in Grasshopper and import it "

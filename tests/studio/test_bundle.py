@@ -1357,3 +1357,214 @@ def test_a_joiner_recomputes_after_a_reupload_clears_the_memo_mid_build(
         "mixed document built from the joiner's new mesh and the "
         "builder's stale, pre-clear cut"
     )
+
+
+# --- Bundle honesty (fix batch, 2026-08-19) --------------------------------
+
+
+def test_a_plain_valueerror_from_generate_is_not_swallowed_as_a_refusal(
+    tmp_path, monkeypatch
+):
+    """Fix 7: build_tessellation_for's generated-cut catch used to be a
+    blanket `except ValueError`, so ANY ValueError out of generators.
+    generate -- not just a curated refusal on valid geometry -- was
+    reported as bundle.CutRefused and shipped as a polite 200 uncut
+    bundle (see bundle.CutRefused's own docstring and refusals.
+    PlanRefused's). A genuine bug in the engine must propagate instead of
+    reading as "this plan cannot be cut": narrowing the catch to
+    refusals.PlanRefused is what tells the two apart, since every CURATED
+    refusal site now raises that subclass and a plain ValueError does
+    not.
+    """
+    bundle, upload, studies = fake_export(tmp_path, monkeypatch)
+
+    def boom(pattern, domain, size, checkpoint=None):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(bundle.generators, "generate", boom)
+
+    with pytest.raises(ValueError, match="boom") as excinfo:
+        bundle.build_bundle("Tiny", "concrete", "bonded-courses", 0.9)
+    assert not isinstance(excinfo.value, bundle.CutRefused), (
+        "a plain ValueError bug must not be reported as an engine refusal"
+    )
+
+
+def mixed_quad_tri_contract():
+    """tiny_contract(), with face 0 ([0, 1, 4, 3]) split into two
+    triangles along its own diagonal (vertex 0 to vertex 4): the same
+    outer rim (the split only adds an interior edge, shared by exactly
+    the two new triangles, so no boundary edge changes), the same
+    2x2-grid structure, but two of the five faces are now triangles
+    instead of one being a quad. Reusing tiny_contract's own
+    well-understood square rim, rather than inventing new geometry,
+    keeps the only thing under test the face-shape mix itself: this must
+    still cut cleanly (uncut_reason is None), only the RENDER mesh's own
+    subdivision pass is affected.
+    """
+    contract = tiny_contract()
+    faces = contract["formGraph"]["faces"]
+    assert faces[0]["vertices"] == [0, 1, 4, 3]
+    faces[0] = {"id": 0, "vertices": [0, 1, 4]}
+    faces.insert(1, {"id": 4, "vertices": [0, 4, 3]})
+    return contract
+
+
+def test_render_subdivision_discloses_skipped_non_quad_faces(tmp_path, monkeypatch):
+    """Fix 8: _render_mesh silently drops subdivision for the WHOLE
+    render mesh the moment any single analysis face is non-quad (see its
+    own docstring) -- correct behaviour, since a Catmull-Clark pass has
+    no honest triangle analogue, but reading identically to an ordinary
+    quad export that simply had nothing more to subdivide. provenance.
+    render_subdivision must say which happened and, when skipped, how
+    many faces forced it.
+    """
+    bundle, upload, studies = fake_export(tmp_path, monkeypatch)
+    (upload / "Tiny-contract.json").write_text(
+        json.dumps(mixed_quad_tri_contract()), encoding="utf-8"
+    )
+    document = bundle.build_bundle("Tiny", "concrete", "bonded-courses", 0.9)
+    assert document["uncut_reason"] is None, (
+        "the mixed-face fixture must still cut cleanly; only render "
+        "subdivision is under test here"
+    )
+    assert document["provenance"]["render_subdivision"] == (
+        "skipped -- 2 non-quad faces"
+    )
+
+
+def test_render_subdivision_applied_on_an_all_quad_mesh(tmp_path, monkeypatch):
+    """Fix 8, the other half: an ordinary all-quad export (tiny_contract,
+    unmodified) says "applied", not merely absent."""
+    bundle, _, _ = fake_export(tmp_path, monkeypatch)
+    document = bundle.build_bundle("Tiny", "concrete", "bonded-courses", 0.9)
+    assert document["provenance"]["render_subdivision"] == "applied"
+
+
+def test_a_stale_build_after_a_mid_build_reupload_never_writes_to_disk(
+    tmp_path, monkeypatch
+):
+    """Fix 9: build_bundle's disk write was not generation-guarded -- a
+    build that survived a mid-build re-upload (bundle.clear_cut_memo, the
+    same call app._invalidate_studio_cache makes on every export
+    re-upload) could still write its STALE document to bundle_path AFTER
+    the invalidation ran (the cut cancellation final review's own
+    rider). Single-threaded and deterministic via an Event handshake (the
+    fake segment_pieces blocks until release, proof the build is
+    genuinely mid-cut when the clear fires): no second thread is needed
+    here, since the defect is entirely about what ONE stale build does at
+    its own write site, not about who else joins it -- see
+    test_a_joiner_recomputes_after_a_reupload_clears_the_memo_mid_build
+    above for that two-caller shape, which this test's fix also makes
+    properly deterministic instead of relying on which of two writers
+    happens to finish last.
+    """
+    import threading
+
+    bundle, upload, studies = fake_export(tmp_path, monkeypatch)
+    pieces = _studio_module("pieces")
+
+    started = threading.Event()
+    release = threading.Event()
+    real_segment_pieces = pieces.segment_pieces
+
+    def fake_segment_pieces(tess, surface, support_points, checkpoint=None):
+        started.set()
+        assert release.wait(timeout=5), "release was never set"
+        return real_segment_pieces(tess, surface, support_points, checkpoint=checkpoint)
+
+    monkeypatch.setattr(pieces, "segment_pieces", fake_segment_pieces)
+
+    result = {}
+
+    def call_builder():
+        result["document"] = bundle.build_bundle(
+            "Tiny", "concrete", "bonded-courses", 0.9)
+
+    t = threading.Thread(target=call_builder)
+    t.start()
+    assert started.wait(timeout=5), "the build never started"
+
+    # A re-upload while the build is genuinely mid-cut: the same
+    # clear_cut_memo() app._invalidate_studio_cache calls on every real
+    # export re-upload.
+    bundle.clear_cut_memo()
+
+    release.set()
+    t.join(timeout=5)
+    assert not t.is_alive(), "the build never finished"
+
+    assert result["document"]["pieces"], (
+        "the caller must still get a real result -- served uncached, "
+        "not withheld"
+    )
+    target = bundle.bundle_path("tiny", "concrete", "bonded-courses", 0.9, 0.2)
+    assert not target.exists(), (
+        "a build whose captured generation went stale before its own "
+        "write must never write its document to disk"
+    )
+
+
+def test_a_normal_build_with_no_intervening_clear_still_writes_to_disk(
+    tmp_path, monkeypatch
+):
+    """Fix 9, the control: the generation re-check must not turn every
+    build uncached -- only one whose captured generation has actually
+    gone stale by the time it reaches the write."""
+    bundle, _, _ = fake_export(tmp_path, monkeypatch)
+    bundle.build_bundle("Tiny", "concrete", "bonded-courses", 0.9)
+    target = bundle.bundle_path("tiny", "concrete", "bonded-courses", 0.9, 0.2)
+    assert target.exists(), "an ordinary build must still write its cache"
+
+
+def test_reset_studio_state_clears_the_interactive_and_inflight_registries(
+    tmp_path, monkeypatch
+):
+    """Fix 10: conftest's autouse fixture clears bundle._cut_memo between
+    tests (clear_cut_memo) but never touched _cut_inflight or
+    _interactive_live, so a registration one test leaves behind can
+    influence a superseded() decision in a LATER test that happens to
+    reuse the same export name -- a real leak clear_cut_memo alone cannot
+    see, since it was never asked to look at either registry (see
+    clear_cut_memo's own docstring: it only ever touched the memo and the
+    generation counter).
+
+    Demonstrated directly rather than across two separate test functions:
+    pytest's own autouse fixture already runs the reset around every
+    test, so there is no way to observe a REAL cross-test leak from
+    inside a single test body once the fix lands. A registration is made
+    here exactly the way an interactive bundle GET makes one
+    (bundle.register_interactive) and an in-flight holder is planted
+    exactly the way a build that never reached its own cleanup would
+    leave one (a crashed worker, or a test that asserted before its own
+    build's finally block ran) -- the shape both registries are in when a
+    real leak happens. Before the reset, both are still live; after
+    bundle.reset_studio_state(), neither is, the same "every test starts
+    clean" promise clear_cut_memo already keeps for the memo.
+    """
+    bundle, _, _ = fake_export(tmp_path, monkeypatch)
+
+    leaked_key = ("Leaked", "bonded-courses", 0.9)
+    stale_token = bundle.register_interactive("Leaked", leaked_key)
+    bundle._cut_inflight[leaked_key] = object()
+
+    # The leaked registration is live: a genuinely OLDER token for the
+    # SAME export, naming a DIFFERENT key, reads as superseded by it --
+    # exactly what a real interactive caller from a previous, now-
+    # finished request would see if this state leaked into its test.
+    assert bundle.superseded(
+        "Leaked", stale_token - 1, ("Leaked", "monolithic-bands", 1.2)
+    ), "the leaked registration must be observably live before the reset"
+    assert leaked_key in bundle._cut_inflight
+
+    bundle.reset_studio_state()
+
+    # After the reset, nothing is registered for "Leaked" at all: the
+    # same query now reads as NOT superseded, because there is no live
+    # registration left to compare against (superseded()'s own
+    # "current is None" branch) -- and the planted holder is gone too.
+    assert not bundle.superseded(
+        "Leaked", stale_token - 1, ("Leaked", "monolithic-bands", 1.2)
+    ), "the reset must remove the leaked registration's influence"
+    assert "Leaked" not in bundle._interactive_live
+    assert leaked_key not in bundle._cut_inflight
