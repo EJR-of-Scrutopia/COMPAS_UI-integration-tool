@@ -1145,15 +1145,21 @@ def build_bundle(
         # slow sitting behind it. This hoist is a strict, large
         # improvement regardless (the exposed window shrinks from the
         # whole build -- seconds, on a real cut -- to a single mkdir plus
-        # write), and what remains is self-healing: the NEXT request's own
-        # freshness gate (load_or_build_bundle's REQUIRED_BUNDLE_KEYS /
-        # REQUIRED_BUNDLE_VALUES check) rebuilds anything this residual
-        # window leaves stale rather than serving it forever, the same
-        # recovery path a genuinely torn or corrupted write already
-        # depends on. Closing it fully would need a SECOND generation
-        # check after the write, unlinking the file on a second mismatch --
-        # deferred as not worth the added complexity for a window this
-        # small following this change.
+        # write). What remains is NOT self-healing, and an earlier
+        # version of this comment wrongly said it was (corrected by the
+        # 2026-08-19 fix-batch final review): the freshness gate
+        # (REQUIRED_BUNDLE_KEYS / REQUIRED_BUNDLE_VALUES) checks key
+        # presence and pinned values, never geometry, so a stale document
+        # written inside this window is served as a cache hit until the
+        # NEXT re-upload's file sweep clears it; and a torn write would
+        # 400 on every read until then (_read_optional has no JSON
+        # guard). Accepted anyway: the window is milliseconds wide, it
+        # only opens when a re-upload lands inside it, and the same
+        # user's next re-upload is exactly the event that sweeps it.
+        # Closing it fully would need a SECOND generation check after
+        # the write, unlinking the file on a second mismatch -- deferred
+        # as not worth the added complexity for a window this small
+        # following this change.
         payload = json.dumps(document)
         with _cut_memo_lock:
             stale_build = build_generation != _cut_memo_generation
