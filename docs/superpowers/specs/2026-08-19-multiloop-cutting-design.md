@@ -265,6 +265,24 @@ New coverage:
 - Client-side surfacing of the openings block beyond the generic data
   panel: YAGNI until Param asks.
 
+## Retrospective corrections
+
+(a) THE BYTE-IDENTITY BAR, AS MEASURED (Task 3 review, 2026-08-19).
+"The zero-openings path is byte-identical" is true of every real
+export (Trial 2, Standard TNA, the saddle: identical rings,
+bit-identical cuts, and the committed Trial-2 pin passes unmodified)
+but not of every constructible mesh: plan_domain now walks the rim
+with openings.extract_loops' deterministic rule (smaller-id neighbour
+first) where boundary_ring inherited its direction from face-scan
+order, so a single-loop mesh whose old walk happened to run the other
+way emits cut coordinates that differ at float epsilon (measured
+3.29e-14 across 480 jittered clockwise fixtures, 0 of 480 structural
+differences). This drift is unavoidable under this spec's own reroute
+of plan_domain and is accepted; the bar, stated honestly, is: real
+exports bit-identical, arbitrary meshes structurally identical with
+coordinate agreement at float epsilon, and the Trial-2 pin is the
+permanent proof of the former.
+
 ## Constraints
 
 - Pure stdlib in bench/studio (test_studio_guard); no shapely, no
