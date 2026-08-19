@@ -176,6 +176,185 @@ def test_classify_refuses_a_self_crossing_opening():
         )
 
 
+def _area(ring):
+    """Shoelace area of a plan ring, written locally per the task brief
+    (three lines, no import needed) rather than pulled from tessellation.
+    """
+
+    total = 0.0
+    n = len(ring)
+    for i in range(n):
+        x1, y1 = ring[i][0], ring[i][1]
+        x2, y2 = ring[(i + 1) % n][0], ring[(i + 1) % n][1]
+        total += x1 * y2 - x2 * y1
+    return abs(total) / 2.0
+
+
+def _has_point(ring, x, y, tol=1e-9):
+    return any(abs(p[0] - x) < tol and abs(p[1] - y) < tol for p in ring)
+
+
+def _point_set(ring, tol=9):
+    return {(round(p[0], tol), round(p[1], tol)) for p in ring}
+
+
+def _square(x0, y0, x1, y1):
+    """A CCW unit-orientation square/rectangle outline, corners as floats."""
+
+    return [[float(x0), float(y0)], [float(x1), float(y0)],
+            [float(x1), float(y1)], [float(x0), float(y1)]]
+
+
+def test_no_overlap_leaves_the_cell_untouched():
+    o = studio()
+    cell = {"key": "c0p0", "course": 0, "outline": _square(0, 0, 4, 4), "holes": []}
+    hole = _square(10, 10, 12, 12)
+    cells, report = o.clip_cells([cell], [hole], 1.0)
+    assert cells == [cell]
+    assert report == {
+        "openings": 1,
+        "cells_in_openings": 0,
+        "cells_clipped": [],
+        "opening_slivers": [],
+        "opening_clip_failures": [],
+    }
+
+
+def test_a_bite_trims_onto_the_hole_boundary():
+    o = studio()
+    cell = {"key": "c0p0", "course": 0, "outline": _square(0, 0, 4, 4), "holes": []}
+    hole = _square(3, 1, 5, 3)
+    cells, report = o.clip_cells([cell], [hole], 1.0)
+    assert len(cells) == 1
+    result = cells[0]
+    assert result["key"] == "c0p0"
+    assert result["course"] == 0
+    outline = result["outline"]
+    # the trimmed edge runs along the hole's true boundary, so its corners
+    # (3, 1) and (3, 3) are on the surviving outline.
+    assert _has_point(outline, 3.0, 1.0)
+    assert _has_point(outline, 3.0, 3.0)
+    assert abs(_area(outline) - (16.0 - 2.0)) < 1e-9
+    assert result["holes"] == []
+    assert report["cells_clipped"] == ["c0p0"]
+    assert report["cells_in_openings"] == 0
+    assert report["opening_slivers"] == []
+    assert report["opening_clip_failures"] == []
+
+
+def test_a_crossing_hole_splits_into_two_components():
+    o = studio()
+    cell = {"key": "c0p0", "course": 0, "outline": _square(0, 0, 4, 4), "holes": []}
+    hole = _square(-1, 1.5, 5, 2.5)
+    cells, report = o.clip_cells([cell], [hole], 1.0)
+    assert len(cells) == 2
+    keys = sorted(c["key"] for c in cells)
+    assert keys == ["c0p0", "c0p0b"]
+    for c in cells:
+        assert c["course"] == 0
+        assert c["holes"] == []
+        # both halves are exactly 4 wide by 1.5 tall: the strip is a tie.
+        assert abs(_area(c["outline"]) - 6.0) < 1e-9
+    # Controller ruling (task-2, ambiguity ledger): when split components
+    # tie exactly on area, the base key goes to whichever ring the
+    # stitcher closes first, not to a spatial convention (e.g. "topmost").
+    # For this fixture the stitcher walks the subject's own edges before
+    # the hole's reversed edges, and the subject ring beginning at its
+    # first vertex (0, 0) walks into the BOTTOM strip first, so "c0p0" is
+    # the bottom rectangle (y in [0, 1.5]) and "c0p0b" is the top one (y
+    # in [2.5, 4]). Pinned here rather than left to sort-key luck.
+    by_key = {c["key"]: c["outline"] for c in cells}
+    assert max(p[1] for p in by_key["c0p0"]) <= 1.5 + 1e-9
+    assert min(p[1] for p in by_key["c0p0b"]) >= 2.5 - 1e-9
+    assert report["cells_clipped"] == ["c0p0"]
+    assert report["cells_in_openings"] == 0
+    assert report["opening_slivers"] == []
+    assert report["opening_clip_failures"] == []
+
+
+def test_a_swallowed_hole_becomes_an_interior_ring():
+    o = studio()
+    cell = {"key": "c0p0", "course": 0, "outline": _square(0, 0, 4, 4), "holes": []}
+    hole = _square(1, 1, 3, 3)
+    cells, report = o.clip_cells([cell], [hole], 1.0)
+    assert len(cells) == 1
+    result = cells[0]
+    assert result["key"] == "c0p0"
+    assert result["outline"] == cell["outline"]
+    assert len(result["holes"]) == 1
+    hole_ring = result["holes"][0]
+    # same square, reversed winding; point-set match rather than pinning
+    # the stitcher's arbitrary rotation/start-vertex of the ring.
+    assert _point_set(hole_ring) == _point_set(hole)
+    assert abs(_area(result["outline"]) - _area(hole_ring) - 12.0) < 1e-9
+    assert report["cells_clipped"] == ["c0p0"]
+    assert report["cells_in_openings"] == 0
+    assert report["opening_slivers"] == []
+    assert report["opening_clip_failures"] == []
+
+
+def test_a_cell_inside_the_hole_is_dropped():
+    o = studio()
+    cell = {"key": "c0p0", "course": 0, "outline": _square(1, 1, 2, 2), "holes": []}
+    hole = _square(0, 0, 4, 4)
+    cells, report = o.clip_cells([cell], [hole], 1.0)
+    assert cells == []
+    assert report["cells_in_openings"] == 1
+    assert report["cells_clipped"] == []
+    assert report["opening_slivers"] == []
+    assert report["opening_clip_failures"] == []
+
+
+def test_a_sliver_component_is_dropped_and_named():
+    o = studio()
+    cell = {"key": "c0p0", "course": 0, "outline": _square(0, 0, 4, 4), "holes": []}
+    hole = _square(-1, -1, 3.999, 5)
+    cells, report = o.clip_cells([cell], [hole], 1.0)
+    assert cells == []
+    assert report["opening_slivers"] == ["c0p0"]
+    assert report["cells_clipped"] == []
+    assert report["cells_in_openings"] == 0
+    assert report["opening_clip_failures"] == []
+
+
+def test_a_collinear_tangency_is_dropped_and_named():
+    o = studio()
+    cell = {"key": "c0p0", "course": 0, "outline": _square(0, 0, 4, 4), "holes": []}
+    hole = _square(4, 1, 6, 3)
+    cells, report = o.clip_cells([cell], [hole], 1.0)
+    assert cells == []
+    assert report["opening_clip_failures"] == ["c0p0"]
+    assert report["cells_clipped"] == []
+    assert report["cells_in_openings"] == 0
+    assert report["opening_slivers"] == []
+
+
+def test_two_holes_apply_sequentially():
+    o = studio()
+    cell = {"key": "c0p0", "course": 0, "outline": _square(0, 0, 8, 4), "holes": []}
+    swallowed = _square(1, 1, 3, 3)
+    biting = _square(7, -1, 9, 5)
+    cells, report = o.clip_cells([cell], [swallowed, biting], 1.0)
+    assert len(cells) == 1
+    result = cells[0]
+    assert result["key"] == "c0p0"
+    outline = result["outline"]
+    # trimmed onto the true right-hand boundary at x = 7
+    assert max(p[0] for p in outline) <= 7.0 + 1e-9
+    assert _has_point(outline, 7.0, 0.0)
+    assert _has_point(outline, 7.0, 4.0)
+    # the swallowed opening survives as an interior ring
+    assert len(result["holes"]) == 1
+    assert _point_set(result["holes"][0]) == _point_set(swallowed)
+    region_area = _area(outline) - _area(result["holes"][0])
+    assert abs(region_area - 24.0) < 1e-9
+    assert report["openings"] == 2
+    assert report["cells_clipped"] == ["c0p0"]
+    assert report["cells_in_openings"] == 0
+    assert report["opening_slivers"] == []
+    assert report["opening_clip_failures"] == []
+
+
 def test_classify_refuses_overlapping_loops():
     o = studio()
     # An outer square containing two 2x2 holes that overlap each other in
