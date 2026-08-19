@@ -40,6 +40,18 @@ def _contained(directory: Path, name: str) -> bool:
         return False
 
 
+def _known_export_names(directory: Path) -> set:
+    """Every export name with at least one uploaded half sitting in
+    directory, read live off the filenames themselves -- the same,
+    single record of "what exports exist" geometry.available_exports
+    already treats as authoritative (fix 6, 2026-08-19 fix batch)."""
+    names = set()
+    for suffix in ("-contract.json", "-compas.json", "-tessellation.json"):
+        for path in directory.glob("*" + suffix):
+            names.add(path.name[: -len(suffix)])
+    return names
+
+
 RUNS: dict = {}
 RUNS_LOCK = threading.Lock()
 
@@ -57,20 +69,31 @@ def _ffmpeg_present() -> bool:
 
 
 def _invalidate_studio_cache(slug: str) -> None:
-    """Drop every cached bundle/staging file for a study after re-import.
+    """Drop every cached bundle/staging file, and any stale verification,
+    for a study after re-import.
 
     A changed export must never keep serving a stale bundle built from the
-    old geometry. Frames and recording.mp4 are untouched: they belong to a
+    old geometry, or old fea-verification.json numbers measured against
+    that old geometry -- SILENTLY WRONG, not merely stale (fix 5, 2026-08-19
+    fix batch). Frames and recording.mp4 are untouched: they belong to a
     recording, not to a geometry snapshot.
+
+    fea-verification.json is the only per-slug verification artifact
+    anything under bench/studio writes today (bundle.py's own
+    _read_optional call site, mirrored by bench/demo/
+    09_structural_verification.py's write) -- there is no sibling to also
+    cover; if one is ever added, it belongs in this same pass.
     """
 
     bundle.clear_cut_memo()
     studio_dir = bundle.STUDIES_DIR / slug / "studio"
-    if not studio_dir.is_dir():
-        return
-    for pattern in ("bundle-*.json", "staging-*.json"):
-        for stale in studio_dir.glob(pattern):
-            stale.unlink()
+    if studio_dir.is_dir():
+        for pattern in ("bundle-*.json", "staging-*.json"):
+            for stale in studio_dir.glob(pattern):
+                stale.unlink()
+    verification = bundle.STUDIES_DIR / slug / "fea-verification.json"
+    if verification.is_file():
+        verification.unlink()
 
 
 def _validate(export: str, material: str, pattern: str, size: float,
@@ -318,12 +341,36 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
 
     @app.put("/api/uploads/exports/{name}/{kind}")
     async def upload_export(name: str, kind: str, request: Request):
-        if "/" in name or "\\" in name or ".." in name:
+        if "/" in name or "\\" in name or ".." in name or ":" in name:
             raise HTTPException(400, "bad export name")
         if kind not in ("contract", "compas", "tessellation"):
             raise HTTPException(
                 400, "kind must be 'contract', 'compas' or 'tessellation'")
+        # Fix 2 (2026-08-19 fix batch): the character guard above never
+        # caught a Windows drive-relative name (":" was missing from it
+        # until this task), and this route never ran _contained at all --
+        # the same gap _contained's own docstring names, already closed on
+        # the hdri and columns upload routes. Checked against the actual
+        # filename this upload will write.
+        if not _contained(bundle.UPLOAD_DIR, "{}-{}.json".format(name, kind)):
+            raise HTTPException(400, "bad export name")
         slug = geometry.slugify(name)
+        # Fix 6: slugify("Foo Bar") == slugify("foo-bar") -- two DIFFERENT
+        # export names sharing a slug would share one bundle/staging/
+        # verification path, silently mixing data. slugify itself is
+        # untouched (existing study dirs keep their identity); a NEW name
+        # colliding with a DIFFERENT existing one is refused, naming both.
+        # bundle.UPLOAD_DIR's own filenames are the honest source for who
+        # currently owns a slug: the same place geometry.available_exports
+        # and this route's own write already treat as the one record of
+        # "what exports exist", live and never stale.
+        for other_name in _known_export_names(bundle.UPLOAD_DIR):
+            if other_name != name and geometry.slugify(other_name) == slug:
+                raise HTTPException(
+                    400,
+                    "export {!r} and {!r} both slugify to {!r}; they "
+                    "would share one study -- rename one of them".format(
+                        name, other_name, slug))
         with RUNS_LOCK:
             for run in RUNS.values():
                 if run["slug"] == slug and run["state"] in ("queued", "running"):
@@ -333,6 +380,8 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
             document = json.loads(body)
         except json.JSONDecodeError:
             raise HTTPException(400, "not valid JSON")
+        derived_contract = None
+        derivation_error = None
         if kind == "contract":
             try:
                 geometry.mesh_arrays(document)
@@ -344,6 +393,26 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
             if not isinstance(document, dict) or "thrustMesh" not in document:
                 raise HTTPException(
                     400, "a compas export must contain a thrustMesh key")
+            # Fix 1 / Fix 4: a null or non-finite coordinate is corrupt
+            # data, not merely "no analysis yet" -- this check runs BEFORE
+            # anything is written below, so the whole upload is refused and
+            # nothing is left on disk (no stored compas without its
+            # invalidation having run, because nothing is stored at all).
+            # Every OTHER derive_contract failure (missing thrustMesh.data,
+            # a non-JSON string, a non-contiguous vertex range, a missing
+            # x/y/z key, ...) keeps P4's own soft-continue contract in the
+            # write step below: the compas file is still stored, only the
+            # derivation is skipped, named in the response
+            # (test_compas_upload_with_unreadable_thrust_mesh_stores_but_
+            # does_not_derive pins exactly this).
+            contract_path = bundle.UPLOAD_DIR / "{}-contract.json".format(name)
+            if not contract_path.is_file():
+                try:
+                    derived_contract = derive_contract.derive_contract(document)
+                except derive_contract.MalformedGeometryError as error:
+                    raise HTTPException(400, str(error))
+                except ValueError as error:
+                    derivation_error = str(error)
         else:
             # An authored cutting sidecar (the plugin Export component's
             # Tessellation format). Shape-checked here; the deep per-cell
@@ -390,23 +459,13 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
         # path and always overwrites unconditionally, so a real contract
         # uploaded later for the same name always wins outright, no
         # marker check needed on that side.
-        derived_contract = None
-        derivation_error = None
-        if kind == "compas":
-            contract_path = directory / "{}-contract.json".format(name)
-            if not contract_path.is_file():
-                try:
-                    derived_contract = derive_contract.derive_contract(document)
-                except ValueError as error:
-                    # Non-fatal to the compas upload itself (stored above,
-                    # same as before this task): a malformed thrustMesh
-                    # just means no study appears for this name yet,
-                    # exactly as if only the compas half had ever been
-                    # uploaded -- named here rather than silently dropped.
-                    derivation_error = str(error)
-                else:
-                    contract_path.write_text(
-                        json.dumps(derived_contract), encoding="utf-8")
+        #
+        # derived_contract/derivation_error were computed above, BEFORE
+        # this write, by the same call this comment used to describe here
+        # (fix 1 / fix 4 moved it earlier; see that block's own comment).
+        if kind == "compas" and derived_contract is not None:
+            (directory / "{}-contract.json".format(name)).write_text(
+                json.dumps(derived_contract), encoding="utf-8")
 
         _invalidate_studio_cache(slug)
         other_kind = "compas" if kind == "contract" else "contract"
@@ -523,8 +582,20 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
         # plain refreshes even after the HTML itself came back fresh
         # (2026-08-18, live: the import banner spoke a message the new
         # client no longer contains, twice).
-        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-        stamp = str(int((STATIC_DIR / "studio.js").stat().st_mtime))
+        # Guard before stat (fix 3, 2026-08-19 fix batch): stat() used to run
+        # on studio.js before anything checked it existed, so a missing
+        # static asset answered an opaque 500 naming nothing. Both files are
+        # named explicitly here, honestly, before either is touched.
+        index_path = STATIC_DIR / "index.html"
+        script_path = STATIC_DIR / "studio.js"
+        if not index_path.is_file():
+            raise HTTPException(
+                500, "the studio's index.html is missing from {}".format(STATIC_DIR))
+        if not script_path.is_file():
+            raise HTTPException(
+                500, "the studio's studio.js is missing from {}".format(STATIC_DIR))
+        html = index_path.read_text(encoding="utf-8")
+        stamp = str(int(script_path.stat().st_mtime))
         html = html.replace(
             "/static/studio.js?v=dev", "/static/studio.js?v=" + stamp)
         return HTMLResponse(html)

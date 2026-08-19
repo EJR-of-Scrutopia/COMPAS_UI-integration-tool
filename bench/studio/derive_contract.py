@@ -30,7 +30,28 @@ geometry.py, so the "studio never imports a solver stack" guard
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Dict, List, Mapping, Union
+
+
+class MalformedGeometryError(ValueError):
+    """A thrustMesh whose coordinates are corrupt -- null or non-finite --
+    as distinct from a plain ValueError for merely unreadable or
+    incomplete structure (no thrustMesh, no data block, a non-contiguous
+    vertex range, a missing x/y/z key, ...).
+
+    Fix batch (2026-08-19): app.py's compas upload route treats the two
+    differently. An INCOMPLETE mesh (P4's own design) means "no analysis
+    yet, but the geometry itself is still worth storing" and the upload
+    keeps going, derivation skipped, named in the response. Corrupt
+    coordinates mean there is no honest geometry to store at all -- a
+    null coordinate used to reach a bare float(None) TypeError past this
+    module's own ValueError contract, and a bare NaN/Infinity survived
+    silently into the derived file to 500 later at bundle serialisation
+    (Starlette's JSONResponse sets allow_nan=False) -- so this subclass
+    lets the upload route reject the whole request before anything is
+    written, while every other ValueError here keeps the softer path.
+    """
 
 # The exact rule (P4 brief: "state the exact rule and tolerance"): a vertex
 # counts as a support when BOTH hold --
@@ -112,13 +133,43 @@ def _mesh_vertices_and_faces(thrust_mesh: Mapping[str, Any]):
             )
         )
     vertices: List[Dict[str, float]] = []
+    non_finite_count = 0
     for i in vertex_ids:
         row = vertex[str(i)]
         if not isinstance(row, Mapping) or not all(k in row for k in ("x", "y", "z")):
             raise ValueError("thrustMesh vertex {} is missing x/y/z".format(i))
-        vertices.append({
-            "x": float(row["x"]), "y": float(row["y"]), "z": float(row["z"]),
-        })
+        coords: Dict[str, float] = {}
+        for axis in ("x", "y", "z"):
+            value = row[axis]
+            # A present-but-null coordinate used to hit float(None), a bare
+            # TypeError this module never raises anywhere else -- named here,
+            # as a ValueError, before it can escape (fix 1, 2026-08-19).
+            if value is None:
+                raise MalformedGeometryError(
+                    "thrustMesh has a null coordinate at vertex {} "
+                    "({})".format(i, axis)
+                )
+            try:
+                coords[axis] = float(value)
+            except (TypeError, ValueError):
+                raise MalformedGeometryError(
+                    "thrustMesh vertex {} has a non-numeric {} coordinate "
+                    "({!r})".format(i, axis, value)
+                )
+            # NaN/Infinity survive json.loads (Python's decoder accepts the
+            # tokens by default) and only broke later, at bundle
+            # serialisation -- counted across the whole mesh, not raised on
+            # the first one, so the message says how bad the file is
+            # (fix 4, 2026-08-19).
+            if not math.isfinite(coords[axis]):
+                non_finite_count += 1
+        vertices.append(coords)
+    if non_finite_count:
+        raise MalformedGeometryError(
+            "thrustMesh has {} non-finite coordinate value(s) (NaN or "
+            "Infinity); every vertex coordinate must be a finite "
+            "number".format(non_finite_count)
+        )
 
     face_ids = sorted(int(k) for k in face.keys())
     faces: List[List[int]] = []

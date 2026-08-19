@@ -210,3 +210,48 @@ def test_derive_contract_rejects_a_face_index_out_of_range():
     }
     with pytest.raises(ValueError, match="outside 0..0"):
         d.derive_contract(document)
+
+
+def test_derive_contract_rejects_a_null_coordinate_naming_the_vertex():
+    # Fix 1 (2026-08-19 fix batch): row["x"] present but null used to hit
+    # float(None), a bare TypeError that escaped derive_contract entirely
+    # (app.py's own call site only caught ValueError). A null coordinate
+    # must be named, as a ValueError, like every other malformed-geometry
+    # break this module already raises.
+    d = studio()
+    document = {
+        "thrustMesh": {
+            "data": {
+                "vertex": {
+                    "0": {"x": 0.0, "y": 0.0, "z": 0.0},
+                    "1": {"x": None, "y": 1.0, "z": 0.0},
+                    "2": {"x": 1.0, "y": 1.0, "z": 0.0},
+                },
+                "face": {"0": [0, 1, 2]},
+            }
+        }
+    }
+    with pytest.raises(d.MalformedGeometryError, match="vertex 1"):
+        d.derive_contract(document)
+
+
+def test_derive_contract_rejects_non_finite_coordinates_counting_them():
+    # Fix 4: a bare NaN/Infinity survives json.loads (Python's own decoder
+    # accepts the tokens by default) and only breaks later, at bundle
+    # serialisation (Starlette's JSONResponse sets allow_nan=False). Every
+    # offending value across the mesh is counted, not just the first.
+    d = studio()
+    document = {
+        "thrustMesh": {
+            "data": {
+                "vertex": {
+                    "0": {"x": 0.0, "y": 0.0, "z": 0.0},
+                    "1": {"x": float("nan"), "y": 1.0, "z": 0.0},
+                    "2": {"x": 1.0, "y": float("inf"), "z": 0.0},
+                },
+                "face": {"0": [0, 1, 2]},
+            }
+        }
+    }
+    with pytest.raises(d.MalformedGeometryError, match="2 non-finite"):
+        d.derive_contract(document)

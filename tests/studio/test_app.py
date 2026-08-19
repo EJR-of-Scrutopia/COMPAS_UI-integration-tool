@@ -1267,3 +1267,191 @@ def test_a_cache_hit_for_a_different_key_still_supersedes_an_in_flight_build(
         "the cache-hit request for key B must never call segment_pieces "
         "at all: {} call(s) after the fake was installed".format(call_count["n"])
     )
+
+
+def _pyramid_mesh():
+    document = _pyramid_compas_document()
+    return document, json.loads(document["thrustMesh"])
+
+
+def _pyramid_with_null_coordinate():
+    document, mesh = _pyramid_mesh()
+    mesh["data"]["vertex"]["0"]["x"] = None
+    document["thrustMesh"] = json.dumps(mesh)
+    return document
+
+
+def _pyramid_with_non_finite_coordinates():
+    document, mesh = _pyramid_mesh()
+    mesh["data"]["vertex"]["0"]["x"] = float("nan")
+    mesh["data"]["vertex"]["1"]["y"] = float("inf")
+    document["thrustMesh"] = json.dumps(mesh)
+    return document
+
+
+def test_compas_upload_with_a_null_coordinate_is_a_400_with_no_partial_state(
+    tmp_path, monkeypatch
+):
+    """Fix 1: derive_contract used to let a null coordinate's TypeError
+    escape past app.py's own `except ValueError`, answering an opaque 500
+    while the compas file had already been written and cache invalidation
+    never got to run. The malformed-geometry check now runs BEFORE
+    anything is persisted, so a null coordinate refuses the whole upload
+    honestly and leaves nothing on disk -- no stored compas without its
+    invalidation having run, because nothing is stored at all."""
+
+    client, _ = make_client(tmp_path, monkeypatch)
+    response = client.put(
+        "/api/uploads/exports/Null/compas",
+        content=json.dumps(_pyramid_with_null_coordinate()).encode(),
+    )
+    assert response.status_code == 400
+    assert "vertex" in response.json()["detail"]
+    assert not (tmp_path / "upload" / "Null-compas.json").is_file()
+    assert not (tmp_path / "upload" / "Null-contract.json").is_file()
+    exports = [s["export"] for s in client.get("/api/studies").json()["studies"]]
+    assert "Null" not in exports
+
+
+def test_compas_upload_with_non_finite_coordinates_is_a_400_counting_them(
+    tmp_path, monkeypatch
+):
+    """Fix 4: a bare NaN/Infinity in the thrustMesh used to survive
+    json.loads and only 500 later, at bundle serialisation time
+    (Starlette's JSONResponse sets allow_nan=False). Rejected here, at
+    derive time, named and counted, before anything is written."""
+
+    client, _ = make_client(tmp_path, monkeypatch)
+    response = client.put(
+        "/api/uploads/exports/Nonfinite/compas",
+        content=json.dumps(_pyramid_with_non_finite_coordinates()).encode(),
+    )
+    assert response.status_code == 400
+    assert "2 non-finite" in response.json()["detail"]
+    assert not (tmp_path / "upload" / "Nonfinite-compas.json").is_file()
+
+
+def test_export_name_drive_relative_and_dotdot_cannot_escape_upload_dir(
+    tmp_path, monkeypatch
+):
+    """Fix 2: the export upload name check omitted ':' entirely and never
+    ran _contained, so a Windows drive-relative name like 'D:evil' slipped
+    the naive '/'/'\\'/'..' guard and Path's own join could replace
+    UPLOAD_DIR outright. Mirrors test_windows_drive_relative_names_
+    cannot_escape (hdri/columns) for the exports upload route."""
+
+    client, _ = make_client(tmp_path, monkeypatch)
+    colon = client.put(
+        "/api/uploads/exports/C:evil/compas",
+        content=b'{"thrustMesh": "{}"}',
+    )
+    assert colon.status_code == 400
+    traversal = client.put(
+        "/api/uploads/exports/..%2Fevil/compas",
+        content=b'{"thrustMesh": "{}"}',
+    )
+    assert traversal.status_code in (400, 404)
+    assert not list(tmp_path.rglob("*evil*")), (
+        "no file named for the drive-relative or traversal payload may "
+        "exist anywhere under tmp_path"
+    )
+
+
+def test_index_names_the_missing_studio_js_instead_of_500ing(tmp_path, monkeypatch):
+    """Fix 3: GET '/' called studio.js's own .stat() before ever checking
+    it existed, so a missing static asset answered an opaque 500 with no
+    indication of what was missing. A tmp static dir carrying only
+    index.html (never the real bench/studio/static) reproduces the gap
+    honestly, without touching the shipped file."""
+
+    client, _ = make_client(tmp_path, monkeypatch)
+    import app as app_module
+
+    static_dir = tmp_path / "static_missing_js"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text(
+        '<html><script src="/static/studio.js?v=dev"></script></html>',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(app_module, "STATIC_DIR", static_dir)
+
+    response = client.get("/")
+    assert response.status_code in (404, 500)
+    assert "studio.js" in response.json()["detail"]
+
+
+def test_reupload_deletes_stale_fea_verification(tmp_path, monkeypatch):
+    """Fix 5: _invalidate_studio_cache dropped bundle-*.json and
+    staging-*.json but never fea-verification.json, so a re-import under
+    the same name (changed geometry) kept serving SILENTLY WRONG old
+    verification numbers in the next bundle. fea-verification.json is the
+    only per-slug verification artifact anything under bench/studio
+    writes (STUDIES_DIR/slug directly, not the nested studio/ cache dir;
+    confirmed against bundle.py's own _read_optional call site and
+    bench/demo/09_structural_verification.py's own write) -- there is no
+    sibling to also cover."""
+
+    client, _ = make_client(tmp_path, monkeypatch)
+    study_dir = tmp_path / "studies" / "tiny"
+    study_dir.mkdir(parents=True, exist_ok=True)
+    (study_dir / "fea-verification.json").write_text(
+        json.dumps({"stale": True}), encoding="utf-8"
+    )
+
+    before = client.get(
+        "/api/studies/Tiny/bundle",
+        params={"material": "concrete", "pattern": "bonded-courses", "size": 0.9},
+    )
+    assert before.status_code == 200
+    assert before.json()["verification"] == {"stale": True}
+
+    reupload = client.put(
+        "/api/uploads/exports/Tiny/contract",
+        content=json.dumps(tiny_contract()).encode(),
+    )
+    assert reupload.status_code == 200
+    assert not (study_dir / "fea-verification.json").is_file()
+
+    after = client.get(
+        "/api/studies/Tiny/bundle",
+        params={"material": "concrete", "pattern": "bonded-courses", "size": 0.9},
+    )
+    assert after.status_code == 200
+    assert after.json()["verification"] is None
+
+
+def test_slug_collision_between_different_export_names_is_a_400(tmp_path, monkeypatch):
+    """Fix 6: slugify("Foo Bar") == slugify("foo-bar") == "foo-bar", so two
+    DIFFERENT export names would share one bundle/staging/verification
+    path -- data mixing, not merely a naming quirk. slugify itself must
+    not change (existing study dirs keep their identity); the upload
+    route refuses the second, colliding name instead, naming both. A
+    same-name re-upload (the ordinary case) must stay allowed."""
+
+    client, _ = make_client(tmp_path, monkeypatch)
+    first = client.put(
+        "/api/uploads/exports/Foo Bar/contract",
+        content=json.dumps(tiny_contract()).encode(),
+    )
+    assert first.status_code == 200
+    second = client.put(
+        "/api/uploads/exports/Foo Bar/compas",
+        content=b'{"thrustMesh": "{}"}',
+    )
+    assert second.status_code == 200
+
+    collision = client.put(
+        "/api/uploads/exports/foo-bar/contract",
+        content=json.dumps(tiny_contract()).encode(),
+    )
+    assert collision.status_code == 400
+    detail = collision.json()["detail"]
+    assert "Foo Bar" in detail
+    assert "foo-bar" in detail
+    assert not (tmp_path / "upload" / "foo-bar-contract.json").is_file()
+
+    reupload = client.put(
+        "/api/uploads/exports/Foo Bar/contract",
+        content=json.dumps(tiny_contract()).encode(),
+    )
+    assert reupload.status_code == 200
