@@ -246,6 +246,39 @@ def _shoelace_area(ring: Sequence[Sequence[float]]) -> float:
     return abs(total) / 2.0
 
 
+def _signed_area(ring: Sequence[Sequence[float]]) -> float:
+    """Twice-unhalved shoelace sum, sign intact: positive is counter
+    clockwise. Unlike _shoelace_area this is not folded through abs(),
+    because _canonical_winding needs the sign to decide whether to
+    reverse a ring.
+    """
+
+    total = 0.0
+    count = len(ring)
+    for i in range(count):
+        x1, y1 = ring[i][0], ring[i][1]
+        x2, y2 = ring[(i + 1) % count][0], ring[(i + 1) % count][1]
+        total += x1 * y2 - x2 * y1
+    return total
+
+
+def _canonical_winding(ring: Sequence[Sequence[float]]) -> List[Sequence[float]]:
+    """ring, reversed onto a counter-clockwise winding if it is not already.
+
+    _classify_subedges keeps subject sub-edges forward and clip sub-edges
+    reversed, which only closes into a ring when subject and clip already
+    run the same way. That agreement is not a property either caller can
+    promise: extract_loops picks a loop's direction by its exporter's
+    vertex numbering (Task 1, openings.py:36-86), not by any geometric
+    convention, so roughly half of real hole loops arrive opposite the
+    (always CCW) generated cell outlines. Normalising both rings to one
+    canonical winding here, before any splitting, makes the difference
+    correct regardless of which way either input happened to wind.
+    """
+
+    return list(ring) if _signed_area(ring) >= 0.0 else list(reversed(ring))
+
+
 def _bbox(ring: Sequence[Sequence[float]]) -> Tuple[float, float, float, float]:
     xs = [p[0] for p in ring]
     ys = [p[1] for p in ring]
@@ -308,7 +341,7 @@ def _intersection(a, b, c, d):
     denom = rx * sy - ry * sx
     t = ((c[0] - a[0]) * sy - (c[1] - a[1]) * sx) / denom
     u = ((c[0] - a[0]) * ry - (c[1] - a[1]) * rx) / denom
-    point = (a[0] + t * rx, a[1] + t * ry)
+    point = [a[0] + t * rx, a[1] + t * ry]
     return point, t, u
 
 
@@ -458,6 +491,13 @@ def _assign_holes(rings):
 def _clip_cell_against_hole(subject, hole):
     """The core difference: subject ring minus hole ring.
 
+    Both rings are normalised to the same canonical winding first
+    (_canonical_winding): the caller may hand either ring in either
+    orientation (generated cell outlines are always CCW, but a hole
+    loop's winding is an accident of extract_loops' vertex numbering,
+    not a promise), and the split/stitch below only closes correctly
+    when subject and clip agree.
+
     Returns ("cell_in_hole", None) when the cell is wholly consumed,
     ("unchanged", None) when the hole has no effect, or ("trimmed",
     components) with components a list of {"outline", "holes"} dicts
@@ -465,6 +505,8 @@ def _clip_cell_against_hole(subject, hole):
     when the opening was swallowed whole).
     """
 
+    subject = _canonical_winding(subject)
+    hole = _canonical_winding(hole)
     subject_subedges, clip_subedges, crossed = _split_edges(subject, hole)
     kept = _classify_subedges(subject_subedges, clip_subedges, subject, hole)
     if not kept:
@@ -476,8 +518,8 @@ def _clip_cell_against_hole(subject, hole):
     return "trimmed", components
 
 
-def _attach_existing_holes(cell, components, hole):
-    """Carry a cell's pre-existing "holes" rings onto the new components.
+def _attach_existing_holes(existing_holes, components, hole):
+    """Carry a branch's pre-existing "holes" rings onto the new components.
 
     These rings came from an earlier opening in the sequential
     application; the current difference only ever touched the outline.
@@ -489,7 +531,7 @@ def _attach_existing_holes(cell, components, hole):
     than mishandles.
     """
 
-    for old_hole in cell.get("holes", []):
+    for old_hole in existing_holes:
         vertex = old_hole[0]
         if _point_ring_relation(vertex, hole) in ("in", "on"):
             raise _DegenerateClip(
@@ -530,10 +572,22 @@ def clip_cells(
     before it produced. For each (cell, hole) pair, a plan bounding-box
     miss skips that hole for that cell entirely (cheap pre-test); a hit
     runs the four-step difference (_split_edges, _classify_subedges,
-    _stitch_rings, _assign_holes). A cell wholly inside a hole is dropped
-    and counted; a component under 0.5% of the unclipped cell's area is
+    _stitch_rings, _assign_holes) on winding-normalised rings. A cell
+    wholly inside a hole is dropped and counted; a component under 0.5%
+    of its ORIGINAL cell's area (the raw generator cell handed in, never
+    an intermediate area from an earlier hole in this same sequence) is
     a sliver, dropped and named; a degenerate walk drops and names the
     whole cell rather than crashing the cut.
+
+    Component keys are allocated once, after every hole has been applied,
+    over each original cell's FINAL surviving component list (largest
+    keeps the base key, the rest get "b", "c", ... in area-descending
+    order, ties broken by the stitcher's own deterministic ring order).
+    Assigning per-hole instead would restart the alphabet at every pass
+    and hand two different surviving pieces the same suffix the moment a
+    second hole splits an already-split cell; deferring to one pass over
+    the final population is the only way to guarantee every key in the
+    return value is unique.
 
     target_size is accepted for interface symmetry with the rest of the
     generator pipeline (courses, sizes); the difference itself has no
@@ -549,63 +603,94 @@ def clip_cells(
         "opening_slivers": [],
         "opening_clip_failures": [],
     }
-    clipped_seen = set()
 
-    current = list(cells)
+    # Each branch tracks its lineage (the original cell's key, never a
+    # suffix) and that original cell's own unclipped area, carried
+    # unchanged through every hole so the sliver rule always measures
+    # against the same reference regardless of how many holes came first.
+    current = [
+        {
+            "lineage": cell["key"],
+            "course": cell["course"],
+            "outline": cell["outline"],
+            "holes": cell["holes"],
+            "original_area": _shoelace_area(cell["outline"]),
+        }
+        for cell in cells
+    ]
+    touched = set()
+
     for hole in hole_loops:
         hole_box = _bbox(hole)
-        next_cells = []
-        for cell in current:
-            outline = cell["outline"]
+        next_branches = []
+        for branch in current:
+            outline = branch["outline"]
             if not _bbox_overlap(_bbox(outline), hole_box):
-                next_cells.append(cell)
+                next_branches.append(branch)
                 continue
 
             try:
                 outcome, components = _clip_cell_against_hole(outline, hole)
             except _DegenerateClip:
-                report["opening_clip_failures"].append(cell["key"])
+                report["opening_clip_failures"].append(branch["lineage"])
                 continue
 
             if outcome == "cell_in_hole":
                 report["cells_in_openings"] += 1
                 continue
             if outcome == "unchanged":
-                next_cells.append(cell)
+                next_branches.append(branch)
                 continue
 
             try:
-                _attach_existing_holes(cell, components, hole)
+                _attach_existing_holes(branch["holes"], components, hole)
             except _DegenerateClip:
-                report["opening_clip_failures"].append(cell["key"])
+                report["opening_clip_failures"].append(branch["lineage"])
                 continue
 
-            unclipped_area = _shoelace_area(outline)
-            threshold = SLIVER_FRACTION * unclipped_area
-            components.sort(key=lambda c: _shoelace_area(c["outline"]), reverse=True)
-
-            survivors = []
-            for index, component in enumerate(components):
-                key = _suffixed_key(cell["key"], index)
+            touched.add(branch["lineage"])
+            threshold = SLIVER_FRACTION * branch["original_area"]
+            for component in components:
                 if _shoelace_area(component["outline"]) < threshold:
-                    report["opening_slivers"].append(key)
+                    report["opening_slivers"].append(branch["lineage"])
                     continue
-                survivors.append(
+                next_branches.append(
                     {
-                        "key": key,
-                        "course": cell["course"],
+                        "lineage": branch["lineage"],
+                        "course": branch["course"],
                         "outline": component["outline"],
                         "holes": component["holes"],
+                        "original_area": branch["original_area"],
                     }
                 )
+        current = next_branches
 
-            if survivors and cell["key"] not in clipped_seen:
-                report["cells_clipped"].append(cell["key"])
-                clipped_seen.add(cell["key"])
+    # One key-allocation pass, per original cell, over its FINAL surviving
+    # branches -- grouped in the order each lineage first appears so the
+    # return value's cell order is otherwise unchanged from the input.
+    groups: Dict[str, List[Dict]] = {}
+    order: List[str] = []
+    for branch in current:
+        root = branch["lineage"]
+        if root not in groups:
+            groups[root] = []
+            order.append(root)
+        groups[root].append(branch)
 
-            next_cells.extend(survivors)
-        current = next_cells
+    result = []
+    for root in order:
+        branches = groups[root]
+        branches.sort(key=lambda b: _shoelace_area(b["outline"]), reverse=True)
+        if root in touched:
+            report["cells_clipped"].append(root)
+        for index, branch in enumerate(branches):
+            result.append(
+                {
+                    "key": _suffixed_key(root, index),
+                    "course": branch["course"],
+                    "outline": branch["outline"],
+                    "holes": branch["holes"],
+                }
+            )
 
-    return current, report
-
-    return outer_ring, hole_rings
+    return result, report
