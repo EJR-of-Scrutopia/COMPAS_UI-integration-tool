@@ -24,6 +24,9 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Sequence
 
+import openings
+import tessellation
+
 TWO_PI = 2.0 * math.pi
 STEP_EPSILON = 1e-12
 
@@ -127,9 +130,18 @@ def plan_domain(
     message-worthy fields (vertex, theta, backward_steps) point at the
     single deepest backward step, the same "where to look" answer whether
     the refusal was on winding or on wobble.
+
+    A mesh may carry interior openings alongside its single outer rim:
+    openings.extract_loops and openings.classify find them, and the OUTER
+    loop alone still drives every axis / thetas / winding / wobble
+    computation below, unchanged for a single-loop mesh. Each opening
+    rides along in the returned "holes" list; the axis itself is refused
+    outright if it falls inside one, since the polar pattern would have no
+    crown left to close on.
     """
 
-    ring = boundary_ring(faces)
+    loops = openings.extract_loops(faces)
+    ring, hole_rings = openings.classify(loops, vertices)
     axis = [
         sum(p[0] for p in centroids) / len(centroids),
         sum(p[1] for p in centroids) / len(centroids),
@@ -151,14 +163,11 @@ def plan_domain(
     winds_once = abs(abs(turn) - TWO_PI) < 1e-6
 
     # Backward means against the direction the rim is being walked, not
-    # numerically negative. boundary_ring walks undirected adjacency, so
-    # which way round it goes is inherited from the mesh rather than
-    # canonicalised: a clockwise wound export is walked clockwise, every
-    # one of its steps is negative, and an absolute reading would call the
-    # whole rim backward and refuse perfectly good geometry at a full 360
-    # degrees of "wobble". winds_once has already pinned turn to within
-    # 1e-6 of plus or minus TWO_PI wherever this matters, so its sign
-    # names that direction unambiguously.
+    # numerically negative. An absolute reading would call the whole rim
+    # backward on a rim walked "the other way" and refuse perfectly good
+    # geometry at a full 360 degrees of "wobble". winds_once has already
+    # pinned turn to within 1e-6 of plus or minus TWO_PI wherever this
+    # matters, so its sign names that direction unambiguously.
     sense = -1.0 if turn < 0.0 else 1.0
     walked = [sense * step for step in steps]
 
@@ -179,6 +188,24 @@ def plan_domain(
             "turn": turn,
             "backward_steps": backward_steps,
         }
+
+    holes = [
+        {
+            "ring": hole_ring,
+            "loop": [[vertices[i][0], vertices[i][1]] for i in hole_ring],
+        }
+        for hole_ring in hole_rings
+    ]
+    for hole in holes:
+        hole_loop = hole["loop"]
+        if tessellation.point_in_ring(axis, list(range(len(hole_loop))), hole_loop):
+            raise ValueError(
+                "the plan's axis falls inside an opening, so the polar "
+                "pattern has no crown to close on. Author the "
+                "tessellation in Grasshopper and import it "
+                "instead."
+            )
+
     return {
         "axis": axis,
         "loop": loop,
@@ -188,6 +215,7 @@ def plan_domain(
         "failure": failure,
         "backward_turn": backward_turn,
         "backward_steps": backward_steps,
+        "holes": holes,
     }
 
 

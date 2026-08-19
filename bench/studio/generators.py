@@ -25,6 +25,7 @@ from typing import Dict, List, Tuple
 
 import cutting
 import domain as domain_module
+import openings
 import tessellation
 
 TWO_PI = 2.0 * math.pi
@@ -453,7 +454,23 @@ def generate(pattern: str, domain: Dict, size: float) -> Dict:
                 math.degrees(domain["backward_turn"]),
             )
         )
+    # domain.get rather than domain["holes"]: a domain dict built by hand
+    # (a fixture, or the pinned Trial-2 tessellation's own committed
+    # domain, both predating this wave) never carries the key, and no
+    # openings is exactly the behaviour those callers already pin.
+    holes = domain.get("holes", [])
+    if holes and pattern == "monolithic-bands":
+        raise ValueError(
+            "sprayed bands cannot yet cross openings; cut a jointed "
+            "pattern or author the tessellation in Grasshopper."
+        )
+
     raw = builder(domain, size)
+    opening_report = None
+    if holes:
+        raw, opening_report = openings.clip_cells(
+            raw, [h["loop"] for h in holes], size
+        )
     tess = tessellation.build_tessellation(
         raw, pattern, "generated", size, _course_count(domain, size)
     )
@@ -462,4 +479,13 @@ def generate(pattern: str, domain: Dict, size: float) -> Dict:
     # reports it downstream (see bundle.py's tessellation summary).
     tess["backward_turn"] = domain["backward_turn"]
     tess["backward_steps"] = domain["backward_steps"]
+    # Same ride-along, only when openings were actually clipped: the
+    # report is a property of the plan against this cut, not of the
+    # pattern beyond having crossed it.
+    if opening_report is not None:
+        tess["openings"] = opening_report["openings"]
+        tess["cells_in_openings"] = opening_report["cells_in_openings"]
+        tess["cells_clipped"] = opening_report["cells_clipped"]
+        tess["opening_slivers"] = opening_report["opening_slivers"]
+        tess["opening_clip_failures"] = opening_report["opening_clip_failures"]
     return tess

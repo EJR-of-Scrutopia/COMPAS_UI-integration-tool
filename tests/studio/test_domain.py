@@ -24,6 +24,22 @@ def studio():
     return domain
 
 
+def openings_module():
+    path = str(REPO / "bench" / "studio")
+    if path not in sys.path:
+        sys.path.insert(0, path)
+    import openings
+    return openings
+
+
+def tessellation_module():
+    path = str(REPO / "bench" / "studio")
+    if path not in sys.path:
+        sys.path.insert(0, path)
+    import tessellation
+    return tessellation
+
+
 def grid(side, drop=(), clockwise=False):
     """side by side unit quads, with the listed (i, j) faces left out.
 
@@ -143,19 +159,31 @@ def test_a_plain_grid_wound_clockwise_is_star_shaped_too():
     """Reversed face normals are an authoring choice, not a bad plan.
 
     Identical geometry to test_a_plain_grid_is_star_shaped, wound the
-    other way, so its rim is walked clockwise and every angular step comes
-    out negative. Measuring backward steps in absolute terms called the
-    whole rim backward and refused this plan at 360 degrees of wobble over
-    12 steps, on a square with no wobble in it at all.
+    other way. Before the 2026-08-19 multi-loop wave, plan_domain walked
+    the rim through boundary_ring, whose direction came from the order
+    edges were first discovered while scanning faces and so flipped with
+    the mesh's own winding; measuring backward steps in absolute terms
+    called the whole rim backward and refused this plan at 360 degrees of
+    wobble over 12 steps, on a square with no wobble in it at all.
+
+    plan_domain now walks the rim through openings.extract_loops, whose
+    walk direction is a deterministic property of vertex ids (from the
+    loop's own minimum vertex, its smaller neighbour is stepped to first
+    -- openings.py:36-86) rather than of edge discovery order, so the SAME
+    ring comes out regardless of which way the mesh happens to be wound:
+    measured below, the two calls return byte identical rings, not
+    reversed ones. What still has to hold, and is the real point of this
+    test, is that a clockwise winding cannot fool the winding/wobble
+    computation into reading the rim as backward -- sense is read from the
+    geometry (turn's own sign), not assumed, so both windings still
+    measure zero wobble.
     """
     d = studio()
     vertices, faces, centroids = grid(3, clockwise=True)
     domain = d.plan_domain(vertices, faces, centroids)
 
-    # The rim really is walked the other way round, not merely authored
-    # differently: same starting vertex, the rest of the loop reversed.
     anticlockwise = d.plan_domain(*grid(3))["ring"]
-    assert domain["ring"] == [anticlockwise[0]] + list(reversed(anticlockwise[1:]))
+    assert domain["ring"] == anticlockwise
 
     assert domain["star_shaped"] is True
     assert domain["failure"] is None
@@ -217,3 +245,139 @@ def test_a_small_wobble_is_tolerated_and_still_cuts_cleanly():
     tess = generators.generate("bonded-courses", domain, 1.2)
     binding = tessellation.analysis_binding(tess, centroids)
     assert binding["report"]["coverage_holes"] == []
+
+
+# --- Multi-loop cutting (2026-08-19): openings classified into the plan
+# domain ------------------------------------------------------------------
+
+
+def _legacy_plan_domain(d, vertices, faces, centroids):
+    """The pre-wave computation, reimplemented independently here (not
+    calling plan_domain) from d.boundary_ring alone, so the byte-identity
+    test below proves something rather than reading the same computation
+    back at itself. Same axis / thetas / winding / wobble maths plan_domain
+    itself carries; see domain.py's own comments for why each step reads
+    the way it does.
+    """
+
+    ring = d.boundary_ring(faces)
+    axis = [
+        sum(p[0] for p in centroids) / len(centroids),
+        sum(p[1] for p in centroids) / len(centroids),
+    ]
+    loop = [[vertices[i][0], vertices[i][1]] for i in ring]
+    thetas = [math.atan2(p[1] - axis[1], p[0] - axis[0]) for p in loop]
+
+    steps = []
+    turn = 0.0
+    for i in range(len(thetas)):
+        step = thetas[(i + 1) % len(thetas)] - thetas[i]
+        while step <= -math.pi:
+            step += d.TWO_PI
+        while step > math.pi:
+            step -= d.TWO_PI
+        steps.append(step)
+        turn += step
+
+    winds_once = abs(abs(turn) - d.TWO_PI) < 1e-6
+    sense = -1.0 if turn < 0.0 else 1.0
+    walked = [sense * step for step in steps]
+    backward_indices = [i for i, s in enumerate(walked) if s < -d.STEP_EPSILON]
+    backward_turn = -sum(walked[i] for i in backward_indices)
+    star = winds_once and backward_turn < d.WOBBLE_TOLERANCE
+    return {
+        "axis": axis, "loop": loop, "ring": ring, "thetas": thetas,
+        "star_shaped": star, "backward_turn": backward_turn,
+    }
+
+
+def test_a_single_loop_plan_gains_an_empty_holes_key():
+    """holes == [] for an ordinary single-loop mesh, and every existing
+    key comes out exactly as the pre-wave computation produces it --
+    proven against an independent reimplementation (_legacy_plan_domain,
+    built from d.boundary_ring, never from d.plan_domain), not merely
+    read back against plan_domain's own new output.
+    """
+    d = studio()
+    vertices, faces, centroids = grid(3)
+    domain = d.plan_domain(vertices, faces, centroids)
+
+    assert domain["holes"] == []
+
+    legacy = _legacy_plan_domain(d, vertices, faces, centroids)
+    assert domain["axis"] == legacy["axis"]
+    assert domain["loop"] == legacy["loop"]
+    assert domain["ring"] == legacy["ring"]
+    assert domain["thetas"] == legacy["thetas"]
+    assert domain["star_shaped"] == legacy["star_shaped"]
+    assert domain["backward_turn"] == legacy["backward_turn"]
+
+
+def test_an_interior_hole_is_classified_not_refused():
+    """grid(5, drop=((2, 2),)) -- the exact fixture openings.py's own
+    tests pin (test_classify_picks_the_containing_loop) -- would put the
+    mean face centroid dead in the CENTRE of the hole it punches (measured:
+    axis (2.5, 2.5), the hole's own centre), which is precisely the
+    refusal the next test wants. This test wants the OTHER outcome, a
+    classified opening plan_domain actually accepts, so it uses an
+    off-centre single-face hole instead (grid(7), face (1, 1) dropped) and
+    measures its own hole ids and plan points rather than reusing the ones
+    named in the task brief for the on-axis fixture.
+    """
+    d = studio()
+    o = openings_module()
+    t = tessellation_module()
+    vertices, faces, centroids = grid(7, drop=((1, 1),))
+
+    # Measured, not guessed: the axis really does land outside this hole.
+    loops = o.extract_loops(faces)
+    outer, hole_rings = o.classify(loops, vertices)
+    hole_loop = [[vertices[i][0], vertices[i][1]] for i in hole_rings[0]]
+    axis = [
+        sum(p[0] for p in centroids) / len(centroids),
+        sum(p[1] for p in centroids) / len(centroids),
+    ]
+    assert not t.point_in_ring(axis, list(range(len(hole_loop))), hole_loop)
+
+    domain = d.plan_domain(vertices, faces, centroids)
+    assert domain["star_shaped"] is True
+    assert domain["failure"] is None
+    assert len(domain["holes"]) == 1
+    hole = domain["holes"][0]
+    assert hole["ring"] == [9, 10, 18, 17]
+    assert hole["loop"] == [
+        [1.0, 1.0], [2.0, 1.0], [2.0, 2.0], [1.0, 2.0],
+    ]
+
+
+def test_the_axis_inside_an_opening_refuses_verbatim():
+    """grid(5, drop=((2, 2),)): by symmetry the mean face centroid of the
+    24 remaining faces is exactly (2.5, 2.5) -- the removed face's own
+    centre -- which is measured below to fall inside the hole polygon
+    before the refusal is pinned, per the task brief's instruction not to
+    guess.
+    """
+    d = studio()
+    o = openings_module()
+    t = tessellation_module()
+    vertices, faces, centroids = grid(5, drop=((2, 2),))
+
+    loops = o.extract_loops(faces)
+    outer, hole_rings = o.classify(loops, vertices)
+    hole_loop = [[vertices[i][0], vertices[i][1]] for i in hole_rings[0]]
+    axis = [
+        sum(p[0] for p in centroids) / len(centroids),
+        sum(p[1] for p in centroids) / len(centroids),
+    ]
+    assert axis == [2.5, 2.5]
+    assert t.point_in_ring(axis, list(range(len(hole_loop))), hole_loop)
+
+    try:
+        d.plan_domain(vertices, faces, centroids)
+        assert False, "expected a ValueError"
+    except ValueError as error:
+        assert str(error) == (
+            "the plan's axis falls inside an opening, so the polar "
+            "pattern has no crown to close on. Author the tessellation "
+            "in Grasshopper and import it instead."
+        )

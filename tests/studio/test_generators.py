@@ -605,3 +605,124 @@ def test_planned_patterns_say_which_wave_they_arrive_in():
     # docs/superpowers/specs/2026-08-18-armadillo-dual-design.md, "Out of
     # scope"): the dropdown's note says so instead of just naming a wave.
     assert "Armadillo Dual component" in g.PLANNED["armadillo-dual"]
+
+
+# --- Multi-loop cutting (2026-08-19): the clip pass wired into generate ---
+
+
+def _paraboloid_grid(side, drop=()):
+    """side by side unit quads in plan, lifted onto a paraboloid apex at
+    the grid's own centre, with the listed (i, j) faces left out. Same
+    grid-fixture idiom as tests/studio/test_domain.py:27-60 and
+    tests/studio/test_openings.py:37-56, z added so this is a real, non-
+    flat holed dome rather than a flat holed plate.
+    """
+
+    center = side / 2.0
+
+    def z(x, y):
+        return 2.0 - ((x - center) ** 2) / 20.0 - ((y - center) ** 2) / 20.0
+
+    vertices = [
+        [float(i), float(j), z(float(i), float(j))]
+        for j in range(side + 1) for i in range(side + 1)
+    ]
+    faces = []
+    for j in range(side):
+        for i in range(side):
+            if (i, j) in drop:
+                continue
+            n = side + 1
+            face = [j * n + i, j * n + i + 1, (j + 1) * n + i + 1, (j + 1) * n + i]
+            faces.append(face)
+    centroids = [
+        [sum(vertices[k][axis] for k in face) / 4.0 for axis in range(3)]
+        for face in faces
+    ]
+    return vertices, faces, centroids
+
+
+def holed_paraboloid_domain():
+    """A 9 by 9 grid, z = 2 - (x-4.5)^2/20 - (y-4.5)^2/20, with the
+    off-centre 2x2 block of faces (2, 2), (2, 3), (3, 2), (3, 3) dropped --
+    a hole spanning plan x, y in [2, 4], well clear of the grid's own
+    centre (4.5, 4.5). Measured (bench/studio scratch run, not guessed):
+    the mean face centroid of the 77 remaining faces lands at roughly
+    (4.58, 4.58), outside the hole, so plan_domain accepts this plan
+    rather than hitting the axis-in-opening refusal (that refusal has its
+    own pinned fixture and test in tests/studio/test_domain.py).
+    """
+
+    d = studio("domain")
+    vertices, faces, centroids = _paraboloid_grid(
+        9, drop=((2, 2), (2, 3), (3, 2), (3, 3))
+    )
+    domain = d.plan_domain(vertices, faces, centroids)
+    return domain, vertices, faces, centroids
+
+
+def _strictly_in_ring(point, ring):
+    """point strictly inside the plan polygon ring ([x, y] points, not
+    vertex ids), boundary excluded -- tessellation.point_strictly_in_cell
+    adapted the way openings._in_ring adapts point_in_ring (openings.py
+    :292-300): the ring is its own identity index and its own points
+    table, with no holes of its own.
+    """
+
+    t = studio("tessellation")
+    cell = {"outline": list(range(len(ring))), "holes": []}
+    return t.point_strictly_in_cell(point, cell, ring)
+
+
+def test_bonded_courses_flow_around_an_opening():
+    """The end-to-end path this whole task exists for: a holed surface
+    cuts natively instead of refusing. bonded-courses is a jointed
+    pattern, so generate runs the builder, then clips every cell against
+    the opening (openings.clip_cells), then welds -- no cell may leave a
+    point strictly inside the hole once that clip has run, and the report
+    must show real clip activity, not a silent no-op.
+    """
+    t = studio("tessellation")
+    domain, vertices, faces, centroids = holed_paraboloid_domain()
+
+    assert len(domain["holes"]) == 1
+    hole_loop = domain["holes"][0]["loop"]
+    axis = domain["axis"]
+    # Measured, not guessed, per the task brief: the axis really is
+    # outside the hole, so this fixture exercises the clip path rather
+    # than the axis-in-opening refusal.
+    assert not t.point_in_ring(axis, list(range(len(hole_loop))), hole_loop)
+
+    g = studio("generators")
+    tess = g.generate("bonded-courses", domain, 1.0)
+
+    for key in (
+        "openings", "cells_in_openings", "cells_clipped",
+        "opening_slivers", "opening_clip_failures",
+    ):
+        assert key in tess
+    assert tess["openings"] == 1
+    assert tess["cells_clipped"] != []
+
+    points = tess["points"]
+    for cell in tess["cells"]:
+        for idx in cell["outline"]:
+            assert not _strictly_in_ring(points[idx], hole_loop), (
+                cell["key"], points[idx]
+            )
+
+
+def test_monolithic_bands_refuse_openings_verbatim():
+    """The named wave-1 limit: a band ring cell spans the full turn, and
+    clipping it would need a seam split this wave does not build, so
+    monolithic-bands refuses outright on any plan carrying an opening,
+    pinned verbatim on the same holed fixture bonded-courses cuts.
+    """
+    domain, vertices, faces, centroids = holed_paraboloid_domain()
+    g = studio("generators")
+    with pytest.raises(ValueError) as error:
+        g.generate("monolithic-bands", domain, 1.0)
+    assert str(error.value) == (
+        "sprayed bands cannot yet cross openings; cut a jointed "
+        "pattern or author the tessellation in Grasshopper."
+    )
