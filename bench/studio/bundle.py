@@ -401,6 +401,23 @@ class CutSuperseded(Exception):
 # both pieces of state are small, cheap to touch, and already read
 # together on the same request path, so a second lock would only add
 # ordering risk for no real concurrency gain.
+#
+# Level-triggered, not latched (review finding M6, fix round 2,
+# 2026-08-19): _interactive_live holds exactly ONE entry per export, the
+# newest registration only, so superseded() always answers against
+# whatever is live RIGHT NOW, not against a permanent verdict recorded
+# the first time a build happened to be superseded. A build's checkpoint
+# can therefore see True on one call and False on a LATER one: a
+# different-key registration supersedes it, and if a still later
+# registration for the build's own original key arrives afterward
+# (re-becoming the export's newest), that later registration overwrites
+# the entry above, and the build is no longer superseded, because the
+# live entry once again shares its key. Deliberate, not an oversight: a
+# latch that remembered "superseded, once, forever" would hand
+# CutSuperseded to a joiner whose own key has since become the live one
+# again, the wrong answer (see _cut_for's own join-branch comments: an
+# interactive joiner's cancellation is re-raised only because it is
+# genuinely current at the moment it is read, not merely historical).
 _interactive_token_counter = 0
 _interactive_live: "Dict[str, Tuple[int, tuple]]" = {}
 
@@ -428,6 +445,11 @@ def superseded(export: str, token: int, key: tuple) -> bool:
     key already building in _cut_inflight and joins it instead of
     starting a build of its own (see _cut_for), so the two are never in
     conflict over what the answer should be, only over who computes it
+    once.
+
+    Level-triggered against the CURRENT live entry, not latched against
+    whatever it was on some earlier call: see the module comment above
+    _interactive_live for what that means for a build checked more than
     once.
     """
 

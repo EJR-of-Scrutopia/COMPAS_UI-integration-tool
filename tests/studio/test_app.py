@@ -1176,3 +1176,94 @@ def test_a_slow_build_superseded_by_a_newer_different_key_request_409s(tmp_path,
     assert not bundle.bundle_path(
         "tiny", "concrete", "bonded-courses", 0.9, 0.2
     ).is_file(), "a superseded build must write nothing to disk"
+
+
+def test_a_cache_hit_for_a_different_key_still_supersedes_an_in_flight_build(
+    tmp_path, monkeypatch
+):
+    """Review finding I5 (Important, fix round 2, 2026-08-19): the whole
+    justification for register_interactive taking a KEY argument (a
+    deviation from the task brief's own one-arg register_interactive(
+    export) shorthand, see the task-2 report's own reasoning) is a single
+    claim -- a request served STRAIGHT FROM THE ON-DISK CACHE, which never
+    reaches _cut_for, never builds a checkpoint, and never calls
+    segment_pieces at all, must still supersede an older in-flight build
+    for a DIFFERENT key on the same export, because the cache hit is
+    itself proof the caller has moved on. No committed test exercised
+    this claim (the reviewer's own probe D confirmed it by hand and found
+    the gap).
+
+    Deterministic via Event handshakes, no sleeps: key B's bundle is
+    pre-built into the scratch STUDIES_DIR with a plain, un-monkeypatched
+    GET before the fake segment_pieces is installed, so the segment_
+    pieces call count below (checked only from the point the monkeypatch
+    lands) proves the LATER request for that same key never cuts again --
+    it is genuinely served from the file load_or_build_bundle's own
+    disk-first check already reads before build_bundle is ever reached.
+    """
+    import threading
+
+    client, studies = make_client(tmp_path, monkeypatch)
+    import bundle
+    import pieces
+
+    # Warm key B's bundle on disk before the fake is installed: a real,
+    # un-monkeypatched cut.
+    warm = client.get(
+        "/api/studies/Tiny/bundle",
+        params={"material": "concrete", "pattern": "bonded-courses", "size": 1.2},
+    )
+    assert warm.status_code == 200, warm.text
+    assert bundle.bundle_path(
+        "tiny", "concrete", "bonded-courses", 1.2, 0.2
+    ).is_file(), "key B's bundle must already sit on disk before the slow build starts"
+
+    started = threading.Event()
+    release = threading.Event()
+    call_count = {"n": 0}
+
+    def fake_segment_pieces(tess, surface, support_points, checkpoint=None):
+        call_count["n"] += 1
+        started.set()
+        assert release.wait(timeout=5), "release was never set"
+        if checkpoint is not None:
+            checkpoint()
+        raise AssertionError(
+            "unreachable: the checkpoint above must raise CutSuperseded "
+            "before segment_pieces ever computes anything for key A"
+        )
+
+    monkeypatch.setattr(pieces, "segment_pieces", fake_segment_pieces)
+
+    responses = {}
+
+    def call_key_a():
+        responses["first"] = client.get(
+            "/api/studies/Tiny/bundle",
+            params={"material": "concrete", "pattern": "bonded-courses", "size": 0.9},
+        )
+
+    t1 = threading.Thread(target=call_key_a)
+    t1.start()
+    assert started.wait(timeout=5), "key A's slow build never started"
+
+    # Key B's request, now: served straight from the on-disk cache warmed
+    # above -- no cut, no checkpoint, no segment_pieces call at all -- yet
+    # it must still register as the export's freshest interactive request
+    # and supersede key A's still-blocked build.
+    second = client.get(
+        "/api/studies/Tiny/bundle",
+        params={"material": "concrete", "pattern": "bonded-courses", "size": 1.2},
+    )
+    assert second.status_code == 200, second.text
+
+    release.set()
+    t1.join(timeout=5)
+    assert not t1.is_alive(), "key A's own request never finished"
+
+    assert responses["first"].status_code == 409
+    assert responses["first"].json() == {"superseded": True}
+    assert call_count["n"] == 1, (
+        "the cache-hit request for key B must never call segment_pieces "
+        "at all: {} call(s) after the fake was installed".format(call_count["n"])
+    )

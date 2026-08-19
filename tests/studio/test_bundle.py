@@ -794,16 +794,20 @@ def test_single_flight_joins_a_cold_identical_key(tmp_path, monkeypatch):
     _cut_for layer where the memo already lives (see bundle._cut_for's
     own docstring).
 
-    Deterministic via an Event handshake, not a sleep: the fake
-    segment_pieces signals "started" (proof the builder has already
-    registered itself in _cut_inflight, since that registration happens
-    strictly before build_tessellation_for/segment_pieces are ever
-    called) before blocking on "release", so the second thread is only
-    started once a join is guaranteed to be possible. Whichever thread
-    the OS actually schedules to reach _cut_for's own lock-guarded check
-    first, the outcome is the same: segment_pieces runs once, both
-    threads read the identical result (either as the builder or by
-    joining/reading straight out of the now-populated memo).
+    Deterministic via Event handshakes, not sleeps: the fake segment_
+    pieces signals "started" (proof the builder has already registered
+    itself in _cut_inflight, since that registration happens strictly
+    before build_tessellation_for/segment_pieces are ever called) before
+    blocking on "release", so the second thread is only started once a
+    join is guaranteed to be possible. A second handshake, "second_
+    ready", set by the second thread itself just before it calls _cut_for
+    and awaited here before release fires (fix round 2, review finding
+    M7), proves the second thread has actually been scheduled and reached
+    the call before release can let the first thread finish -- without
+    it, if the OS never got around to running the second thread until
+    after the first had already completed and memoised, the join branch
+    this test names would never execute at all, yet every assertion
+    below would still happen to pass (a cache hit is `is`-identical too).
     """
     import threading
 
@@ -811,6 +815,7 @@ def test_single_flight_joins_a_cold_identical_key(tmp_path, monkeypatch):
     pieces = _studio_module("pieces")
 
     started = threading.Event()
+    second_ready = threading.Event()
     release = threading.Event()
     calls = []
     real_segment_pieces = pieces.segment_pieces
@@ -830,7 +835,9 @@ def test_single_flight_joins_a_cold_identical_key(tmp_path, monkeypatch):
 
     results = {}
 
-    def call(name):
+    def call(name, ready=None):
+        if ready is not None:
+            ready.set()
         results[name] = bundle._cut_for(
             "Tiny", contract, arrays, render, "bonded-courses", 0.9)
 
@@ -838,8 +845,11 @@ def test_single_flight_joins_a_cold_identical_key(tmp_path, monkeypatch):
     t1.start()
     assert started.wait(timeout=5), "the builder never started"
 
-    t2 = threading.Thread(target=call, args=("second",))
+    t2 = threading.Thread(target=call, args=("second", second_ready))
     t2.start()
+    assert second_ready.wait(timeout=5), (
+        "the joiner thread never reached _cut_for before release fired"
+    )
 
     release.set()
     t1.join(timeout=5)
@@ -864,6 +874,17 @@ def test_identical_key_newer_interactive_request_joins_not_supersedes(tmp_path, 
     never supersedes (bundle.superseded's own docstring), because the
     second request finds the key already building and joins instead of
     starting a build of its own.
+
+    Deterministic via Event handshakes, not sleeps: "second_registered"
+    (fix round 2, review finding M7), set right after the second thread's
+    own register_interactive call and awaited here before release fires,
+    proves the newer, same-key token exists BEFORE the builder's own
+    checkpoint ever runs (checkpoint only runs after release, inside the
+    fake segment_pieces below). Without it, if the OS happened to run the
+    builder's own checkpoint before the second thread got around to
+    registering, the "must NOT raise" assertion inside the fake would be
+    vacuous -- true only because there was no newer token yet to compare
+    against, not because an identical key is genuinely tolerated.
     """
     import threading
 
@@ -871,6 +892,7 @@ def test_identical_key_newer_interactive_request_joins_not_supersedes(tmp_path, 
     pieces = _studio_module("pieces")
 
     started = threading.Event()
+    second_registered = threading.Event()
     release = threading.Event()
     calls = []
     real_segment_pieces = pieces.segment_pieces
@@ -906,6 +928,7 @@ def test_identical_key_newer_interactive_request_joins_not_supersedes(tmp_path, 
     def call_second():
         # The SAME key, a strictly newer token: must join, not supersede.
         token = bundle.register_interactive("Tiny", key)
+        second_registered.set()
         try:
             results["second"] = bundle.build_bundle(
                 "Tiny", "concrete", "bonded-courses", 0.9, interactive_token=token)
@@ -914,6 +937,9 @@ def test_identical_key_newer_interactive_request_joins_not_supersedes(tmp_path, 
 
     t2 = threading.Thread(target=call_second)
     t2.start()
+    assert second_registered.wait(timeout=5), (
+        "the second, newer registration never happened before release fired"
+    )
 
     release.set()
     t1.join(timeout=5)
