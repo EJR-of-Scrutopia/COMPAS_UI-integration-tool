@@ -506,6 +506,38 @@ def test_a_bundle_cached_before_a_tessellation_field_existed_is_stale(
             node = node[part]
 
 
+def test_a_bundle_cached_before_the_boundary_loop_count_existed_is_stale(
+    tmp_path, monkeypatch
+):
+    """Final fix wave (2026-08-19). The multi-loop task rerouted the lift
+    attachment to walk every boundary loop (outer rim plus every opening's
+    own rim) instead of just the outer one, but added no REQUIRED_BUNDLE_
+    KEYS entry for it, so a bundle cached before that change (outer-only
+    attachment, or none at all on a mesh the old domain.boundary_ring
+    refused) kept passing every freshness gate and was served forever,
+    still clamping cap points a fresh cut would now project onto the true
+    rim. boundary_loops is the fix: an honest, always-present count of how
+    many loops the attachment found (openings or not -- unlike the five
+    openings fields pinned absent above, this one is not conditional on a
+    clip pass ever running), so its absence alone is enough to force the
+    rebuild.
+    """
+
+    bundle, _, _ = fake_export(tmp_path, monkeypatch)
+    fresh = bundle.build_bundle("Tiny", "concrete", "bonded-courses", 0.9)
+    assert "boundary_loops" in fresh["tessellation"]
+    assert "tessellation.boundary_loops" in bundle.REQUIRED_BUNDLE_KEYS
+    cached_path = bundle.bundle_path("tiny", "concrete", "bonded-courses", 0.9, 0.2)
+    stale = json.loads(json.dumps(fresh))
+    del stale["tessellation"]["boundary_loops"]
+    cached_path.write_text(json.dumps(stale), encoding="utf-8")
+    loaded = bundle.load_or_build_bundle("Tiny", "concrete", "bonded-courses", 0.9)
+    assert "boundary_loops" in loaded["tessellation"], (
+        "a bundle missing tessellation.boundary_loops was served rather "
+        "than re-cut"
+    )
+
+
 def authored_sidecar():
     """One cell, "a", covering the bottom half of tiny_contract's plan.
 

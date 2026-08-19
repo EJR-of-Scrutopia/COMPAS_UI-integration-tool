@@ -82,6 +82,19 @@ REQUIRED_BUNDLE_KEYS = (
     # is stale in the same way one missing clamped_max_m or seat_gap_stats
     # already is.
     "tessellation.degenerate_dropped",
+    # Final fix wave (2026-08-19): landed after degenerate_dropped. The
+    # multi-loop task rerouted build_tessellation_for's boundary attachment
+    # to walk every closed loop of the mesh boundary (the outer rim AND
+    # every opening's own rim) instead of just the outer one, but shipped
+    # with no staleness entry for it, so a bundle cut before this task kept
+    # its outer-only attachment (or none at all, on a multi-loop mesh the
+    # old domain.boundary_ring simply refused) and was served forever: its
+    # off-mesh cap points near an opening are clamped into the nearest
+    # face where a fresh cut now projects them onto that opening's true
+    # rim. boundary_loops is the honest, always-present count of how many
+    # loops the attachment found (openings or not), so a bundle missing it
+    # is stale in the same way one missing any field above already is.
+    "tessellation.boundary_loops",
 )
 
 
@@ -296,8 +309,9 @@ def build_tessellation_for(export_name, contract, arrays, render, pattern, size)
             [[arrays["vertices"][i][0], arrays["vertices"][i][1]] for i in loop]
             for loop in loops
         ]
+        boundary_loop_count = len(loops)
     except ValueError:
-        pass
+        boundary_loop_count = 0
     authored = tessellation.read_tessellation(
         contract, tessellation_sidecar(export_name))
     if authored is not None:
@@ -315,6 +329,14 @@ def build_tessellation_for(export_name, contract, arrays, render, pattern, size)
             # "the input is malformed" can actually be drawn, because it is
             # the one place that knows which of the two branches raised.
             raise CutRefused(str(error)) from error
+    # Final fix wave (2026-08-19): the count of loops the attachment above
+    # actually found, honest and always computable regardless of which
+    # branch built tess (authored or generated) or whether the mesh has
+    # any openings at all -- unlike the openings block in build_bundle
+    # below, this is not a fact that only exists when a clip pass ran.
+    # See REQUIRED_BUNDLE_KEYS' own comment on tessellation.boundary_loops
+    # for why a cached document needs this to invalidate correctly.
+    tess["boundary_loops"] = boundary_loop_count
     centroids = geometry.face_centroids(arrays["vertices"], arrays["faces"])
     binding = tessellation.analysis_binding(tess, centroids)
     return tess, surface, binding
@@ -432,6 +454,7 @@ def build_bundle(
             "target_size": tess["target_size"],
             "courses": tess["courses"],
             "cells": len(tess["cells"]),
+            "boundary_loops": tess["boundary_loops"],
             "provenance": tess.get("provenance"),
             "z_offset_max": tess.get("z_offset_max"),
             "courses_inferred": tess.get("courses_inferred", False),
