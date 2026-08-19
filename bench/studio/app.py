@@ -398,21 +398,41 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
             # anything is written below, so the whole upload is refused and
             # nothing is left on disk (no stored compas without its
             # invalidation having run, because nothing is stored at all).
+            #
+            # Fix round 1, CRITICAL: derive_contract.derive_contract is
+            # called HERE, unconditionally, on every compas upload --
+            # paired or not. The `contract_path.is_file()` gate below only
+            # decides whether the RESULT gets kept and later written as a
+            # derived contract (P4's shadow rule: a derived file must never
+            # replace a real or previously-derived one); it must never
+            # decide whether the coordinates get VALIDATED. A re-upload for
+            # an export that already has a contract is the ordinary case
+            # for any already-paired study, and a corrupt compas file
+            # stored on that path still flows into staging.run_staging's
+            # own geometry_path -- the same silently-wrong-numbers /
+            # opaque-500-later failure fixes 1 and 4 exist to close, just
+            # reached through this branch instead.
+            #
             # Every OTHER derive_contract failure (missing thrustMesh.data,
             # a non-JSON string, a non-contiguous vertex range, a missing
-            # x/y/z key, ...) keeps P4's own soft-continue contract in the
-            # write step below: the compas file is still stored, only the
-            # derivation is skipped, named in the response
-            # (test_compas_upload_with_unreadable_thrust_mesh_stores_but_
-            # does_not_derive pins exactly this).
+            # x/y/z key, ...) keeps P4's own soft-continue contract: the
+            # compas file is still stored, only the derivation is skipped,
+            # named in the response when there is no existing contract to
+            # shadow (test_compas_upload_with_unreadable_thrust_mesh_
+            # stores_but_does_not_derive pins exactly this).
             contract_path = bundle.UPLOAD_DIR / "{}-contract.json".format(name)
+            try:
+                candidate_contract = derive_contract.derive_contract(document)
+            except derive_contract.MalformedGeometryError as error:
+                raise HTTPException(400, str(error))
+            except ValueError as error:
+                candidate_contract = None
+                candidate_error = str(error)
+            else:
+                candidate_error = None
             if not contract_path.is_file():
-                try:
-                    derived_contract = derive_contract.derive_contract(document)
-                except derive_contract.MalformedGeometryError as error:
-                    raise HTTPException(400, str(error))
-                except ValueError as error:
-                    derivation_error = str(error)
+                derived_contract = candidate_contract
+                derivation_error = candidate_error
         else:
             # An authored cutting sidecar (the plugin Export component's
             # Tessellation format). Shape-checked here; the deep per-cell
@@ -528,7 +548,18 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
         # (2026-08-18).
         if run_id.startswith("study-"):
             slug = run_id[len("study-"):]
-            if "/" in slug or "\\" in slug or ".." in slug:
+            # Fix round 1, Important: this branch is the only other route
+            # in app.py that builds a filesystem path from a caller-
+            # supplied path segment, and it lacked the ":" character and
+            # _contained() check every other such route now carries. A
+            # drive-relative slug used to slip past this guard and reach
+            # the STUDIES_DIR lookup below, where whether it 400'd depended
+            # on what happened to sit at the resolved path rather than
+            # being refused outright. Checked against RECORDINGS_DIR, the
+            # directory post_frame actually writes into below.
+            if "/" in slug or "\\" in slug or ".." in slug or ":" in slug:
+                raise HTTPException(400, "bad study slug")
+            if not _contained(bundle.RECORDINGS_DIR, slug):
                 raise HTTPException(400, "bad study slug")
             if not (bundle.STUDIES_DIR / slug).is_dir():
                 raise HTTPException(404, "no study {}".format(slug))

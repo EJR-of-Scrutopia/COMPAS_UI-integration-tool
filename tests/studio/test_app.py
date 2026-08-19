@@ -1313,6 +1313,37 @@ def test_compas_upload_with_a_null_coordinate_is_a_400_with_no_partial_state(
     assert "Null" not in exports
 
 
+def test_compas_reupload_for_a_paired_study_with_a_null_coordinate_is_a_400(
+    tmp_path, monkeypatch
+):
+    """Fix round 1, CRITICAL: the null/non-finite check lived ONLY inside
+    the `if not contract_path.is_file()` branch, so re-uploading corrupt
+    compas geometry for an export that ALREADY has a contract -- the
+    ordinary case for any already-paired study, most real usage -- skipped
+    validation entirely and stored the corrupt file with a plain 200. That
+    stored geometry_path flows straight into staging.run_staging. The
+    check must run on every compas upload, paired or not; the no-partial-
+    state rule applies here exactly as it does for a brand new export."""
+
+    client, _ = make_client(tmp_path, monkeypatch)
+    upload_dir = tmp_path / "upload"
+    before_contract = (upload_dir / "Tiny-contract.json").read_text(encoding="utf-8")
+    before_compas = (upload_dir / "Tiny-compas.json").read_text(encoding="utf-8")
+
+    response = client.put(
+        "/api/uploads/exports/Tiny/compas",
+        content=json.dumps(_pyramid_with_null_coordinate()).encode(),
+    )
+    assert response.status_code == 400
+    assert "vertex" in response.json()["detail"]
+
+    assert (upload_dir / "Tiny-contract.json").read_text(encoding="utf-8") == before_contract
+    assert (upload_dir / "Tiny-compas.json").read_text(encoding="utf-8") == before_compas, (
+        "the corrupt document must not overwrite the existing compas file "
+        "either -- no partial state on the paired-study path"
+    )
+
+
 def test_compas_upload_with_non_finite_coordinates_is_a_400_counting_them(
     tmp_path, monkeypatch
 ):
@@ -1334,27 +1365,80 @@ def test_compas_upload_with_non_finite_coordinates_is_a_400_counting_them(
 def test_export_name_drive_relative_and_dotdot_cannot_escape_upload_dir(
     tmp_path, monkeypatch
 ):
-    """Fix 2: the export upload name check omitted ':' entirely and never
-    ran _contained, so a Windows drive-relative name like 'D:evil' slipped
-    the naive '/'/'\\'/'..' guard and Path's own join could replace
-    UPLOAD_DIR outright. Mirrors test_windows_drive_relative_names_
-    cannot_escape (hdri/columns) for the exports upload route."""
+    """Fix 2 (route level, strengthened in fix round 1): the export upload
+    name check omitted ':' entirely and never ran _contained, so a Windows
+    drive-relative name could slip the naive '/'/'\\'/'..' guard. This
+    proves the REJECTION CONTRACT holds for every input an attacker would
+    actually try -- 'C:evil', 'D:evil', and a backslash '..' traversal
+    alike -- rather than leaning on a filesystem accident: 'C:evil'
+    happens to fold harmlessly back inside UPLOAD_DIR when UPLOAD_DIR is
+    itself on the C: drive (a same-drive pathlib quirk, not a property of
+    the check), so a red proof built only on that one string would be
+    demonstrating the wrong thing. See
+    test_contained_itself_refuses_the_genuine_cross_drive_escape below for
+    the specific vector that actually would escape ('D:evil' against a
+    C:-drive UPLOAD_DIR) and _contained's own, independent refusal of it."""
 
     client, _ = make_client(tmp_path, monkeypatch)
-    colon = client.put(
-        "/api/uploads/exports/C:evil/compas",
-        content=b'{"thrustMesh": "{}"}',
-    )
-    assert colon.status_code == 400
-    traversal = client.put(
-        "/api/uploads/exports/..%2Fevil/compas",
-        content=b'{"thrustMesh": "{}"}',
-    )
-    assert traversal.status_code in (400, 404)
+    for bad_name in ("C:evil", "D:evil", "..%5Cevil"):
+        response = client.put(
+            "/api/uploads/exports/{}/compas".format(bad_name),
+            content=b'{"thrustMesh": "{}"}',
+        )
+        assert response.status_code == 400, "{!r} was not rejected: {} {!r}".format(
+            bad_name, response.status_code, response.text[:200])
     assert not list(tmp_path.rglob("*evil*")), (
-        "no file named for the drive-relative or traversal payload may "
-        "exist anywhere under tmp_path"
+        "no file named for any of the rejected names may exist anywhere "
+        "under tmp_path"
     )
+
+
+def test_contained_itself_refuses_the_genuine_cross_drive_escape(tmp_path, monkeypatch):
+    """The route-level 400s above hold regardless of which guard actually
+    fires -- the ':' character check alone already rejects every case
+    tried there, so that test does not by itself prove _contained is
+    doing anything. This proves _contained specifically: 'D:evil-
+    compas.json' joined onto a C:-drive UPLOAD_DIR resolves to a path with
+    no relation to UPLOAD_DIR at all (pathlib treats the segment as
+    drive-relative to D:, discarding the base entirely -- confirmed
+    directly, not assumed), and _contained's own containment check must,
+    and does, refuse it -- refusing suspicious names outright by contract,
+    not merely relying on where they happen to resolve on this machine."""
+
+    client, _ = make_client(tmp_path, monkeypatch)
+    import app as app_module
+
+    candidate = app_module.bundle.UPLOAD_DIR / "D:evil-compas.json"
+    assert str(candidate).startswith("D:"), (
+        "D:evil-compas.json must actually be drive-relative once joined "
+        "onto a C:-drive UPLOAD_DIR, or this test is not proving what it "
+        "claims -- got {!r}".format(candidate)
+    )
+    assert not app_module._contained(app_module.bundle.UPLOAD_DIR, "D:evil-compas.json")
+
+
+def test_frames_study_slug_drive_relative_cannot_escape(tmp_path, monkeypatch):
+    """Fix round 1, Important: frames_dir's 'study-' branch (the only
+    other route in app.py that builds a filesystem path from a caller-
+    supplied path segment) still checked only '/'/'\\'/'..' and never ran
+    _contained -- the same character class and the same guard this task
+    closed everywhere else. Pre-fix, a drive-relative slug slipped past
+    the naive check and reached the STUDIES_DIR existence lookup, so
+    whether it 400'd depended on what, if anything, happened to sit at
+    the resolved path (usually nothing, so it read as a plain 404 -- a
+    validation gap disguised as an ordinary miss, not a guard failure
+    every time, the same doctrine test_windows_drive_relative_names_
+    cannot_escape already established for hdri/columns)."""
+
+    client, _ = make_client(tmp_path, monkeypatch)
+    response = client.post(
+        "/api/frames/study-D:evil", params={"frame": 1}, content=b"png-bytes"
+    )
+    assert response.status_code == 400, "{} {!r}".format(
+        response.status_code, response.text[:200])
+    stitch = client.post("/api/frames/study-D:evil/stitch")
+    assert stitch.status_code == 400
+    assert not list(tmp_path.rglob("*evil*"))
 
 
 def test_index_names_the_missing_studio_js_instead_of_500ing(tmp_path, monkeypatch):
@@ -1383,13 +1467,21 @@ def test_index_names_the_missing_studio_js_instead_of_500ing(tmp_path, monkeypat
 def test_reupload_deletes_stale_fea_verification(tmp_path, monkeypatch):
     """Fix 5: _invalidate_studio_cache dropped bundle-*.json and
     staging-*.json but never fea-verification.json, so a re-import under
-    the same name (changed geometry) kept serving SILENTLY WRONG old
-    verification numbers in the next bundle. fea-verification.json is the
-    only per-slug verification artifact anything under bench/studio
-    writes (STUDIES_DIR/slug directly, not the nested studio/ cache dir;
-    confirmed against bundle.py's own _read_optional call site and
-    bench/demo/09_structural_verification.py's own write) -- there is no
-    sibling to also cover."""
+    the same name with CHANGED GEOMETRY kept serving SILENTLY WRONG old
+    verification numbers in the next bundle -- the design spec's own
+    acceptance line. fea-verification.json is the only per-slug
+    verification artifact anything under bench/studio writes (STUDIES_DIR/
+    slug directly, not the nested studio/ cache dir; confirmed against
+    bundle.py's own _read_optional call site and bench/demo/
+    09_structural_verification.py's own write) -- there is no sibling to
+    also cover.
+
+    Fix round 1, Important: the re-upload below genuinely moves a vertex
+    (mirrors test_reupload_with_changed_geometry_invalidates_bundle_and_
+    staging_caches's own pattern) and the final bundle's own geometry is
+    asserted to have actually changed -- re-uploading byte-identical
+    content would only prove the fix runs on ANY successful upload, not
+    that it earns the spec's "re-upload changes geometry" claim."""
 
     client, _ = make_client(tmp_path, monkeypatch)
     study_dir = tmp_path / "studies" / "tiny"
@@ -1405,9 +1497,11 @@ def test_reupload_deletes_stale_fea_verification(tmp_path, monkeypatch):
     assert before.status_code == 200
     assert before.json()["verification"] == {"stale": True}
 
+    changed = tiny_contract()
+    changed["equilibrium"]["vertices"][0]["z"] = 9.0
     reupload = client.put(
         "/api/uploads/exports/Tiny/contract",
-        content=json.dumps(tiny_contract()).encode(),
+        content=json.dumps(changed).encode(),
     )
     assert reupload.status_code == 200
     assert not (study_dir / "fea-verification.json").is_file()
@@ -1418,6 +1512,10 @@ def test_reupload_deletes_stale_fea_verification(tmp_path, monkeypatch):
     )
     assert after.status_code == 200
     assert after.json()["verification"] is None
+    assert after.json()["analysis_mesh"]["vertices"][0][2] == 9.0, (
+        "the re-upload must actually have changed the geometry the next "
+        "bundle serves, not merely re-stored the same bytes"
+    )
 
 
 def test_slug_collision_between_different_export_names_is_a_400(tmp_path, monkeypatch):
