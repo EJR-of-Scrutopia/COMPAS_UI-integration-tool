@@ -17,7 +17,7 @@ import os
 import tempfile
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import cutting
 import domain
@@ -95,6 +95,20 @@ REQUIRED_BUNDLE_KEYS = (
     # loops the attachment found (openings or not), so a bundle missing it
     # is stale in the same way one missing any field above already is.
     "tessellation.boundary_loops",
+    # Cut cancellation rider (2026-08-19): domain.CROSSING_RULE names the
+    # geometric rule radius_at currently implements (see the comment on
+    # that constant for when to bump it). Every entry above this line is
+    # presence-only: it can tell a cached bundle apart from one missing a
+    # field, but not a bundle built under a DIFFERENT geometry rule that
+    # already has every field a newer rule also produces -- a bundle cut
+    # under the outermost crossing rule the rim-remainder wave replaced
+    # passed every gate above unchanged while still carrying that rule's
+    # geometry. tessellation.crossing_rule makes the rule itself part of
+    # the freshness check: a bundle whose stamp does not match the rule
+    # this code currently implements (missing entirely, on anything cut
+    # before this task) is stale in the same way one missing any field
+    # above already is.
+    "tessellation.crossing_rule",
 )
 
 
@@ -232,6 +246,131 @@ def clear_cut_memo() -> None:
         _cut_memo.clear()
 
 
+class _CutHolder:
+    """One in-flight cut build for a single key (cut cancellation,
+    2026-08-19): a threading.Event plus a result slot and an error slot.
+    The builder thread -- the first caller to find its key absent from
+    both _cut_memo and _cut_inflight -- fills exactly one of the two slots
+    and then sets event; every other caller for the SAME key in the
+    meantime (a joiner) waits on event and reads whichever slot the
+    builder filled, instead of each running its own, fully redundant
+    compute of the same expensive cut (see _cut_for). The slots are
+    written exactly once, strictly before event is set, so a joiner
+    reading them after event.wait() returns needs no lock of its own:
+    Event's own internal lock is the happens-before edge.
+    """
+
+    __slots__ = ("event", "result", "error")
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.result = None
+        self.error: Optional[BaseException] = None
+
+
+# Builds currently under way, one holder per cut key, so a second request
+# for a key already building JOINS the first instead of paying for its
+# own, fully redundant compute (single-flight; the /api/runs 409/attach-
+# to-existing pattern, applied here at the layer where the cut memo above
+# already lives). Guarded by the SAME _cut_memo_lock the memo itself uses:
+# a holder is created and installed, and later removed and (on success)
+# promoted into _cut_memo, in the same critical sections that already
+# read and write the memo, so a caller taking the lock always sees one
+# consistent picture -- a key is either memoised, in flight, or neither,
+# never something in between.
+_cut_inflight: "Dict[tuple, _CutHolder]" = {}
+
+
+class CutSuperseded(Exception):
+    """Raised out of an in-flight interactive cut when a strictly newer,
+    different-key interactive request has arrived for the same export
+    (cut cancellation, 2026-08-19; see superseded() below).
+
+    Cooperative, not preemptive -- nothing interrupts the building thread.
+    _cut_for builds a zero-argument checkpoint closure only when it is
+    given an interactive_token, and threads it through build_tessellation_
+    for (which threads it on into generators.generate, called once per
+    course) and pieces.segment_pieces (called once per cell), exactly
+    like Task 1's own checkpoint hooks. The closure raises this the next
+    time either loop reaches its own checkpoint call after a newer,
+    different-key request has registered.
+
+    build_bundle does not catch it: only CutRefused, its own expected,
+    valid-geometry refusal, is caught there. This propagates unmodified
+    through load_or_build_bundle to app.get_bundle, the only place that
+    knows what to do with it -- answer 409 {"superseded": true} rather
+    than 500, since the client's own sequence guard (or its
+    AbortController) means nobody was left waiting to render this build
+    anyway.
+
+    Always raised before build_bundle's single write-at-the-end can run
+    (the generation-guarded _cut_memo write inside _cut_for, and the
+    bundle JSON write at the tail of build_bundle, both sit strictly after
+    every checkpoint call in the cut they depend on), so a superseded
+    build writes NOTHING: no memo entry, no file on disk.
+    """
+
+
+# Cooperative supersession's own bookkeeping (cut cancellation,
+# 2026-08-19): a per-export record of the freshest interactive bundle GET,
+# so an in-flight cut for a key nobody wants any more can be told to stop
+# instead of running to completion for an answer the client has already
+# abandoned (the design doc's measured problem: two full 13.7 s cuts run
+# to completion under GIL contention for an answer only the second
+# caller's request was still waiting on).
+#
+# register_interactive is called once per interactive GET, in app.py's
+# get_bundle, before load_or_build_bundle -- even on a request that ends
+# up served straight from the on-disk cache and never reaches _cut_for at
+# all, because that cache hit is itself evidence the caller has moved on
+# to a DIFFERENT key, and an older, still-running build for the OLD key
+# must still be told so. That is why the key is recorded here, at
+# registration, rather than resolved later inside _cut_for: a cache-hit
+# request never reaches _cut_for, so by then it would be too late to have
+# said anything at all.
+#
+# Guarded by the existing _cut_memo_lock rather than a lock of its own:
+# both pieces of state are small, cheap to touch, and already read
+# together on the same request path, so a second lock would only add
+# ordering risk for no real concurrency gain.
+_interactive_token_counter = 0
+_interactive_live: "Dict[str, Tuple[int, tuple]]" = {}
+
+
+def register_interactive(export: str, key: tuple) -> int:
+    """A new, strictly increasing token for export's next interactive
+    build, recorded immediately as export's freshest live request, wanting
+    key. See the module comment above for why key is threaded in here
+    rather than resolved later, inside _cut_for.
+    """
+
+    global _interactive_token_counter
+    with _cut_memo_lock:
+        _interactive_token_counter += 1
+        token = _interactive_token_counter
+        _interactive_live[export] = (token, key)
+    return token
+
+
+def superseded(export: str, token: int, key: tuple) -> bool:
+    """True iff a strictly newer interactive token has registered for
+    export wanting a DIFFERENT key than key.
+
+    An identical key never supersedes: the newer request finds the same
+    key already building in _cut_inflight and joins it instead of
+    starting a build of its own (see _cut_for), so the two are never in
+    conflict over what the answer should be, only over who computes it
+    once.
+    """
+
+    with _cut_memo_lock:
+        current = _interactive_live.get(export)
+    if current is None:
+        return False
+    latest_token, latest_key = current
+    return latest_token > token and latest_key != key
+
+
 class CutRefused(ValueError):
     """The cutting engine's own refusal on otherwise valid geometry.
 
@@ -270,12 +409,21 @@ class CutRefused(ValueError):
     """
 
 
-def build_tessellation_for(export_name, contract, arrays, render, pattern, size):
+def build_tessellation_for(
+    export_name, contract, arrays, render, pattern, size, checkpoint=None
+):
     """The one cut, built once, for the drawing and for the analysis alike.
 
     staging.py calls this too. Two builders would be two cuts, and a
     stage plan that names cells the pieces do not have is the kind of
     mismatch that only shows up as a crash mid animation.
+
+    checkpoint (cut cancellation, 2026-08-19): threaded straight through
+    to generators.generate on the generated-cut branch below, unused on
+    the authored-tessellation branch (tessellation.from_document has no
+    per-course or per-cell loop of its own to check from). None (the
+    default, and the only value staging.py's own direct call ever passes)
+    means this behaves exactly as before this parameter existed.
     """
 
     surface = cutting.Surface(render["vertices"], render["faces"])
@@ -322,7 +470,7 @@ def build_tessellation_for(export_name, contract, arrays, render, pattern, size)
                 arrays["vertices"], arrays["faces"],
                 geometry.face_centroids(arrays["vertices"], arrays["faces"]),
             )
-            tess = generators.generate(pattern, plan, size)
+            tess = generators.generate(pattern, plan, size, checkpoint=checkpoint)
         except ValueError as error:
             # See CutRefused's own docstring: this is the one place the
             # distinction between "the engine refuses valid geometry" and
@@ -342,31 +490,99 @@ def build_tessellation_for(export_name, contract, arrays, render, pattern, size)
     return tess, surface, binding
 
 
-def _cut_for(export_name, contract, arrays, render, pattern, size):
+def _cut_for(export_name, contract, arrays, render, pattern, size, interactive_token=None):
+    """The memoised, single-flighted, optionally cancellable cut.
+
+    interactive_token (cut cancellation, 2026-08-19): None (the default --
+    every caller except an interactive bundle GET: staging, tests, and any
+    other _cut_for caller) means no checkpoint is built at all, so this
+    call can never be superseded, whatever else registers for export in
+    the meantime (see superseded's own docstring and CutSuperseded's). A
+    real token builds a zero-argument closure that raises CutSuperseded
+    the moment generators.generate or pieces.segment_pieces calls it after
+    a newer, different-key request has registered -- threaded through
+    build_tessellation_for and pieces.segment_pieces exactly like Task 1's
+    own checkpoint parameters.
+
+    Single-flight: a second call for a key already building here (its own
+    interactive_token irrelevant to this part -- joining is keyed on the
+    cut key alone) waits on the first build's own _CutHolder rather than
+    running its own, fully redundant compute, and shares its result or
+    re-raises its error. A joined result respects the same generation
+    rule the memo write below already enforces: it is whatever the
+    builder actually produced, whether or not a concurrent clear_cut_memo
+    kept it from being memoised.
+    """
+
     key = (export_name, pattern, size)
+    checkpoint = None
+    if interactive_token is not None:
+        def checkpoint():
+            if superseded(export_name, interactive_token, key):
+                raise CutSuperseded(
+                    "the cut for {!r} was superseded by a newer request "
+                    "before it finished".format(export_name)
+                )
+
     with _cut_memo_lock:
         generation = _cut_memo_generation
         if key in _cut_memo:
             _cut_memo.move_to_end(key)
             return _cut_memo[key]
-    tess, surface, binding = build_tessellation_for(
-        export_name, contract, arrays, render, pattern, size)
-    supports = geometry.support_ids(contract)
-    support_points = [
-        [arrays["vertices"][i][0], arrays["vertices"][i][1]] for i in supports
-    ]
-    made, report = pieces.segment_pieces(tess, surface, support_points)
-    result = (tess, binding, supports, made, report)
-    with _cut_memo_lock:
-        # A clear that ran while this cut was being built means the export
-        # may have changed under it: the result is still returned to its
-        # own caller (built from the inputs that caller loaded) but never
-        # memoised, so a stale cut cannot outlive its export.
-        if generation == _cut_memo_generation:
-            _cut_memo[key] = result
-            while len(_cut_memo) > CUT_MEMO_LIMIT:
-                _cut_memo.popitem(last=False)
-    return result
+        holder = _cut_inflight.get(key)
+        if holder is not None:
+            joining = True
+        else:
+            holder = _CutHolder()
+            _cut_inflight[key] = holder
+            joining = False
+
+    if joining:
+        # A build for this exact key is already running, under another
+        # caller's own interactive_token (or none at all -- the joiner's
+        # own token plays no part in whether ITS wait is honoured, only
+        # in whether the BUILDER it is waiting on later gets superseded).
+        # Waited on outside the lock: the wait can be the whole several-
+        # second cost of a real cut, and nothing else keyed on
+        # _cut_memo_lock may sit blocked behind it.
+        holder.event.wait()
+        if holder.error is not None:
+            raise holder.error
+        return holder.result
+
+    try:
+        tess, surface, binding = build_tessellation_for(
+            export_name, contract, arrays, render, pattern, size,
+            checkpoint=checkpoint)
+        supports = geometry.support_ids(contract)
+        support_points = [
+            [arrays["vertices"][i][0], arrays["vertices"][i][1]] for i in supports
+        ]
+        made, report = pieces.segment_pieces(
+            tess, surface, support_points, checkpoint=checkpoint)
+        result = (tess, binding, supports, made, report)
+    except Exception as error:
+        with _cut_memo_lock:
+            del _cut_inflight[key]
+            holder.error = error
+            holder.event.set()
+        raise
+    else:
+        with _cut_memo_lock:
+            del _cut_inflight[key]
+            # A clear that ran while this cut was being built means the
+            # export may have changed under it: the result is still
+            # returned to its own caller and to every joiner waiting on
+            # this same holder (built from the inputs this caller loaded)
+            # but never memoised, so a stale cut cannot outlive its
+            # export.
+            if generation == _cut_memo_generation:
+                _cut_memo[key] = result
+                while len(_cut_memo) > CUT_MEMO_LIMIT:
+                    _cut_memo.popitem(last=False)
+            holder.result = result
+            holder.event.set()
+        return result
 
 
 def _render_mesh(vertices: List[list], faces: List[list]) -> Dict[str, list]:
@@ -407,7 +623,8 @@ def _render_mesh(vertices: List[list], faces: List[list]) -> Dict[str, list]:
 
 
 def build_bundle(
-    export_name: str, material: str, pattern: str, size: float, thickness: float = 0.2
+    export_name: str, material: str, pattern: str, size: float, thickness: float = 0.2,
+    interactive_token: Optional[int] = None,
 ) -> Dict:
     pairs = geometry.available_exports(UPLOAD_DIR)
     if export_name not in pairs:
@@ -423,8 +640,19 @@ def build_bundle(
 
     uncut_reason = None
     try:
+        # interactive_token: None on every caller except an interactive
+        # bundle GET (app.get_bundle) -- staging's own start_run() work()
+        # and every test in this repo call build_bundle with no token at
+        # all, so their cut builds no checkpoint and can never be told to
+        # stop by a later, unrelated interactive request (see _cut_for's
+        # and CutSuperseded's own docstrings). CutSuperseded is
+        # deliberately NOT caught here alongside CutRefused: it is not
+        # this function's own, expected outcome the way a refused plan
+        # is, and propagates unmodified to whichever caller knows what to
+        # do with it (app.get_bundle, 409).
         tess, binding, supports, made, report = _cut_for(
-            export_name, contract, arrays, render, pattern, size)
+            export_name, contract, arrays, render, pattern, size,
+            interactive_token=interactive_token)
     except CutRefused as error:
         # P5 (presentation batch, 2026-08-18): the engine's own refusal on
         # otherwise valid geometry (see CutRefused's own docstring) used to
@@ -455,6 +683,13 @@ def build_bundle(
             "courses": tess["courses"],
             "cells": len(tess["cells"]),
             "boundary_loops": tess["boundary_loops"],
+            # Cut cancellation rider (2026-08-19): the geometric rule
+            # radius_at implements right now, stamped on every fresh cut
+            # so a cache built under an earlier rule can be told apart
+            # from one built under this one -- see domain.CROSSING_RULE's
+            # own comment and REQUIRED_BUNDLE_KEYS' tessellation.
+            # crossing_rule entry above.
+            "crossing_rule": domain.CROSSING_RULE,
             "provenance": tess.get("provenance"),
             "z_offset_max": tess.get("z_offset_max"),
             "courses_inferred": tess.get("courses_inferred", False),
@@ -621,8 +856,20 @@ def _pieces_are_uniquely_keyed(document: Dict) -> bool:
 
 
 def load_or_build_bundle(
-    export_name: str, material: str, pattern: str, size: float, thickness: float = 0.2
+    export_name: str, material: str, pattern: str, size: float, thickness: float = 0.2,
+    interactive_token: Optional[int] = None,
 ) -> Dict:
+    """interactive_token: threaded through to build_bundle on a cache miss.
+
+    A cache HIT never reaches build_bundle (and so never reaches _cut_for
+    or a checkpoint at all), but the token still has to be passed IN here
+    -- app.get_bundle calls register_interactive before this function ever
+    runs, precisely so a request that turns out to be a cache hit still
+    counts as evidence the caller has moved on to a new key, for whatever
+    OTHER, still-building interactive request this one's registration may
+    supersede (see register_interactive's own comment).
+    """
+
     cached = _read_optional(
         bundle_path(geometry.slugify(export_name), material, pattern, size, thickness)
     )
@@ -632,4 +879,6 @@ def load_or_build_bundle(
         and _pieces_are_uniquely_keyed(cached)
     ):
         return cached
-    return build_bundle(export_name, material, pattern, size, thickness)
+    return build_bundle(
+        export_name, material, pattern, size, thickness,
+        interactive_token=interactive_token)

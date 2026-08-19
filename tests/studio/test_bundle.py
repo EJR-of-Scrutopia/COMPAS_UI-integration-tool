@@ -776,3 +776,244 @@ def test_the_cut_is_reused_across_material_and_thickness(tmp_path, monkeypatch):
     bundle.clear_cut_memo()
     bundle.build_bundle("Tiny", "concrete", "bonded-courses", 0.6)
     assert calls == ["Tiny", "Tiny", "Tiny"]
+
+
+def _studio_module(name):
+    """Import a bench/studio module by name, after fake_export/studio()
+    has already put bench/studio on sys.path."""
+    import importlib
+
+    return importlib.import_module(name)
+
+
+def test_single_flight_joins_a_cold_identical_key(tmp_path, monkeypatch):
+    """(a) Cut cancellation, task 2 acceptance bar: two callers requesting
+    the identical cold cut key concurrently must run segment_pieces
+    exactly ONCE, and both must receive the SAME result object -- not two
+    equal-but-separate computes, the whole point of joining at the
+    _cut_for layer where the memo already lives (see bundle._cut_for's
+    own docstring).
+
+    Deterministic via an Event handshake, not a sleep: the fake
+    segment_pieces signals "started" (proof the builder has already
+    registered itself in _cut_inflight, since that registration happens
+    strictly before build_tessellation_for/segment_pieces are ever
+    called) before blocking on "release", so the second thread is only
+    started once a join is guaranteed to be possible. Whichever thread
+    the OS actually schedules to reach _cut_for's own lock-guarded check
+    first, the outcome is the same: segment_pieces runs once, both
+    threads read the identical result (either as the builder or by
+    joining/reading straight out of the now-populated memo).
+    """
+    import threading
+
+    bundle, upload, studies = fake_export(tmp_path, monkeypatch)
+    pieces = _studio_module("pieces")
+
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+    real_segment_pieces = pieces.segment_pieces
+
+    def fake_segment_pieces(tess, surface, support_points, checkpoint=None):
+        calls.append(1)
+        started.set()
+        assert release.wait(timeout=5), "release was never set"
+        return real_segment_pieces(tess, surface, support_points, checkpoint=checkpoint)
+
+    monkeypatch.setattr(pieces, "segment_pieces", fake_segment_pieces)
+
+    pairs = bundle.geometry.available_exports(bundle.UPLOAD_DIR)
+    contract = bundle.geometry.load_contract(pairs["Tiny"]["contract"])
+    arrays = bundle.geometry.mesh_arrays(contract)
+    render = bundle._render_mesh(arrays["vertices"], arrays["faces"])
+
+    results = {}
+
+    def call(name):
+        results[name] = bundle._cut_for(
+            "Tiny", contract, arrays, render, "bonded-courses", 0.9)
+
+    t1 = threading.Thread(target=call, args=("first",))
+    t1.start()
+    assert started.wait(timeout=5), "the builder never started"
+
+    t2 = threading.Thread(target=call, args=("second",))
+    t2.start()
+
+    release.set()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+    assert not t1.is_alive() and not t2.is_alive(), "a thread never finished"
+
+    assert len(calls) == 1, (
+        "segment_pieces must run exactly once for a single-flight join, "
+        "ran {} times".format(len(calls))
+    )
+    assert results["first"] is results["second"], (
+        "a joiner must share the builder's own result object, not a "
+        "separately computed equal one"
+    )
+
+
+def test_identical_key_newer_interactive_request_joins_not_supersedes(tmp_path, monkeypatch):
+    """(d) Cut cancellation, task 2 acceptance bar: a second interactive
+    request for the SAME (export, pattern, size) key must join the
+    first's in-flight build rather than superseding it, even though its
+    own token is strictly newer than the first's -- an identical key
+    never supersedes (bundle.superseded's own docstring), because the
+    second request finds the key already building and joins instead of
+    starting a build of its own.
+    """
+    import threading
+
+    bundle, upload, studies = fake_export(tmp_path, monkeypatch)
+    pieces = _studio_module("pieces")
+
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+    real_segment_pieces = pieces.segment_pieces
+
+    def fake_segment_pieces(tess, surface, support_points, checkpoint=None):
+        calls.append(1)
+        started.set()
+        assert release.wait(timeout=5), "release was never set"
+        if checkpoint is not None:
+            # Must NOT raise: the second, newer registration below shares
+            # this exact key, so it must never read as a supersession.
+            checkpoint()
+        return real_segment_pieces(tess, surface, support_points, checkpoint=checkpoint)
+
+    monkeypatch.setattr(pieces, "segment_pieces", fake_segment_pieces)
+
+    key = ("Tiny", "bonded-courses", 0.9)
+    results = {}
+    errors = {}
+
+    def call_first():
+        token = bundle.register_interactive("Tiny", key)
+        try:
+            results["first"] = bundle.build_bundle(
+                "Tiny", "concrete", "bonded-courses", 0.9, interactive_token=token)
+        except Exception as error:
+            errors["first"] = error
+
+    t1 = threading.Thread(target=call_first)
+    t1.start()
+    assert started.wait(timeout=5), "the first build never started"
+
+    def call_second():
+        # The SAME key, a strictly newer token: must join, not supersede.
+        token = bundle.register_interactive("Tiny", key)
+        try:
+            results["second"] = bundle.build_bundle(
+                "Tiny", "concrete", "bonded-courses", 0.9, interactive_token=token)
+        except Exception as error:
+            errors["second"] = error
+
+    t2 = threading.Thread(target=call_second)
+    t2.start()
+
+    release.set()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+    assert not t1.is_alive() and not t2.is_alive(), "a thread never finished"
+
+    assert not errors, "an identical key must never raise CutSuperseded: {}".format(errors)
+    assert len(calls) == 1, "an identical key must join, not trigger a second cut"
+    assert results["first"]["pieces"] == results["second"]["pieces"]
+
+
+def test_a_staging_shaped_build_completes_despite_interactive_supersession(tmp_path, monkeypatch):
+    """(c) Cut cancellation, task 2 acceptance bar: build_bundle called
+    with no interactive_token (the staging path's own shape -- see
+    app.py's start_run() work(), which never passes one) builds no
+    checkpoint at all and so can never be superseded, even while a
+    DIFFERENT, later interactive registration for the same export exists.
+    A run's cut must complete even if the user flips patterns while it
+    runs (see the design doc's own "out of scope" list).
+    """
+    import threading
+
+    bundle, upload, studies = fake_export(tmp_path, monkeypatch)
+    pieces = _studio_module("pieces")
+
+    started = threading.Event()
+    release = threading.Event()
+    real_segment_pieces = pieces.segment_pieces
+
+    def fake_segment_pieces(tess, surface, support_points, checkpoint=None):
+        assert checkpoint is None, (
+            "a staging-shaped build (no interactive_token) must never "
+            "receive a checkpoint at all"
+        )
+        started.set()
+        assert release.wait(timeout=5), "release was never set"
+        return real_segment_pieces(tess, surface, support_points, checkpoint=checkpoint)
+
+    monkeypatch.setattr(pieces, "segment_pieces", fake_segment_pieces)
+
+    result = {}
+
+    def call_staging():
+        result["document"] = bundle.build_bundle(
+            "Tiny", "concrete", "bonded-courses", 0.9, interactive_token=None)
+
+    t = threading.Thread(target=call_staging)
+    t.start()
+    assert started.wait(timeout=5), "the staging build never started"
+
+    # A newer interactive request, a DIFFERENT key, registers for this
+    # very export while the staging build (no token, no checkpoint) is
+    # blocked mid-cut -- the condition that WOULD supersede an
+    # interactive build of the staging build's own key.
+    bundle.register_interactive("Tiny", ("Tiny", "monolithic-bands", 1.2))
+
+    release.set()
+    t.join(timeout=5)
+    assert not t.is_alive(), "the staging build never finished"
+
+    assert result["document"]["uncut_reason"] is None
+    assert result["document"]["pieces"], (
+        "a staging-shaped build must complete its cut even while "
+        "interactive supersession fires for its export"
+    )
+
+
+def test_a_fresh_bundle_carries_the_crossing_rule_stamp(tmp_path, monkeypatch):
+    """(e) Cut cancellation, task 2 acceptance bar: a fresh bundle carries
+    tessellation.crossing_rule == domain.CROSSING_RULE, and that key is
+    part of REQUIRED_BUNDLE_KEYS so a cache built before it existed is
+    stale (see the staleness-rebuild test below, mirroring the
+    boundary_loops staleness test above)."""
+    bundle, _, _ = fake_export(tmp_path, monkeypatch)
+    domain = _studio_module("domain")
+    fresh = bundle.build_bundle("Tiny", "concrete", "bonded-courses", 0.9)
+    assert fresh["tessellation"]["crossing_rule"] == "first-exit-2026-08-19"
+    assert fresh["tessellation"]["crossing_rule"] == domain.CROSSING_RULE
+    assert "tessellation.crossing_rule" in bundle.REQUIRED_BUNDLE_KEYS
+
+
+def test_a_bundle_cached_under_an_earlier_crossing_rule_is_stale(tmp_path, monkeypatch):
+    """Cut cancellation rider (2026-08-19): a bundle cached before this
+    task carries no crossing_rule at all -- and, in the future, one
+    cached under whatever rule replaces first-exit-2026-08-19 will carry
+    an outdated value instead. Either way, a cache whose stamp does not
+    match domain.CROSSING_RULE must be rebuilt, the same staleness shape
+    as test_a_bundle_cached_before_the_boundary_loop_count_existed_is_
+    stale above.
+    """
+    bundle, _, _ = fake_export(tmp_path, monkeypatch)
+    fresh = bundle.build_bundle("Tiny", "concrete", "bonded-courses", 0.9)
+    assert "crossing_rule" in fresh["tessellation"]
+    cached_path = bundle.bundle_path("tiny", "concrete", "bonded-courses", 0.9, 0.2)
+    stale = json.loads(json.dumps(fresh))
+    del stale["tessellation"]["crossing_rule"]
+    cached_path.write_text(json.dumps(stale), encoding="utf-8")
+    loaded = bundle.load_or_build_bundle("Tiny", "concrete", "bonded-courses", 0.9)
+    assert "crossing_rule" in loaded["tessellation"], (
+        "a bundle missing tessellation.crossing_rule was served rather "
+        "than re-cut"
+    )
+    assert loaded["tessellation"]["crossing_rule"] == "first-exit-2026-08-19"

@@ -133,8 +133,32 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
         size: float = Query(...), thickness: float = Query(0.2),
     ):
         _validate(export, material, pattern, size, thickness)
+        # Cut cancellation (2026-08-19): every interactive bundle GET
+        # registers a token for its export BEFORE calling
+        # load_or_build_bundle, even one that turns out to be served
+        # straight from the on-disk cache and never reaches a cut at all
+        # -- that cache hit is itself evidence this caller wants a
+        # DIFFERENT key than whatever an older, still-running interactive
+        # build for this export wants, and the older build has to be told
+        # (see bundle.register_interactive's own comment). The staging/
+        # runs path (start_run's work(), below) never registers and never
+        # passes a token, so it can never be superseded by this at all.
+        token = bundle.register_interactive(export, (export, pattern, size))
         try:
-            return bundle.load_or_build_bundle(export, material, pattern, size, thickness)
+            return bundle.load_or_build_bundle(
+                export, material, pattern, size, thickness, interactive_token=token)
+        except bundle.CutSuperseded:
+            # A strictly newer, different-key interactive request for
+            # this export registered while this one's own cut was still
+            # running (see bundle.CutSuperseded's own docstring). Not a
+            # server fault: the client's own sequence guard, or its
+            # AbortController, means nobody was left waiting to render
+            # this answer anyway. One log line, not a stack trace.
+            print(
+                "bundle: {} superseded by a newer request; cut cancelled "
+                "mid-build".format(export)
+            )
+            return JSONResponse({"superseded": True}, status_code=409)
         except ValueError as error:
             # tessellation.from_document raises ValueError with a message
             # naming the offending cell -- a bad authored tessellation lands

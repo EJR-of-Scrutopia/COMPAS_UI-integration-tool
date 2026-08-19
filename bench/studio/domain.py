@@ -226,6 +226,24 @@ def plan_domain(
     }
 
 
+CROSSING_RULE = "first-exit-2026-08-19"
+# Names the geometric rule radius_at below currently implements: bump
+# this identifier whenever radius_at's own answer changes for some input
+# it already accepts (a new tie-break, a different epsilon, a different
+# parity rule -- anything that changes WHICH crossing counts as the rim,
+# not just how it is computed). Exists because bundle.REQUIRED_BUNDLE_KEYS
+# is presence-only: it can tell a cached bundle apart from one missing a
+# field, but not a bundle built under a DIFFERENT crossing rule whose
+# fields are all already present under the newer rule too -- the
+# 2026-08-19 rim wave's own final review finding, closed by cut
+# cancellation's task 2. bundle.py stamps this value into every fresh
+# bundle's tessellation summary as crossing_rule, and
+# REQUIRED_BUNDLE_KEYS gains tessellation.crossing_rule, so a bundle cut
+# under an earlier rule (this field absent, or carrying an older value)
+# fails the freshness gate and is rebuilt rather than served forever
+# under geometry a fresh cut would no longer produce.
+
+
 def radius_at(domain: Dict, theta: float) -> float:
     """Distance from the axis to the rim along theta: the first exit.
 

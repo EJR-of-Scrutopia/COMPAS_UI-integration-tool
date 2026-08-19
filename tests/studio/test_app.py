@@ -1099,3 +1099,80 @@ def test_export_reupload_serves_new_geometry(tmp_path, monkeypatch):
     )
     assert second.status_code == 200
     assert first.content != second.content, "a re-upload must serve the new geometry"
+
+
+def test_a_slow_build_superseded_by_a_newer_different_key_request_409s(tmp_path, monkeypatch):
+    """(b) Cut cancellation, task 2 acceptance bar, end to end through the
+    route: a slow interactive build blocked mid-cut is superseded when a
+    newer request for a DIFFERENT key registers for the same export. The
+    slow build's own checkpoint raises bundle.CutSuperseded once released,
+    the route answers 409 {"superseded": true}, nothing is memoised or
+    written to disk for the slow build's own key, and the newer request
+    completes normally.
+
+    Deterministic via Event handshakes, not sleeps: the fake segment_
+    pieces distinguishes "the first call" (the slow one, which blocks and
+    then checks its own checkpoint) from every later call (which passes
+    straight through to the real implementation) by a call counter, not
+    by inspecting which key is being cut -- the newer request's own
+    thread only starts once "started" proves the slow build has already
+    registered itself, so no sleep is needed to avoid a race.
+    """
+    import threading
+
+    client, studies = make_client(tmp_path, monkeypatch)
+    import bundle
+    import pieces
+
+    started = threading.Event()
+    release = threading.Event()
+    call_count = {"n": 0}
+    count_lock = threading.Lock()
+    real_segment_pieces = pieces.segment_pieces
+
+    def fake_segment_pieces(tess, surface, support_points, checkpoint=None):
+        with count_lock:
+            call_count["n"] += 1
+            mine = call_count["n"]
+        if mine == 1:
+            started.set()
+            assert release.wait(timeout=5), "release was never set"
+            if checkpoint is not None:
+                checkpoint()
+        return real_segment_pieces(tess, surface, support_points, checkpoint=checkpoint)
+
+    monkeypatch.setattr(pieces, "segment_pieces", fake_segment_pieces)
+
+    responses = {}
+
+    def call_first():
+        responses["first"] = client.get(
+            "/api/studies/Tiny/bundle",
+            params={"material": "concrete", "pattern": "bonded-courses", "size": 0.9},
+        )
+
+    t1 = threading.Thread(target=call_first)
+    t1.start()
+    assert started.wait(timeout=5), "the slow build never started"
+
+    # A newer interactive request for a DIFFERENT key (a different size)
+    # on the same export.
+    second = client.get(
+        "/api/studies/Tiny/bundle",
+        params={"material": "concrete", "pattern": "bonded-courses", "size": 1.2},
+    )
+    assert second.status_code == 200, second.text
+
+    release.set()
+    t1.join(timeout=5)
+    assert not t1.is_alive(), "the slow build's own request never finished"
+
+    assert responses["first"].status_code == 409
+    assert responses["first"].json() == {"superseded": True}
+    assert call_count["n"] == 2, "exactly two cuts: the slow one and the newer one"
+
+    key = ("Tiny", "bonded-courses", 0.9)
+    assert key not in bundle._cut_memo, "a superseded build must not be memoised"
+    assert not bundle.bundle_path(
+        "tiny", "concrete", "bonded-courses", 0.9, 0.2
+    ).is_file(), "a superseded build must write nothing to disk"
