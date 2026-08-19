@@ -80,6 +80,13 @@ def test_an_interior_hole_yields_two_loops():
     assert set(loops[1]) == {14, 15, 20, 21}
     # ordering is by minimum vertex id: the interior hole sorts second.
     assert loops[0][0] < loops[1][0]
+    # the walk direction is part of the contract: from the loop's minimum
+    # vertex, the SMALLER-id neighbour comes first. Vertex 14's ring
+    # neighbours are 15 and 20, so the full sequence is pinned, not just
+    # the membership; likewise the outer rim leaves vertex 0 toward 1,
+    # not 6. A walk toward the larger neighbour would reverse both.
+    assert loops[1] == [14, 15, 21, 20]
+    assert loops[0][:2] == [0, 1]
 
 
 def test_two_holes_yield_three_loops_deterministically():
