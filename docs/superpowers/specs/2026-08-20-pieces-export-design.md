@@ -156,6 +156,34 @@ canvas (the harness never launches Rhino).
   parsed by the harness check (the same cross-repo pattern 6c used).
 - Both suites green; no em dashes; explicit-path commits; NEVER push.
 
+## Addendum, 2026-08-20 (Param's live feedback, before merge)
+
+Param's first live look asked for two additions; both land on the
+existing branches before the wave merges:
+
+1. BASE MESH: the document gains an OPTIONAL top-level "base_mesh":
+   {"vertices": [[x,y,z]...], "faces": [[i,j,k(,l)]...]} -- the
+   study's analysis mesh (the thrust wireframe), copied verbatim from
+   the bundle's analysis_mesh. Optional: a document without it stays
+   valid, and the component tolerates absence (B outputs null and D
+   says so). The route always writes it.
+2. COURSE TREES: the component's list outputs become Grasshopper DATA
+   TREES branched by course -- path {course}, items in drop order
+   within each branch (the same total order as before, partitioned).
+   Outputs are now: M (mesh, tree), K (key text, tree), S (support
+   bool, tree), B (base mesh, item, nullable), D (diagnostics, item).
+   The flat C output is REMOVED: the branch path IS the course, and D
+   documents that reading. CONTROLLER RULING: this supersedes the
+   reviewed flat-list contract on the owner's explicit feedback
+   ("tree structured / listed cut elements", "the base wireframe mesh
+   too"); the alignment guarantee carries over per branch (a failed
+   piece is a null slot in its course branch, keys/supports keeping
+   step).
+
+The harness contract entries and the cross-repo fixture update
+accordingly (the fixture regenerates with base_mesh present, via the
+real route code).
+
 ## Out of scope (recorded)
 
 - Taper/gap as export parameters (deferral above).
