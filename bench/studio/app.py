@@ -212,7 +212,16 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
         size: float = Query(...), thickness: float = Query(0.2),
     ):
         """The cut blocks, extruded to their final solid, as bench.pieces/1
-        (docs/superpowers/specs/2026-08-20-pieces-export-design.md).
+        (docs/superpowers/specs/2026-08-20-pieces-export-design.md, and
+        its "Addendum, 2026-08-20" for base_mesh below).
+
+        The document also carries base_mesh -- the study's analysis mesh
+        (the thrust wireframe), copied verbatim from the bundle's own
+        analysis_mesh -- always written. base_mesh is optional in the
+        schema (older documents, and any future caller that omits it,
+        stay valid); this route simply always has it to give, so it
+        always writes it. The schema stays "bench.pieces/1": base_mesh
+        is optional-additive, not a version bump.
 
         export becomes part of the WRITTEN FILENAME below
         (<export>-pieces.json, inside the already-safe slug directory),
@@ -272,6 +281,21 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
                 "seat_gap": piece.get("seat_gap"),
             })
 
+        # Addendum, 2026-08-20 (Param's live feedback, item 1): base_mesh is
+        # the study's analysis mesh (the thrust wireframe), copied verbatim
+        # from the bundle's own analysis_mesh -- vertices and faces only
+        # (edges is bundle-only bookkeeping, not part of base_mesh's
+        # documented shape; faces may be quads, carried as-is). Optional in
+        # the schema (a document without it, or an older document written
+        # before this addendum, stays valid), but this route writes it
+        # every time -- the schema stays "bench.pieces/1", base_mesh is an
+        # optional-additive field, not a version bump.
+        analysis_mesh = document["analysis_mesh"]
+        base_mesh = {
+            "vertices": analysis_mesh["vertices"],
+            "faces": analysis_mesh["faces"],
+        }
+
         pieces_document = {
             "schema": "bench.pieces/1",
             "units": "m",
@@ -295,6 +319,7 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
             "courses": tess.get("courses"),
             "piece_count": len(exported_pieces),
             "degenerate_dropped": tess.get("degenerate_dropped") or [],
+            "base_mesh": base_mesh,
             "pieces": exported_pieces,
         }
 

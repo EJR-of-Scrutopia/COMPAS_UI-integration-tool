@@ -1635,6 +1635,38 @@ def test_pieces_export_writes_bench_pieces_matching_the_bundle_order(
     assert check["volume"] > 0
 
 
+def test_pieces_export_writes_the_base_mesh_verbatim_from_the_bundle(
+    tmp_path, monkeypatch
+):
+    """Addendum, 2026-08-20 (Param's live feedback, item 1): the document
+    gains an OPTIONAL top-level base_mesh -- the study's analysis mesh
+    (the thrust wireframe), copied verbatim from the bundle's own
+    analysis_mesh. The route writes it ALWAYS; only vertices and faces
+    travel (edges is bundle-only bookkeeping, not part of base_mesh's
+    documented shape)."""
+
+    client, studies = make_client(tmp_path, monkeypatch)
+    params = {"material": "concrete", "pattern": "bonded-courses", "size": 0.9,
+              "thickness": 0.2}
+    bundle_response = client.get("/api/studies/Tiny/bundle", params=params)
+    assert bundle_response.status_code == 200
+    analysis_mesh = bundle_response.json()["analysis_mesh"]
+    assert analysis_mesh["vertices"], "the Tiny fixture must have an analysis mesh for this test to prove anything"
+
+    response = client.post("/api/studies/Tiny/pieces-export", params=params)
+    assert response.status_code == 200
+    path = Path(response.json()["path"])
+    document = json.loads(path.read_text(encoding="utf-8"))
+
+    assert "base_mesh" in document
+    base_mesh = document["base_mesh"]
+    assert set(base_mesh) == {"vertices", "faces"}
+    assert len(base_mesh["vertices"]) == len(analysis_mesh["vertices"])
+    assert len(base_mesh["faces"]) == len(analysis_mesh["faces"])
+    assert base_mesh["vertices"] == analysis_mesh["vertices"]
+    assert base_mesh["faces"] == analysis_mesh["faces"]
+
+
 def test_pieces_export_raises_on_a_piece_that_fails_verification(
     tmp_path, monkeypatch
 ):
