@@ -1635,6 +1635,27 @@ def test_pieces_export_writes_bench_pieces_matching_the_bundle_order(
     assert check["volume"] > 0
 
 
+def test_pieces_export_raises_on_a_piece_that_fails_verification(
+    tmp_path, monkeypatch
+):
+    """Task 2 review follow-up: the raise-not-skip contract, proven. A
+    piece failing verify_solid is a genuine bug by the design doc's own
+    ruling, so the route must RAISE -- never quietly drop the piece or
+    write a partial document."""
+
+    client, studies = make_client(tmp_path, monkeypatch)
+    params = {"material": "concrete", "pattern": "bonded-courses", "size": 0.9,
+              "thickness": 0.2}
+    piece_solids = _piece_solids_module()
+    monkeypatch.setattr(
+        piece_solids, "verify_solid",
+        lambda vertices, faces: {"closed": False, "volume": 0.0},
+    )
+    with pytest.raises(RuntimeError, match="failed verify_solid"):
+        client.post("/api/studies/Tiny/pieces-export", params=params)
+    assert not (studies / "tiny" / "studio" / "Tiny-pieces.json").exists()
+
+
 def test_pieces_export_two_thicknesses_differ_only_in_the_offset(tmp_path, monkeypatch):
     """thickness is the route parameter; the SAME cut extrudes at any
     thickness. bonded-courses ships a seat_plane (pieces.py's own K2), so
