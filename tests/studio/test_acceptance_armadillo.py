@@ -34,6 +34,7 @@ warm cache or a different machine; recorded for the ledger only).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -157,3 +158,41 @@ def test_the_armadillo_cuts_natively_with_its_three_openings_respected(
     assert document["loads"] == {}
     assert document["reactions"] == {}
     assert document["provenance"]["derived_geometry_only"] is not None
+
+    # Task 2 acceptance extension (pieces export): the real route, the
+    # real 840-piece cut. Every one of them must actually be a closed,
+    # positive-volume solid -- not assumed from the unit fixtures in
+    # test_piece_solids.py, and not merely "some fraction" of 840, which
+    # is why this checks every single piece rather than a sample.
+    import sys
+
+    path = str(REPO / "bench" / "studio")
+    if path not in sys.path:
+        sys.path.insert(0, path)
+    import piece_solids
+
+    export_response = client.post(
+        "/api/studies/Armadillo/pieces-export",
+        params={"material": "concrete", "pattern": "bonded-courses", "size": 0.4},
+    )
+    assert export_response.status_code == 200
+    export_body = export_response.json()
+    assert export_body["piece_count"] == 840, (
+        "measured piece count drifted; see this module's own docstring")
+    assert export_body["courses"] == 14
+
+    export_path = Path(export_body["path"])
+    assert export_path.is_file()
+    exported = json.loads(export_path.read_text(encoding="utf-8"))
+    assert exported["schema"] == "bench.pieces/1"
+    assert exported["joint_gap"] == 0.0 and exported["taper"] == 0.0
+    assert len(exported["pieces"]) == 840
+
+    # Order matches the bundle's own pieces order, untouched.
+    assert [p["key"] for p in exported["pieces"]] == [p["key"] for p in pieces]
+
+    for piece in exported["pieces"]:
+        check = piece_solids.verify_solid(piece["vertices"], piece["faces"])
+        assert check["closed"], "piece {} is not closed".format(piece["key"])
+        assert check["volume"] > 0, "piece {} has non-positive volume ({})".format(
+            piece["key"], check["volume"])

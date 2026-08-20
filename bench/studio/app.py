@@ -7,6 +7,7 @@ stub while the real server shells to .venv-fea.
 
 from __future__ import annotations
 
+import datetime
 import json
 import shutil
 import subprocess
@@ -23,6 +24,7 @@ import bundle
 import derive_contract
 import generators
 import geometry
+import piece_solids
 import staging
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -203,6 +205,107 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
             # bundle.CutRefused's own docstring for the current, complete
             # list of what still refuses.
             raise HTTPException(400, str(error))
+
+    @app.post("/api/studies/{export}/pieces-export")
+    def pieces_export(
+        export: str, material: str = Query(...), pattern: str = Query(...),
+        size: float = Query(...), thickness: float = Query(0.2),
+    ):
+        """The cut blocks, extruded to their final solid, as bench.pieces/1
+        (docs/superpowers/specs/2026-08-20-pieces-export-design.md).
+
+        export becomes part of the WRITTEN FILENAME below
+        (<export>-pieces.json, inside the already-safe slug directory),
+        not merely a lookup key -- the same reason the upload route and
+        frames_dir's "study-" branch both run this exact character class
+        plus _contained() before touching the filesystem, even though an
+        export that goes on to pass _validate is already known-safe (it
+        was accepted by the upload route's own identical guard when it
+        was first uploaded). Checked first, before _validate, so a bad
+        name is refused as the name problem it is (400) rather than
+        folded into _validate's own 404 for "no such export".
+        """
+
+        if "/" in export or "\\" in export or ".." in export or ":" in export:
+            raise HTTPException(400, "bad export name")
+        slug = geometry.slugify(export)
+        target_dir = bundle.STUDIES_DIR / slug / "studio"
+        filename = "{}-pieces.json".format(export)
+        if not _contained(target_dir, filename):
+            raise HTTPException(400, "bad export name")
+
+        _validate(export, material, pattern, size, thickness)
+        # No interactive_token: this route is a one-shot POST from a button
+        # click, not the live/polling bundle GET cut cancellation exists
+        # for (see bundle.register_interactive's own comment on why the
+        # staging/runs path never registers one either).
+        document = bundle.load_or_build_bundle(export, material, pattern, size, thickness)
+        uncut_reason = document.get("uncut_reason")
+        if uncut_reason:
+            # No blocks to export, and the reason says why -- the same
+            # engine refusal get_bundle itself ships as a 200 with
+            # uncut_reason set (bundle.CutRefused), surfaced here as a 409
+            # because this route has nothing to write.
+            return JSONResponse({"uncut_reason": uncut_reason}, status_code=409)
+
+        tess = document.get("tessellation") or {}
+        exported_pieces = []
+        for piece in document["pieces"]:
+            solid = piece_solids.solidify(piece, thickness)
+            check = piece_solids.verify_solid(solid["vertices"], solid["faces"])
+            if not (check["closed"] and check["volume"] > 0):
+                # Never silently skipped: an unclosed or inside-out piece
+                # is a genuine bug in solidify/verify_solid or in pieces.py's
+                # own topology, not a shape this route may choose to drop
+                # (see the design doc's "every exported piece must pass
+                # verify_solid" ruling).
+                raise RuntimeError(
+                    "piece {!r} failed verify_solid: closed={} volume={}".format(
+                        piece.get("key"), check["closed"], check["volume"]))
+            exported_pieces.append({
+                "key": piece["key"],
+                "course": piece["course"],
+                "is_support": piece["is_support"],
+                "vertices": solid["vertices"],
+                "faces": solid["faces"],
+                "seat_plane": piece.get("seat_plane"),
+                "seat_gap": piece.get("seat_gap"),
+            })
+
+        pieces_document = {
+            "schema": "bench.pieces/1",
+            "units": "m",
+            "export": export,
+            "material": material,
+            # document["pattern"], not the requested pattern: an authored
+            # (imported) tessellation ignores it, exactly as bundle.py's
+            # own document["pattern"] already does -- see build_bundle's
+            # comment on cut_pattern for why this is the honest value.
+            "pattern": document["pattern"],
+            "size": document["size"],
+            # thickness, not document["provenance"]["thickness"]: the two
+            # are the same value by construction (this route's own
+            # thickness argument built the bundle above), and the route's
+            # own value is the one actually asked for.
+            "thickness": thickness,
+            "joint_gap": 0.0,
+            "taper": 0.0,
+            "generated": datetime.datetime.now(datetime.timezone.utc)
+            .isoformat(timespec="seconds"),
+            "courses": tess.get("courses"),
+            "piece_count": len(exported_pieces),
+            "degenerate_dropped": tess.get("degenerate_dropped") or [],
+            "pieces": exported_pieces,
+        }
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = target_dir / filename
+        target_path.write_text(json.dumps(pieces_document), encoding="utf-8")
+        return {
+            "path": str(target_path.resolve()),
+            "piece_count": pieces_document["piece_count"],
+            "courses": pieces_document["courses"],
+        }
 
     @app.post("/api/runs", status_code=202)
     def start_run(body: dict):

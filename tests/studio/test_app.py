@@ -1553,3 +1553,183 @@ def test_slug_collision_between_different_export_names_is_a_400(tmp_path, monkey
         content=json.dumps(tiny_contract()).encode(),
     )
     assert reupload.status_code == 200
+
+
+def _piece_solids_module():
+    """Same sys.path dance test_piece_solids.py's own studio() helper
+    does: make_client above already inserts bench/studio, but a test that
+    only calls make_client and never imports app directly still needs
+    this to reach piece_solids for its own spot-check."""
+
+    import sys
+
+    path = str(REPO / "bench" / "studio")
+    if path not in sys.path:
+        sys.path.insert(0, path)
+    import piece_solids
+
+    return piece_solids
+
+
+def test_pieces_export_writes_bench_pieces_matching_the_bundle_order(
+    tmp_path, monkeypatch
+):
+    """Task 2 (pieces export): the 200 path, end to end against the same
+    Tiny fixture every other test_app.py test already uses.
+
+    Pins the whole schema at once against a live bundle fetched first, so
+    the piece order/count/vertex-length checks are proven against the
+    SAME cut this route itself built (bundle.load_or_build_bundle's own
+    cache makes the second call, inside the route, a cache hit against
+    the first)."""
+
+    client, studies = make_client(tmp_path, monkeypatch)
+    params = {"material": "concrete", "pattern": "bonded-courses", "size": 0.9,
+              "thickness": 0.2}
+    bundle_response = client.get("/api/studies/Tiny/bundle", params=params)
+    assert bundle_response.status_code == 200
+    bundle_pieces = bundle_response.json()["pieces"]
+    assert bundle_pieces, "the Tiny fixture must actually cut pieces for this test to prove anything"
+
+    response = client.post("/api/studies/Tiny/pieces-export", params=params)
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"path", "piece_count", "courses"}
+
+    path = Path(body["path"])
+    assert path.is_absolute()
+    assert path.is_file()
+    assert path == studies / "tiny" / "studio" / "Tiny-pieces.json"
+
+    document = json.loads(path.read_text(encoding="utf-8"))
+    assert document["schema"] == "bench.pieces/1"
+    assert document["units"] == "m"
+    assert document["export"] == "Tiny"
+    assert document["material"] == "concrete"
+    assert document["pattern"] == "bonded-courses"
+    assert document["size"] == 0.9
+    assert document["thickness"] == 0.2
+    assert document["joint_gap"] == 0.0
+    assert document["taper"] == 0.0
+    assert isinstance(document["generated"], str) and document["generated"]
+    assert document["piece_count"] == len(document["pieces"]) == body["piece_count"]
+    assert document["courses"] == body["courses"]
+    assert isinstance(document["degenerate_dropped"], list)
+
+    # Order contract: bundle order, untouched (keys compared).
+    assert [p["key"] for p in document["pieces"]] == [p["key"] for p in bundle_pieces]
+
+    for exported, source in zip(document["pieces"], bundle_pieces):
+        assert exported["course"] == source["course"]
+        assert exported["is_support"] == source["is_support"]
+        assert len(exported["vertices"]) == 2 * len(source["mid"])
+        assert exported["seat_plane"] == source.get("seat_plane")
+        assert exported["seat_gap"] == source.get("seat_gap")
+
+    # Spot check one piece, closed and positive volume, through Task 1's
+    # own verifier -- not re-implemented here.
+    piece_solids = _piece_solids_module()
+    first = document["pieces"][0]
+    check = piece_solids.verify_solid(first["vertices"], first["faces"])
+    assert check["closed"] is True
+    assert check["volume"] > 0
+
+
+def test_pieces_export_two_thicknesses_differ_only_in_the_offset(tmp_path, monkeypatch):
+    """thickness is the route parameter; the SAME cut extrudes at any
+    thickness. bonded-courses ships a seat_plane (pieces.py's own K2), so
+    every bottom vertex is offset 0 regardless of thickness (identical
+    between the two exports) and every top vertex moves by exactly
+    (thickness_b - thickness_a) along the piece's OWN seat plane normal
+    -- the exact arithmetic piece_solids.solidify's seat-plane branch
+    implements, proven here against a real export rather than the unit
+    fixture in test_piece_solids.py."""
+
+    client, studies = make_client(tmp_path, monkeypatch)
+    thin = {"material": "concrete", "pattern": "bonded-courses", "size": 0.9,
+            "thickness": 0.15}
+    thick = {"material": "concrete", "pattern": "bonded-courses", "size": 0.9,
+             "thickness": 0.30}
+    # Both requests write to the SAME path (overwrite is the point,
+    # regeneration -- see the route's own docstring), so each document has
+    # to be read off disk immediately after its own POST, before the
+    # second POST overwrites it in place.
+    response_thin = client.post("/api/studies/Tiny/pieces-export", params=thin)
+    assert response_thin.status_code == 200
+    doc_thin = json.loads(Path(response_thin.json()["path"]).read_text(encoding="utf-8"))
+
+    response_thick = client.post("/api/studies/Tiny/pieces-export", params=thick)
+    assert response_thick.status_code == 200
+    doc_thick = json.loads(Path(response_thick.json()["path"]).read_text(encoding="utf-8"))
+    assert response_thin.json()["path"] == response_thick.json()["path"], (
+        "both exports target the same export name, so they must overwrite "
+        "the same file, not accumulate one per thickness"
+    )
+    assert doc_thin["thickness"] == 0.15
+    assert doc_thick["thickness"] == 0.30
+    assert [p["key"] for p in doc_thin["pieces"]] == [p["key"] for p in doc_thick["pieces"]]
+
+    piece_thin, piece_thick = doc_thin["pieces"][0], doc_thick["pieces"][0]
+    assert piece_thin["seat_plane"] is not None, (
+        "bonded-courses must ship a seat_plane for this delta to be well defined"
+    )
+    count = len(piece_thin["vertices"]) // 2
+    # Bottom half (offset 0) never depends on thickness.
+    assert piece_thin["vertices"][count:] == piece_thick["vertices"][count:]
+    nx, ny, nz = piece_thin["seat_plane"]["normal"]
+    dt = doc_thick["thickness"] - doc_thin["thickness"]
+    for i in range(count):
+        top_thin = piece_thin["vertices"][i]
+        top_thick = piece_thick["vertices"][i]
+        delta = [top_thick[k] - top_thin[k] for k in range(3)]
+        assert delta == pytest.approx([nx * dt, ny * dt, nz * dt], abs=1e-9)
+
+
+def test_pieces_export_on_an_uncut_study_is_409_with_the_verbatim_reason(
+    tmp_path, monkeypatch
+):
+    """No blocks, and the engine's own refusal says why -- the same
+    bay_contract() fixture test_a_plan_the_engine_refuses_ships_a_200_
+    with_uncut_reason above proves refuses through get_bundle's 200 path;
+    this route has nothing to write for an uncut study, so it 409s
+    instead, carrying the identical, verbatim message."""
+
+    client, studies = make_client(tmp_path, monkeypatch)
+    upload = tmp_path / "upload"
+    (upload / "Bay-contract.json").write_text(
+        json.dumps(bay_contract()), encoding="utf-8"
+    )
+    (upload / "Bay-compas.json").write_text("{}", encoding="utf-8")
+    params = {"material": "concrete", "pattern": "bonded-courses", "size": 0.9,
+              "thickness": 0.2}
+    bundle_response = client.get("/api/studies/Bay/bundle", params=params)
+    reason = bundle_response.json()["uncut_reason"]
+    assert reason
+
+    export_response = client.post("/api/studies/Bay/pieces-export", params=params)
+    assert export_response.status_code == 409
+    assert export_response.json() == {"uncut_reason": reason}
+    assert not (studies / "bay" / "studio" / "Bay-pieces.json").exists()
+
+
+def test_pieces_export_rejects_a_drive_relative_or_traversal_export_name(
+    tmp_path, monkeypatch
+):
+    """The same ':'/_contained guard every other route that builds a
+    filename from a caller-supplied path segment already carries (the
+    upload route's own name check, frames_dir's "study-" branch) -- see
+    test_export_name_drive_relative_and_dotdot_cannot_escape_upload_dir
+    above for the identical proof on that route. Valid material/pattern/
+    size are supplied so the request clears FastAPI's own Query(...)
+    validation and actually reaches the route body's guard."""
+
+    client, studies = make_client(tmp_path, monkeypatch)
+    params = {"material": "concrete", "pattern": "bonded-courses", "size": 0.9,
+              "thickness": 0.2}
+    for bad_name in ("C:evil", "D:evil", "..%5Cevil"):
+        response = client.post(
+            "/api/studies/{}/pieces-export".format(bad_name), params=params
+        )
+        assert response.status_code == 400, "{!r} was not rejected: {} {!r}".format(
+            bad_name, response.status_code, response.text[:200])
+    assert not list(tmp_path.rglob("*evil*"))

@@ -3387,6 +3387,54 @@ document.getElementById("data-button").addEventListener("click", () => {
 });
 document.getElementById("data-close").addEventListener("click", () =>
   document.getElementById("data-panel").classList.add("hidden"));
+
+// Pieces export (2026-08-20): the cut blocks, extruded to their final
+// solid server side, as a bench.pieces/1 file beside the study -- the
+// bridge to Grasshopper's Import Pieces component (docs/superpowers/
+// specs/2026-08-20-pieces-export-design.md). Placed beside Data, not
+// Record: both buttons in this section turn the CURRENT cut into
+// something to read afterward (verification numbers, fabrication
+// geometry) rather than a camera performance to capture, so this is the
+// honester neighbour even though the status line below borrows Record's
+// own "a local tool tells you where the file is" idiom (recordAnimation,
+// further down: `status.textContent = "saved " + body.video`).
+async function exportPieces() {
+  const status = document.getElementById("pieces-export-status");
+  const exportName = document.getElementById("study-select").value;
+  if (!exportName) return;
+  // The SAME source of truth loadStudy's own cut request reads from --
+  // material off the live select, pattern/size/thickness off state --
+  // not a second, independent read that could drift from what is
+  // actually on screen.
+  const material = document.getElementById("material-select").value;
+  status.textContent = "exporting...";
+  try {
+    const url = "/api/studies/" + encodeURIComponent(exportName) +
+      "/pieces-export?material=" + material +
+      "&pattern=" + encodeURIComponent(state.pattern) +
+      "&size=" + state.size + "&thickness=" + state.thickness;
+    const response = await fetch(url, { method: "POST" });
+    const body = await response.json();
+    if (response.status === 409) {
+      status.textContent = "uncut: " + body.uncut_reason;
+      return;
+    }
+    if (!response.ok) {
+      // Same refusal shape as startRun's own error surface: app.py's
+      // detail names exactly what to change.
+      status.textContent = "export refused: " + (body && body.detail
+        ? body.detail : "HTTP " + response.status);
+      return;
+    }
+    status.textContent = "saved " + body.path;
+    logStudio("exported " + body.piece_count + " pieces (" + body.courses
+      + " courses) for " + exportName);
+  } catch (error) {
+    status.textContent = "export failed: " + error.message;
+  }
+}
+document.getElementById("pieces-export-button").addEventListener("click", exportPieces);
+
 document.getElementById("run-button").addEventListener("click", startRun);
 document.getElementById("import-export-button").addEventListener("click", importExportPair);
 document.getElementById("import-columns-button").addEventListener("click", importColumns);

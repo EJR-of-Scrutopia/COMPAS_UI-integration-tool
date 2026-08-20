@@ -3570,3 +3570,62 @@ def test_a_superseded_fetch_or_a_409_is_dropped_silently_by_the_token():
         "the token guard must run before the banner, so a superseded "
         "response of either kind never reaches the user"
     )
+
+
+def test_the_pieces_export_button_lives_in_analysis_beside_data():
+    # Task 2 (pieces export): placed beside Data, not Record -- both
+    # buttons in Analysis turn the current cut into something to read
+    # afterward, rather than a camera performance to capture. See
+    # exportPieces's own comment in studio.js for the full reasoning.
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    analysis = html[html.index('id="analysis-section"'):html.index('id="view-section"')]
+    assert 'id="pieces-export-button"' in analysis
+    assert 'id="pieces-export-status"' in analysis
+    data_at = analysis.index('id="data-button"')
+    export_at = analysis.index('id="pieces-export-button"')
+    assert data_at < export_at, "the export button sits after Data, its stated neighbour"
+    assert "Export pieces" in analysis
+
+
+def test_the_pieces_export_button_is_wired_to_export_pieces():
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    assert (
+        'document.getElementById("pieces-export-button").addEventListener'
+        '("click", exportPieces);'
+    ) in js
+
+
+def test_export_pieces_reads_the_same_source_of_truth_as_loadstudy():
+    # material off the live select, pattern/size/thickness off state --
+    # not a second, independent read of the controls that could drift
+    # from what loadStudy's own cut request just used (see loadStudy's
+    # own url construction, ~2766-2768).
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    body = _function_body(js, "exportPieces")
+    assert 'document.getElementById("study-select").value' in body
+    assert 'document.getElementById("material-select").value' in body
+    assert "state.pattern" in body
+    assert "state.size" in body
+    assert "state.thickness" in body
+    assert '"/pieces-export?material="' in body
+    assert "method: \"POST\"" in body
+
+
+def test_export_pieces_shows_the_returned_path_on_success():
+    # The recordings precedent: a local tool tells you where the file is
+    # (recordAnimation's own `status.textContent = "saved " + body.video`).
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    body = _function_body(js, "exportPieces")
+    assert 'status.textContent = "saved " + body.path;' in body
+
+
+def test_export_pieces_shows_the_uncut_reason_on_409():
+    js = (STATIC / "studio.js").read_text(encoding="utf-8")
+    body = _function_body(js, "exportPieces")
+    conflict_at = body.index('response.status === 409')
+    reason_at = body.index('status.textContent = "uncut: " + body.uncut_reason;')
+    assert conflict_at < reason_at
+    # Ordinary refusals (400/500) fall through to the existing error
+    # surface's own shape, matching startRun's own "run refused: " idiom.
+    assert 'status.textContent = "export refused: "' in body
+    assert 'status.textContent = "export failed: " + error.message;' in body
