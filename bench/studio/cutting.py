@@ -363,10 +363,12 @@ class Surface:
             1e-6,
         )
         self.grid = spatial.Grid(max(spread / 64.0, 1e-6))
+        self.boxes: List[Tuple[float, float, float, float]] = []
         for index, face in enumerate(faces):
             xs = [vertices[i][0] for i in face]
             ys = [vertices[i][1] for i in face]
             box = (min(xs), min(ys), max(xs), max(ys))
+            self.boxes.append(box)
             self.grid.insert(index, *box)
 
     def _triangles(self, face):
@@ -377,6 +379,16 @@ class Surface:
         """A sample if (x, y) lands inside some face's triangle, else None."""
 
         for index in self.grid.query(x, y, x, y):
+            bx0, by0, bx1, by1 = self.boxes[index]
+            # A grid candidate only shares a bucket with this point. Pad
+            # the face's own box by the weld tolerance, because the
+            # barycentric test below deliberately accepts a point that is
+            # fractionally outside an edge rather than opening a seam.
+            if not (
+                bx0 - 1e-6 <= x <= bx1 + 1e-6
+                and by0 - 1e-6 <= y <= by1 + 1e-6
+            ):
+                continue
             for a, b, c in self._triangles(self.faces[index]):
                 weights = self._barycentric(x, y, a, b, c)
                 if weights is not None and min(w for _, w in weights) >= -1e-9:
