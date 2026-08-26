@@ -278,7 +278,7 @@ def _cap(tess: Dict, cell: Dict, rounds: int):
     has.
     """
 
-    points = [list(p) for p in tess["points"]]
+    points = list(tess["points"])
     ring = cutting.bridge_holes(cell["outline"], cell["holes"], points) \
         if cell["holes"] else list(cell["outline"])
     try:
