@@ -65,6 +65,7 @@ import math
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import cutting
+import spatial
 import tessellation
 
 
@@ -692,6 +693,24 @@ def segment_pieces(
     degenerate_dropped: List[str] = []
     out: List[Dict] = []
 
+    # A support is a plan point, so index it once instead of asking every
+    # cell about every support. The grid only chooses candidates; the exact
+    # point_in_cell rule below still decides boundary ownership.
+    plan_points = tess["points"]
+    if plan_points:
+        xs = [point[0] for point in plan_points]
+        ys = [point[1] for point in plan_points]
+        spread = max(
+            max(xs) - min(xs),
+            max(ys) - min(ys),
+            1e-6,
+        )
+    else:
+        spread = 1e-6
+    support_grid = spatial.Grid(max(spread / 64.0, 1e-6))
+    for index, point in enumerate(support_points):
+        support_grid.insert(index, point[0], point[1], point[0], point[1])
+
     for cell in tess["cells"]:
         if checkpoint is not None:
             checkpoint()
@@ -809,9 +828,17 @@ def segment_pieces(
                 u, v = position[chain[i]], position[chain[(i + 1) % len(chain)]]
                 faces.append([v, u, u + count, v + count])
 
+        outline = [tess["points"][index] for index in cell["outline"]]
+        xs = [point[0] for point in outline]
+        ys = [point[1] for point in outline]
         is_support = any(
-            tessellation.point_in_cell(point, cell, tess["points"])
-            for point in support_points
+            tessellation.point_in_cell(support_points[index], cell, tess["points"])
+            for index in support_grid.query(
+                min(xs) - 1e-6,
+                min(ys) - 1e-6,
+                max(xs) + 1e-6,
+                max(ys) + 1e-6,
+            )
         )
 
         facet_counts.append(facets_here)
