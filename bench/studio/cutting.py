@@ -357,6 +357,11 @@ class Surface:
         # multi-loop one; the attribute's name and its single-loop
         # semantics are unchanged.
         self.boundary: Optional[Sequence[Sequence[float]]] = None
+        # Shared welded corners and boundary midpoints ask the same exact
+        # plan question many times. Keep the completed sample under that
+        # exact pair; no rounding or proximity lookup belongs here.
+        self._lift_cache: Dict[Tuple[float, float], Dict] = {}
+        self._lift_cache_boundary = self.boundary
         spread = max(
             max(v[0] for v in vertices) - min(v[0] for v in vertices),
             max(v[1] for v in vertices) - min(v[1] for v in vertices),
@@ -396,8 +401,19 @@ class Surface:
         return None
 
     def lift(self, x: float, y: float) -> Dict:
+        # Production attaches the boundary before the first lift, but a
+        # directly used Surface may replace it later. Samples taken under
+        # the old projection rule must not survive that replacement.
+        if self.boundary is not self._lift_cache_boundary:
+            self._lift_cache.clear()
+            self._lift_cache_boundary = self.boundary
+        key = (x, y)
+        cached = self._lift_cache.get(key)
+        if cached is not None:
+            return cached
         found = self._on_mesh(x, y)
         if found is not None:
+            self._lift_cache[key] = found
             return found
         # Off the mesh. This is not a float's rounding: measured on the real
         # Trial 2 export at the default 0.9 m before this fix, 137 cap
@@ -460,6 +476,7 @@ class Surface:
             if found is not None:
                 found["projected"] = True
                 found["projected_m"] = math.hypot(px - x, py - y)
+                self._lift_cache[key] = found
                 return found
             # The projected point itself did not land inside any triangle:
             # floating point at a seam, or a boundary polyline that does
@@ -491,9 +508,11 @@ class Surface:
         # is reached rarely (no boundary attached, or the projection above
         # still missed the mesh) and its own reach is already disclosed via
         # clamp_m, so it is left as it was.
-        return self._sample(
+        found = self._sample(
             [(i, w / total) for i, w in clamped], True, self._reach(x, y, best), x, y
         )
+        self._lift_cache[key] = found
+        return found
 
     def _nearest_boundary_point(self, x: float, y: float) -> Tuple[float, float]:
         """The point of self.boundary nearest (x, y), in plan.
