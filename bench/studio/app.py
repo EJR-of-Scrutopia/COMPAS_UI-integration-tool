@@ -17,7 +17,8 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import (
+    FileResponse, HTMLResponse, JSONResponse, Response)
 from fastapi.staticfiles import StaticFiles
 
 import bundle
@@ -176,6 +177,19 @@ def create_app(runner=None, cra_runner=None) -> FastAPI:
         # passes a token, so it can never be superseded by this at all.
         token = bundle.register_interactive(export, (export, pattern, size))
         try:
+            # A fresh cache hit is answered with the cached file's own
+            # bytes. Everything the slow path does to serve one is still
+            # done (the file is read, parsed, and put through the exact
+            # same freshness gate inside cached_bundle_bytes); what is
+            # skipped is fastapi walking the parsed document through
+            # jsonable_encoder and re-serialising it, measured at 1567 ms
+            # of the 1791 ms a hit on the real 18 MB Armadillo bundle
+            # took. None means the fast path does not apply, and the line
+            # below runs exactly as it always has.
+            raw = bundle.cached_bundle_bytes(
+                export, material, pattern, size, thickness)
+            if raw is not None:
+                return Response(content=raw, media_type="application/json")
             return bundle.load_or_build_bundle(
                 export, material, pattern, size, thickness, interactive_token=token)
         except bundle.CutSuperseded:

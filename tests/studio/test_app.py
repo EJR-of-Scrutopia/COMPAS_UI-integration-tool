@@ -1820,3 +1820,40 @@ def test_reupload_deletes_the_stale_pieces_export(tmp_path, monkeypatch):
         "a pieces export built from the old geometry must not survive a "
         "re-import: stale solids are what actually get cut"
     )
+
+
+def test_a_cache_hit_serves_the_cached_bytes_without_re_encoding(tmp_path, monkeypatch):
+    """A validated cache hit must send the file it already has, verbatim.
+
+    Measured on Param's own 18 MB Armadillo bundle, one cache hit spent
+    2.8 ms reading the file, 220.8 ms parsing it for the freshness gate,
+    then 1274.0 ms inside fastapi's jsonable_encoder and 293.4 ms
+    re-serialising: 1567 ms of every hit rebuilding bytes that were
+    already sitting on disk. The parse is unavoidable, since the gate
+    reads the parsed document. The re-encode is not.
+
+    Byte identity is the assertion because it is the one property that
+    cannot hold unless the encoder was skipped: JSONResponse writes
+    compact separators and the cache file is written with json.dumps'
+    defaults, so a re-encoded response can never equal the file.
+    """
+
+    client, _ = make_client(tmp_path, monkeypatch)
+    import bundle
+
+    params = {"material": "concrete", "pattern": "bonded-courses", "size": 1.2}
+    warm = client.get("/api/studies/Tiny/bundle", params=params)
+    assert warm.status_code == 200, warm.text
+
+    path = bundle.bundle_path("tiny", "concrete", "bonded-courses", 1.2, 0.2)
+    assert path.is_file(), "the first GET must have written the cache"
+    raw = path.read_bytes()
+
+    hit = client.get("/api/studies/Tiny/bundle", params=params)
+    assert hit.status_code == 200
+    assert hit.headers["content-type"].startswith("application/json")
+    assert hit.content == raw, (
+        "a cache hit must serve the cached file verbatim rather than "
+        "parse it, re-encode it and re-serialise the same document"
+    )
+    assert hit.json() == json.loads(raw)

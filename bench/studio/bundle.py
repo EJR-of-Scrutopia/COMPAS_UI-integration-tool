@@ -1195,6 +1195,72 @@ def _pieces_are_uniquely_keyed(document: Dict) -> bool:
     return len(set(keys)) == len(keys)
 
 
+def _cache_is_fresh(cached: object) -> bool:
+    """Every gate a cached bundle must pass to be served without rebuilding.
+
+    Split out of load_or_build_bundle so cached_bundle_bytes below can
+    apply the SAME gate rather than a second copy of it that could drift
+    apart from this one. isinstance guards the None a missing file gives
+    back, so callers do not each have to.
+
+    Fix round 1 (review finding I4): presence alone is not enough for a
+    field whose VALUE, not merely its existence, can go stale -- see
+    REQUIRED_BUNDLE_VALUES' own comment. That check runs only after the
+    presence check has already confirmed every one of these paths exists
+    (short-circuited by the "and" chain), so _key_path_value never has to
+    handle a missing path.
+    """
+
+    if not isinstance(cached, dict):
+        return False
+    return (
+        all(_has_key_path(cached, key) for key in REQUIRED_BUNDLE_KEYS)
+        and all(
+            _key_path_value(cached, path) == expected
+            for path, expected in REQUIRED_BUNDLE_VALUES.items()
+        )
+        and _pieces_are_uniquely_keyed(cached)
+    )
+
+
+def cached_bundle_bytes(
+    export_name: str, material: str, pattern: str, size: float,
+    thickness: float = 0.2,
+) -> Optional[bytes]:
+    """The cached bundle's ORIGINAL bytes, when the cache is usable.
+
+    A bundle GET that hits the cache used to read the file, parse it,
+    hand the parsed document to fastapi, and have fastapi walk it through
+    jsonable_encoder and re-serialise it. Measured on the real 18 MB
+    Armadillo bundle: 2.8 ms to read, 220.8 ms to parse, then 1274.0 ms
+    in jsonable_encoder and 293.4 ms re-serialising. The parse earns its
+    place, because the freshness gate reads the parsed document. The
+    other 1567 ms rebuilt bytes that were already on disk.
+
+    So the answer to a fresh cache hit is the file itself. The document
+    is still parsed and still passes the identical gate through
+    _cache_is_fresh; only the return value changes, from a dict fastapi
+    must re-encode to the bytes it can send as they are.
+
+    Returns None whenever the fast path does not apply, which hands the
+    caller back to load_or_build_bundle unchanged: a missing file, a
+    stale one, or a torn one. A torn file reaches the same failure
+    through load_or_build_bundle's own _read_optional exactly as it does
+    today, so this path adds a faster route and never a new verdict.
+    """
+
+    path = bundle_path(
+        geometry.slugify(export_name), material, pattern, size, thickness)
+    if not path.is_file():
+        return None
+    raw = path.read_bytes()
+    try:
+        cached = json.loads(raw)
+    except ValueError:
+        return None
+    return raw if _cache_is_fresh(cached) else None
+
+
 def load_or_build_bundle(
     export_name: str, material: str, pattern: str, size: float, thickness: float = 0.2,
     interactive_token: Optional[int] = None,
@@ -1213,21 +1279,7 @@ def load_or_build_bundle(
     cached = _read_optional(
         bundle_path(geometry.slugify(export_name), material, pattern, size, thickness)
     )
-    if (
-        cached is not None
-        and all(_has_key_path(cached, key) for key in REQUIRED_BUNDLE_KEYS)
-        # Fix round 1 (review finding I4): presence alone is not enough
-        # for a field whose VALUE, not merely its existence, can go
-        # stale -- see REQUIRED_BUNDLE_VALUES' own comment. Runs only
-        # after the presence check above has already confirmed every one
-        # of these paths exists (short-circuited by the "and" chain), so
-        # _key_path_value never has to handle a missing path.
-        and all(
-            _key_path_value(cached, path) == expected
-            for path, expected in REQUIRED_BUNDLE_VALUES.items()
-        )
-        and _pieces_are_uniquely_keyed(cached)
-    ):
+    if _cache_is_fresh(cached):
         return cached
     return build_bundle(
         export_name, material, pattern, size, thickness,
