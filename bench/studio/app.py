@@ -83,14 +83,20 @@ def _invalidate_studio_cache(slug: str) -> None:
     fea-verification.json is the only per-slug verification artifact
     anything under bench/studio writes today (bundle.py's own
     _read_optional call site, mirrored by bench/demo/
-    09_structural_verification.py's write) -- there is no sibling to also
-    cover; if one is ever added, it belongs in this same pass.
+    09_structural_verification.py's write).
+
+    <export>-pieces.json IS that sibling, added later by the pieces-export
+    route into this same studio/ directory, and swept here for a sharper
+    reason than the caches above: a pieces document carries solid
+    geometry and is the thing that actually gets fabricated, so one built
+    from the old mesh surviving a re-import is not stale, it is wrong in
+    the most expensive way the studio can be wrong.
     """
 
     bundle.clear_cut_memo()
     studio_dir = bundle.STUDIES_DIR / slug / "studio"
     if studio_dir.is_dir():
-        for pattern in ("bundle-*.json", "staging-*.json"):
+        for pattern in ("bundle-*.json", "staging-*.json", "*-pieces.json"):
             for stale in studio_dir.glob(pattern):
                 stale.unlink()
     verification = bundle.STUDIES_DIR / slug / "fea-verification.json"

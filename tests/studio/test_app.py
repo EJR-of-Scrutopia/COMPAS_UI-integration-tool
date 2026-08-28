@@ -1786,3 +1786,37 @@ def test_pieces_export_rejects_a_drive_relative_or_traversal_export_name(
         assert response.status_code == 400, "{!r} was not rejected: {} {!r}".format(
             bad_name, response.status_code, response.text[:200])
     assert not list(tmp_path.rglob("*evil*"))
+
+
+def test_reupload_deletes_the_stale_pieces_export(tmp_path, monkeypatch):
+    """_invalidate_studio_cache swept bundle-*.json and staging-*.json and,
+    since fix 5, fea-verification.json -- but not the pieces export.
+
+    That docstring said "there is no sibling to also cover; if one is ever
+    added, it belongs in this same pass." One was then added:
+    POST /api/studies/{export}/pieces-export writes
+    <export>-pieces.json into the SAME studio/ directory the sweep walks.
+    A pieces document is a fabrication document carrying solid geometry,
+    so one built from the old mesh surviving a re-import is silently
+    wrong in the most expensive way available: it is what gets cut.
+    """
+
+    client, _ = make_client(tmp_path, monkeypatch)
+    studio_dir = tmp_path / "studies" / "tiny" / "studio"
+    studio_dir.mkdir(parents=True, exist_ok=True)
+    stale = studio_dir / "Tiny-pieces.json"
+    stale.write_text(
+        json.dumps({"schema": "bench.pieces/1", "stale": True}), encoding="utf-8"
+    )
+
+    changed = tiny_contract()
+    changed["equilibrium"]["vertices"][0]["z"] = 9.0
+    reupload = client.put(
+        "/api/uploads/exports/Tiny/contract",
+        content=json.dumps(changed).encode(),
+    )
+    assert reupload.status_code == 200
+    assert not stale.is_file(), (
+        "a pieces export built from the old geometry must not survive a "
+        "re-import: stale solids are what actually get cut"
+    )
