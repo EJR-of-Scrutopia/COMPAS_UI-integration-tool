@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any, Dict, List, Mapping, Union
+from typing import Any, Dict, List, Mapping, Optional, Union
 
 
 class MalformedGeometryError(ValueError):
@@ -235,6 +235,60 @@ def infer_support_ids(
     )
 
 
+# How many metres one of the export's length units is: 1.0 from a metre
+# model, 0.001 from a millimetre one. Absent from every export written
+# before the plugin declared it, which is read as the metres those files
+# were always assumed to be.
+LENGTH_UNIT_KEY = "lengthUnitToMetres"
+LENGTH_UNIT_EPSILON = 1e-9
+
+
+def _length_unit_to_metres(compas_document: Mapping[str, Any]) -> Optional[float]:
+    """The declared metres-per-unit, or None when the export does not say.
+
+    The studio reads metres. Until now nothing in the chain ever said so:
+    geometry.py's module docstring asserts "the true 3D thrust surface in
+    metres" as a flat assumption, the compas export carries only
+    thrustMesh, formDiagram, forceDiagram and compasVersion, and the
+    contract derived from it carries only equilibrium, formGraph and
+    provenance. There was no declaration anywhere to check, so a
+    millimetre model uploaded, derived, cut and staged without one
+    complaint, describing a vault a thousand times too large.
+
+    Refused rather than scaled, deliberately. This function DERIVES a
+    contract: the coordinates it copies are the same numbers the
+    thrustMesh carries, so scaling them here would leave the compas file
+    beside it disagreeing, and would say nothing about the forces a real
+    analysis export also carries, where a length scale alone is not
+    enough to stay consistent. The honest answer to a millimetre model is
+    to name the number and stop. The wording follows
+    tessellation.from_document, which already answers the same question
+    this way for the authored sidecar.
+    """
+
+    if not isinstance(compas_document, Mapping):
+        return None
+    declared = compas_document.get(LENGTH_UNIT_KEY)
+    if declared is None:
+        return None
+    if isinstance(declared, bool) or not isinstance(declared, (int, float)):
+        raise ValueError(
+            "{} must be a number; this export declares {!r}.".format(
+                LENGTH_UNIT_KEY, declared))
+    factor = float(declared)
+    if not math.isfinite(factor) or factor <= 0.0:
+        raise ValueError(
+            "{} must be a positive, finite number; this export declares "
+            "{!r}.".format(LENGTH_UNIT_KEY, declared))
+    if abs(factor - 1.0) > LENGTH_UNIT_EPSILON:
+        raise ValueError(
+            "this export declares {} = {}, so its coordinates are not in "
+            "metres. The studio reads metres only, so the conversion is "
+            "the author's to make: set the Rhino model's units to metres "
+            "and export again.".format(LENGTH_UNIT_KEY, factor))
+    return factor
+
+
 def derive_contract(
     compas_document: Mapping[str, Any],
     tolerance: float = SUPPORT_Z_TOLERANCE,
@@ -245,6 +299,9 @@ def derive_contract(
     app.py's existing contract-upload validation already keeps (a message a
     caller can act on, not a generic failure)."""
 
+    # Checked before the mesh is read: a model in the wrong units is not
+    # a geometry problem, and saying so first gives the clearer message.
+    length_unit = _length_unit_to_metres(compas_document)
     thrust_mesh_raw = compas_document.get("thrustMesh") if isinstance(compas_document, Mapping) else None
     if thrust_mesh_raw is None:
         raise ValueError(
@@ -270,6 +327,9 @@ def derive_contract(
             "derived": DERIVED_MARKER,
             "source": "thrustMesh",
             "support_tolerance_m": tolerance,
+            # None means the export did not say and metres were assumed,
+            # which is every file written before the declaration existed.
+            "length_unit_to_metres": length_unit,
             "support_count": len(supports),
             "vertex_count": len(vertices),
             "face_count": len(faces),

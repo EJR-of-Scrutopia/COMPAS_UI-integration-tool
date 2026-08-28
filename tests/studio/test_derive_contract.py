@@ -255,3 +255,60 @@ def test_derive_contract_rejects_non_finite_coordinates_counting_them():
     }
     with pytest.raises(d.MalformedGeometryError, match="2 non-finite"):
         d.derive_contract(document)
+
+
+def test_a_compas_export_that_is_not_in_metres_is_refused_not_assumed():
+    """The studio reads metres. Nothing in the chain ever said so.
+
+    geometry.py's own docstring asserts "the true 3D thrust surface in
+    metres" as a flat assumption, and the real Armadillo export carries
+    no unit declaration at all: its top-level keys are thrustMesh,
+    formDiagram, forceDiagram and compasVersion, and the derived
+    contract's are equilibrium, formGraph and provenance. No lengthUnit
+    exists anywhere to be checked. A Rhino model in millimetres
+    therefore uploads, derives, cuts and stages without a single
+    complaint, describing a vault a thousand times too large.
+
+    The plugin now states the factor that turns its coordinates into
+    metres. Anything but 1.0 is refused here, where the message can name
+    the number, rather than silently believed. This mirrors the wording
+    tessellation.from_document already uses for the same question about
+    the authored sidecar.
+    """
+
+    d = studio()
+    document = pyramid_document()
+    document["lengthUnitToMetres"] = 0.001
+    with pytest.raises(ValueError) as caught:
+        d.derive_contract(document)
+    message = str(caught.value)
+    assert "0.001" in message, message
+    assert "metre" in message.lower(), message
+
+
+def test_a_metre_export_derives_and_records_the_factor_it_was_given():
+    """An explicit 1.0 is honoured and disclosed in provenance."""
+
+    d = studio()
+    document = pyramid_document()
+    document["lengthUnitToMetres"] = 1.0
+    contract = d.derive_contract(document)
+    assert len(contract["equilibrium"]["vertices"]) == 5
+    assert contract["provenance"]["length_unit_to_metres"] == 1.0
+
+
+def test_an_export_with_no_declaration_still_derives_exactly_as_before():
+    """Backward compatibility, and it is the case that matters most.
+
+    Every export already on disk, Param's Armadillo included, predates
+    the declaration. Those must keep deriving byte for byte, on the same
+    assumption they were always read under, with provenance saying that
+    the unit was assumed rather than stated.
+    """
+
+    d = studio()
+    document = pyramid_document()
+    assert "lengthUnitToMetres" not in document
+    contract = d.derive_contract(document)
+    assert len(contract["equilibrium"]["vertices"]) == 5
+    assert contract["provenance"]["length_unit_to_metres"] is None
