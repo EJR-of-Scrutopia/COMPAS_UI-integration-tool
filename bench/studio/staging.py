@@ -45,7 +45,6 @@ from typing import Callable, Dict, List, Optional
 
 import bundle
 import geometry
-import subdivision
 import voussoirs
 
 GRAVITY = 9.80665
@@ -138,6 +137,15 @@ CRA_BLOCK_BUDGET = 14
 # .superpowers/sdd/2026-08-10-voussoir-blocks/task-4-report.md.
 FEA_PYTHON = REPO / ".venv-fea" / "Scripts" / "python.exe"
 SOLVE_STAGE = Path(__file__).resolve().parent / "solve_stage.py"
+# The same hazard CRA_TIMEOUT_SECONDS below spells out, on the stage
+# solve that runs first: without a timeout a stalled subprocess wedges
+# the run thread forever, and the run's own 409 "already running" guard
+# then refuses every re-run of that study until the server restarts. One
+# hung stage should cost one failed stage, not the study. Set to match
+# CRA's backstop rather than measured independently: this is a ceiling
+# on pathology, not a tuned figure, and a stage needing more than ten
+# minutes is a defect to look at rather than a solve to wait for.
+FEA_TIMEOUT_SECONDS = 600
 
 CRA_PYTHON = REPO / ".venv-cra" / "Scripts" / "python.exe"
 SOLVE_CRA = Path(__file__).resolve().parent / "solve_cra.py"
@@ -241,10 +249,19 @@ def _subprocess_runner(python_exe: Path) -> Callable[[dict], dict]:
             request_path = Path(tmp) / "request.json"
             out_path = Path(tmp) / "out.json"
             request_path.write_text(json.dumps(request), encoding="utf-8")
-            completed = subprocess.run(
-                [str(python_exe), str(SOLVE_STAGE), str(request_path), str(out_path)],
-                capture_output=True, text=True,
-            )
+            try:
+                completed = subprocess.run(
+                    [str(python_exe), str(SOLVE_STAGE), str(request_path),
+                     str(out_path)],
+                    capture_output=True, text=True, timeout=FEA_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired:
+                return {
+                    "converged": False,
+                    "message": "solve_stage timed out after {} s".format(
+                        FEA_TIMEOUT_SECONDS
+                    ),
+                }
             if completed.returncode != 0 or not out_path.is_file():
                 return {
                     "converged": False,
@@ -325,7 +342,14 @@ def run_staging(
         )
     contract = geometry.load_contract(export_pair["contract"])
     arrays = geometry.mesh_arrays(contract)
-    render = subdivision.subdivide_quads(arrays["vertices"], arrays["faces"])
+    # bundle._render_mesh, not subdivide_quads directly: a triangulated
+    # export raises ValueError out of that pass ("this pass subdivides
+    # quads only"), and _render_mesh's fallback to the unsubdivided
+    # analysis mesh is the only reason the bundle can serve such an
+    # export at all. Staging must absorb exactly the meshes the bundle
+    # does, or a study can be cut and drawn but never staged -- the
+    # all-triangle Armadillo dual being precisely that case.
+    render = bundle._render_mesh(arrays["vertices"], arrays["faces"])
     # The export name (for the tessellation sidecar path), recovered from
     # the contract filename the same way geometry.available_exports names
     # it: run_staging is only ever handed the file pair, not the name.

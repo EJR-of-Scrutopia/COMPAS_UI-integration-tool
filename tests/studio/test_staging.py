@@ -833,3 +833,92 @@ def test_every_material_has_a_default_pattern():
     _, staging = studio()
     g = studio_module("generators")
     assert set(staging.DENSITIES) == set(g.DEFAULT_PATTERN)
+
+
+def triangulated_wide_contract():
+    """wide_contract's grid with every quad split into two triangles.
+
+    A compas-only import can arrive triangulated, and the Armadillo dual
+    is all triangles. subdivide_quads raises ValueError on any face that
+    is not a quad, which is exactly the case bundle._render_mesh's own
+    fallback exists to absorb.
+    """
+
+    contract = wide_contract()
+    tris = []
+    for face in contract["formGraph"]["faces"]:
+        a, b, c, d = face["vertices"]
+        tris.append({"id": len(tris), "vertices": [a, b, c]})
+        tris.append({"id": len(tris), "vertices": [a, c, d]})
+    contract["formGraph"]["faces"] = tris
+    return contract
+
+
+def test_run_staging_stages_a_triangulated_export(tmp_path):
+    """Staging must absorb a non-quad mesh the way the bundle already does.
+
+    bundle._render_mesh falls back to the analysis mesh unsubdivided when
+    subdivide_quads raises, so a triangulated export renders and cuts
+    perfectly well. staging called subdivide_quads BARE, so an export the
+    bundle serves happily could not be staged at all: run_staging raised
+    ValueError before it ever reached a stage. The all-triangle Armadillo
+    dual is exactly this case, so the pavilion could be cut and drawn but
+    never staged.
+    """
+
+    _, staging = studio()
+    contract_path = tmp_path / "Tri-contract.json"
+    contract_path.write_text(
+        json.dumps(triangulated_wide_contract()), encoding="utf-8"
+    )
+    geometry_path = tmp_path / "Tri-compas.json"
+    geometry_path.write_text("{}", encoding="utf-8")
+
+    def stub_runner(request):
+        return {
+            "converged": True,
+            "message": "",
+            "placed_face_count": len(request["placed_faces"]),
+        }
+
+    out = tmp_path / "staging.json"
+    document = staging.run_staging(
+        {"contract": contract_path, "geometry": geometry_path},
+        material="concrete",
+        pattern="bonded-courses",
+        size=1.2,
+        out_path=out,
+        runner=stub_runner,
+        include_cra=False,
+    )
+    assert out.is_file()
+    assert document["stages"], "a triangulated export must still produce stages"
+
+
+def test_fea_subprocess_runner_reports_a_timeout_instead_of_hanging(monkeypatch):
+    """A stalled FEA stage must not wedge the run thread forever.
+
+    The CRA runner already bounds its solve with CRA_TIMEOUT_SECONDS and
+    its own comment says exactly why: without a timeout a stuck solve
+    blocks the run indefinitely, and the run's 409 "already running" guard
+    then refuses every re-run of that study until the server restarts. The
+    FEA runner shells out to the same kind of long nonlinear solve and had
+    no timeout at all, so the identical hazard sat one function above the
+    comment describing it.
+    """
+
+    _, staging = studio()
+
+    def raise_timeout(*args, **kwargs):
+        assert kwargs.get("timeout") == staging.FEA_TIMEOUT_SECONDS
+        raise subprocess.TimeoutExpired(
+            cmd=args[0] if args else "solve_stage.py",
+            timeout=staging.FEA_TIMEOUT_SECONDS,
+        )
+
+    monkeypatch.setattr(staging.subprocess, "run", raise_timeout)
+    runner = staging._subprocess_runner(staging.FEA_PYTHON)
+    out = runner({"placed_faces": [0, 1]})
+    assert out["converged"] is False
+    assert "timed out" in out["message"]
+    assert str(staging.FEA_TIMEOUT_SECONDS) in out["message"]
