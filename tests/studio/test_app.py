@@ -1857,3 +1857,43 @@ def test_a_cache_hit_serves_the_cached_bytes_without_re_encoding(tmp_path, monke
         "parse it, re-encode it and re-serialise the same document"
     )
     assert hit.json() == json.loads(raw)
+
+
+def test_a_torn_bundle_cache_rebuilds_instead_of_failing_every_read(tmp_path, monkeypatch):
+    """A half-written cache file must be treated as absent, not fatal.
+
+    _read_optional called json.loads bare, so a bundle cache truncated by
+    a crash, a full disk or OneDrive mid-sync raised JSONDecodeError out
+    of every subsequent read. The study then 500s on every request until
+    someone re-uploads, even though the file is DERIVED data the studio
+    can rebuild from the export it still has.
+
+    All three _read_optional call sites read derived artifacts (the
+    bundle cache, the staging cache, fea-verification.json), every one of
+    them already has an "absent" path, and none is authored input. So
+    absent is the honest reading of corrupt here, and the rebuild that
+    follows overwrites the damage.
+    """
+
+    client, _ = make_client(tmp_path, monkeypatch)
+    import bundle
+
+    params = {"material": "concrete", "pattern": "bonded-courses", "size": 1.2}
+    warm = client.get("/api/studies/Tiny/bundle", params=params)
+    assert warm.status_code == 200, warm.text
+
+    path = bundle.bundle_path("tiny", "concrete", "bonded-courses", 1.2, 0.2)
+    assert path.is_file()
+    good = path.read_bytes()
+    path.write_bytes(good[: len(good) // 2])
+    bundle.clear_cut_memo()
+
+    healed = client.get("/api/studies/Tiny/bundle", params=params)
+    assert healed.status_code == 200, (
+        "a torn cache file must rebuild, not 500 on every read: "
+        + healed.text[:400]
+    )
+    assert healed.json()["export"] == "Tiny"
+    assert json.loads(path.read_bytes())["export"] == "Tiny", (
+        "the rebuild must have overwritten the damaged file"
+    )

@@ -182,9 +182,38 @@ def tessellation_sidecar(export_name: str) -> Path:
 
 
 def _read_optional(path: Path) -> Optional[dict]:
-    if path.is_file():
+    """A derived artifact, or None when there is not a usable one.
+
+    Every caller reads DERIVED data: the bundle cache, the staging cache,
+    fea-verification.json. Each is regenerable from the export, and each
+    caller already has an honest None path. So a file that cannot be
+    parsed is treated as one that is not there, and the rebuild that
+    follows overwrites the damage.
+
+    It used to call json.loads bare, which made a half-written file
+    permanent: the JSONDecodeError climbed into get_bundle's own
+    `except ValueError`, which exists for a malformed AUTHORED
+    tessellation, and every read of that study came back 400 with a JSON
+    parse message blaming an input that was perfectly fine. A cache
+    truncated by a crash, a full disk or a OneDrive sync could only be
+    cleared by re-uploading.
+
+    OSError is caught for the same reason and one more: is_file() and the
+    read are two calls, so a file swept between them (app.py's own
+    invalidation pass does exactly that) is a race, not a fault.
+    """
+
+    try:
+        if not path.is_file():
+            return None
         return json.loads(path.read_text(encoding="utf-8"))
-    return None
+    except ValueError:
+        # Named, not silent: the file is about to be rebuilt over, but a
+        # cache that keeps tearing is worth seeing in the log.
+        print("bundle: discarding unreadable {}; rebuilding".format(path.name))
+        return None
+    except OSError:
+        return None
 
 
 def _staging_matches(
